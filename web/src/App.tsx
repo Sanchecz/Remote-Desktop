@@ -46,6 +46,7 @@ import {
 	ScreenShare,
   Sun,
   TerminalSquare,
+	Trash2,
   Upload,
   UserPlus,
   Users,
@@ -176,7 +177,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "0.9.66";
+const LATEST_AGENT_VERSION = "0.9.67";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -381,6 +382,7 @@ function Dashboard({ user, csrf, onLogout, theme, onTheme }: { user: User; csrf:
   });
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
 	const [remoteDeviceId, setRemoteDeviceId] = useState("");
+	const [remoteNavigationKey, setRemoteNavigationKey] = useState(0);
 	const searchRef = useRef<HTMLInputElement>(null);
   const canManageUsers = user.role === "owner" || user.role === "admin";
   const roleLabel = user.role === "owner" ? "Владелец" : user.role === "admin" ? "Администратор" : user.role === "technician" ? "Техник" : "Наблюдатель";
@@ -422,7 +424,7 @@ function Dashboard({ user, csrf, onLogout, theme, onTheme }: { user: User; csrf:
     const q = query.toLowerCase().trim();
     return devices.filter((d) => {
       const matchesQuery = !q || [d.name, d.hostname, d.connectionCode, d.publicIp, d.os, d.group].some((v) => v?.toLowerCase().includes(q));
-      const matchesStatus = statusFilter === "all" || (statusFilter === "online" && d.online) || (statusFilter === "offline" && !d.online) || (statusFilter === "attention" && (!d.online || d.agentVersion !== LATEST_AGENT_VERSION));
+      const matchesStatus = statusFilter === "all" || (statusFilter === "online" && d.online) || (statusFilter === "offline" && !d.online) || (statusFilter === "attention" && (!d.online || !versionAtLeast(d.agentVersion, LATEST_AGENT_VERSION)));
       return matchesQuery && matchesStatus;
     });
   }, [devices, query, statusFilter]);
@@ -433,7 +435,11 @@ function Dashboard({ user, csrf, onLogout, theme, onTheme }: { user: User; csrf:
     onLogout();
   }
 
-  function navigateSection(next: Section) {
+  function navigateSection(next: Section, remoteTarget = "") {
+		// Normal navigation opens Remote Access without a preselected preview.
+		// Only an explicit Connect action from Devices hands a target across.
+		setRemoteDeviceId(next === "remote" ? remoteTarget : "");
+		if (next === "remote") setRemoteNavigationKey((current) => current + 1);
     setSection(next);
     setMenuOpen(false);
     const url = new URL(window.location.href);
@@ -478,7 +484,7 @@ function Dashboard({ user, csrf, onLogout, theme, onTheme }: { user: User; csrf:
         </header>
 
         <div className="content">
-          {section === "users" ? <UsersPage currentUser={user} csrf={csrf} /> : section === "remote" ? <RemoteControlPage devices={devices} currentUser={user} csrf={csrf} initialDeviceId={remoteDeviceId} onAccessChanged={updateDeviceAccess} onOpenDevice={setSelectedDevice} /> : section === "sessions" ? <SessionsPage devices={devices} onOpen={setSelectedDevice} /> : section === "terminal" ? <TerminalPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "scripts" ? <ScriptsPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "tokens" ? <TokensPage csrf={csrf} refreshKey={tokenRefreshKey} onCreate={() => setEnrollOpen(true)} /> : section === "audit" ? <AuditPage /> : section === "settings" ? <SettingsPage currentUser={user} csrf={csrf} theme={theme} onTheme={onTheme} /> : <>
+          {section === "users" ? <UsersPage currentUser={user} csrf={csrf} /> : section === "remote" ? <RemoteControlPage key={`remote-${remoteNavigationKey}`} devices={devices} currentUser={user} csrf={csrf} initialDeviceId={remoteDeviceId} onAccessChanged={updateDeviceAccess} onOpenDevice={setSelectedDevice} /> : section === "sessions" ? <SessionsPage devices={devices} onOpen={setSelectedDevice} /> : section === "terminal" ? <TerminalPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "scripts" ? <ScriptsPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "tokens" ? <TokensPage csrf={csrf} refreshKey={tokenRefreshKey} onCreate={() => setEnrollOpen(true)} /> : section === "audit" ? <AuditPage /> : section === "settings" ? <SettingsPage currentUser={user} csrf={csrf} theme={theme} onTheme={onTheme} /> : <>
           <section className="page-heading">
             <div><span className="eyebrow">ИНФРАСТРУКТУРА</span><h1>Устройства</h1><p>Все компьютеры и серверы, подключённые к RemoteIt.</p></div>
             <div className="heading-actions"><a className="secondary-button apk-download" href="/downloads/RemoteIt.apk" download><Download size={17} /> Android APK</a><button className="primary-button" onClick={() => setEnrollOpen(true)}><Plus size={18} /> Добавить устройство</button></div>
@@ -487,8 +493,8 @@ function Dashboard({ user, csrf, onLogout, theme, onTheme }: { user: User; csrf:
           <section className="stats-grid">
             <Stat icon={Activity} label="В сети" value={String(online)} note={`из ${devices.length} устройств`} tone="green" />
             <Stat icon={Boxes} label="Всего устройств" value={String(devices.length)} note="лимит 300" tone="blue" />
-            <Stat icon={AlertTriangle} label="Требуют внимания" value={String(devices.filter((d) => !d.online || d.agentVersion !== LATEST_AGENT_VERSION).length)} note="не в сети или старый агент" tone="amber" />
-            <Stat icon={CheckCircle2} label="Актуальный агент" value={String(devices.filter((d) => d.agentVersion === LATEST_AGENT_VERSION).length)} note={`версия ${LATEST_AGENT_VERSION}`} tone="violet" />
+            <Stat icon={AlertTriangle} label="Требуют внимания" value={String(devices.filter((d) => !d.online || !versionAtLeast(d.agentVersion, LATEST_AGENT_VERSION)).length)} note="не в сети или старый агент" tone="amber" />
+            <Stat icon={CheckCircle2} label="Актуальный агент" value={String(devices.filter((d) => versionAtLeast(d.agentVersion, LATEST_AGENT_VERSION)).length)} note={`версия ${LATEST_AGENT_VERSION}`} tone="violet" />
           </section>
 
           <section className="device-panel devices-panel">
@@ -498,7 +504,7 @@ function Dashboard({ user, csrf, onLogout, theme, onTheme }: { user: User; csrf:
               <table>
                 <thead><tr><th>Устройство</th><th>Remote ID</th><th>Система</th><th>IP-адрес</th><th>Пользователь</th><th>Последняя активность</th><th>Статус</th><th /></tr></thead>
                 <tbody>
-                  {loading && devices.length === 0 ? <LoadingRows /> : filtered.map((device) => <DeviceRow key={device.id} device={device} onOpen={() => setSelectedDevice(device)} onRemote={() => { setRemoteDeviceId(device.id); navigateSection("remote"); }} />)}
+                  {loading && devices.length === 0 ? <LoadingRows /> : filtered.map((device) => <DeviceRow key={device.id} device={device} onOpen={() => setSelectedDevice(device)} onRemote={() => navigateSection("remote", device.id)} />)}
                 </tbody>
               </table>
               {!loading && filtered.length === 0 && <div className="empty-state"><div className="empty-icon"><Monitor size={30} /></div><h3>{query || statusFilter !== "all" ? "Ничего не найдено" : "Добавьте первое устройство"}</h3><p>{query || statusFilter !== "all" ? "Измените поиск или фильтр состояния." : "Создайте токен установки — агент автоматически появится здесь."}</p>{devices.length === 0 && !query && statusFilter === "all" && <button className="secondary-button" onClick={() => setEnrollOpen(true)}><Plus size={17} /> Создать токен</button>}</div>}
@@ -626,7 +632,8 @@ function DeviceOSIcon({ os, size = 19 }: { os: string; size?: number }) {
 function DeviceRow({ device, onOpen, onRemote }: { device: Device; onOpen: () => void; onRemote: () => void }) {
   const remoteAvailable = device.accessGranted && device.online && device.os.toLowerCase().includes("windows") && versionAtLeast(device.agentVersion, "0.6.0");
   const remoteTitle = !device.accessGranted ? "Сначала разблокируйте устройство" : remoteAvailable ? "Открыть удалённый доступ" : "Удалённый доступ сейчас недоступен";
-  return <tr><td><div className="device-name"><span className={`device-icon ${device.online ? "online" : ""}`}><DeviceOSIcon os={device.os} /></span><div><strong>{device.name}{device.accessProtected && <LockKeyhole className="inline-device-lock" size={13} aria-label="Защищено паролем" />}</strong><small>{device.hostname || device.group}</small></div></div></td><td><code>{device.connectionCode}</code></td><td><div className="stacked"><strong>{device.os || "Неизвестно"}</strong><small>{device.osVersion || device.arch || "—"}{device.agentVersion !== LATEST_AGENT_VERSION ? ` · агент ${device.agentVersion || "старый"}` : ""}</small></div></td><td><div className="stacked"><strong>{device.publicIp || "—"}</strong><small>{device.localIps?.[0] || "нет локального IP"}</small></div></td><td>{device.currentUser || "—"}</td><td>{device.online ? "сейчас" : formatRelative(device.lastSeen)}</td><td><span className={`status-pill ${device.online ? "is-online" : "is-offline"}`}><span />{device.online ? "В сети" : "Не в сети"}</span></td><td><div className="row-actions"><button className="row-remote" aria-label={`Удалённый доступ — ${device.name}`} title={remoteTitle} disabled={!remoteAvailable} onClick={onRemote}><ScreenShare size={16} /><span>Подключиться</span></button><button className="row-menu" aria-label="Открыть устройство" onClick={onOpen}><MoreHorizontal size={18} /></button></div></td></tr>;
+  const oldAgent = !versionAtLeast(device.agentVersion, LATEST_AGENT_VERSION);
+  return <tr><td><div className="device-name"><span className={`device-icon ${device.online ? "online" : ""}`}><DeviceOSIcon os={device.os} /></span><div><strong>{device.name}{device.accessProtected && <LockKeyhole className="inline-device-lock" size={13} aria-label="Защищено паролем" />}</strong><small>{device.hostname || device.group}</small></div></div></td><td><code>{device.connectionCode}</code></td><td><div className="stacked"><strong>{device.os || "Неизвестно"}</strong><small>{device.osVersion || device.arch || "—"}{oldAgent ? ` · агент ${device.agentVersion || "старый"}` : ""}</small></div></td><td><div className="stacked"><strong>{device.publicIp || "—"}</strong><small>{device.localIps?.[0] || "нет локального IP"}</small></div></td><td>{device.currentUser || "—"}</td><td>{device.online ? "сейчас" : formatRelative(device.lastSeen)}</td><td><div className="device-status-stack"><span className={`status-pill ${device.online ? "is-online" : "is-offline"}`}><span />{device.online ? "В сети" : "Не в сети"}</span>{oldAgent && <span className="agent-version-warning">{device.agentVersion ? `Старый Agent ${device.agentVersion}` : "Версия Agent неизвестна"}</span>}</div></td><td><div className="row-actions"><button className="row-remote" aria-label={`Удалённый доступ — ${device.name}`} title={remoteTitle} disabled={!remoteAvailable} onClick={onRemote}><ScreenShare size={16} /><span>Подключиться</span></button><button className="row-menu" aria-label="Открыть устройство" onClick={onOpen}><MoreHorizontal size={18} /></button></div></td></tr>;
 }
 
 function LoadingRows() {
@@ -661,8 +668,7 @@ function SessionsPage({ devices, onOpen }: { devices: Device[]; onOpen: (device:
 }
 
 function RemoteControlPage({ devices, currentUser, csrf, initialDeviceId, onAccessChanged, onOpenDevice }: { devices: Device[]; currentUser: User; csrf: string; initialDeviceId: string; onAccessChanged: (deviceId: string, accessProtected: boolean, accessGranted: boolean) => void; onOpenDevice: (device: Device) => void }) {
-  const firstAvailable = useCallback(() => devices.find((item) => item.accessGranted && item.online && item.os.toLowerCase().includes("windows") && versionAtLeast(item.agentVersion, "0.6.0"))?.id || devices[0]?.id || "", [devices]);
-	const [deviceId, setDeviceId] = useState(() => initialDeviceId || firstAvailable());
+	const [deviceId, setDeviceId] = useState(() => initialDeviceId || "");
 	const [controlSessionId, setControlSessionId] = useState("");
 	const appliedInitialDeviceId = useRef("");
 
@@ -675,18 +681,22 @@ function RemoteControlPage({ devices, currentUser, csrf, initialDeviceId, onAcce
       setDeviceId(initialDeviceId);
       return;
     }
-    if (!devices.some((item) => item.id === deviceId)) setDeviceId(firstAvailable());
-  }, [devices, deviceId, firstAvailable, initialDeviceId]);
+		if (deviceId && !devices.some((item) => item.id === deviceId)) {
+			setControlSessionId("");
+			setDeviceId("");
+		}
+  }, [devices, deviceId, initialDeviceId]);
 
 	const switchDevice = (nextDeviceId: string) => {
-		if (nextDeviceId === deviceId) return;
 		// A preview owns and deletes its session in effect cleanup. Once a preview
 		// has been handed to the control workspace, the page owns that session and
 		// ends it explicitly so the old Agent stops immediately instead of waiting
 		// for the 45 second viewer timeout.
 		const previousControlSession = controlSessionId;
 		setControlSessionId("");
-		setDeviceId(nextDeviceId);
+		// Repeating the click is an explicit collapse action. Unmounting the
+		// preview also closes its server-side session immediately.
+		setDeviceId(nextDeviceId === deviceId ? "" : nextDeviceId);
 		if (previousControlSession) {
 			void fetch(`/api/desktop-sessions/${previousControlSession}`, { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": csrf } });
 		}
@@ -709,7 +719,8 @@ function RemoteControlPage({ devices, currentUser, csrf, initialDeviceId, onAcce
       </aside>
       <main className="remote-control-stage">
         {device && (!device.accessGranted ? <DeviceAccessPanel key={`access-${device.id}`} device={device} currentUser={currentUser} csrf={csrf} onChanged={onAccessChanged} gate /> : controlSessionId ? <RemoteDesktopModal key={`control-${device.id}-${controlSessionId}`} device={device} csrf={csrf} initialSessionId={controlSessionId} embedded onOpenFiles={() => onOpenDevice(device)} onClose={() => setControlSessionId("")} /> : <RemoteDesktopPreview key={`preview-${device.id}`} device={device} csrf={csrf} onConnect={setControlSessionId} />)}
-        {!controlSessionId && <div className="remote-control-help"><div><MousePointer2 size={18} /><span><strong>Мышь</strong><small>Нажмите на предпросмотр, затем управляйте курсором и колёсиком.</small></span></div><div><TerminalSquare size={18} /><span><strong>Клавиатура</strong><small>Физическая клавиатура работает сразу; на Android используйте кнопку клавиатуры в сеансе.</small></span></div><div><ShieldCheck size={18} /><span><strong>Контроль доступа</strong><small>Пассивный предпросмотр не беспокоит пользователя. При первом управляющем действии Agent покажет уведомление, а события сохранятся в журнале.</small></span></div></div>}
+		{!device && <div className="remote-control-placeholder"><span className="remote-control-placeholder-icon"><ScreenShare size={30} /></span><h2>Выберите компьютер</h2><p>Предпросмотр не запускается автоматически. Нажмите на компьютер слева, чтобы открыть живой экран; нажмите повторно, чтобы свернуть его.</p></div>}
+		{device && !controlSessionId && <div className="remote-control-help"><div><MousePointer2 size={18} /><span><strong>Мышь</strong><small>Нажмите на предпросмотр, затем управляйте курсором и колёсиком.</small></span></div><div><TerminalSquare size={18} /><span><strong>Клавиатура</strong><small>Физическая клавиатура работает сразу; на Android используйте кнопку клавиатуры в сеансе.</small></span></div><div><ShieldCheck size={18} /><span><strong>Контроль доступа</strong><small>Пассивный предпросмотр не беспокоит пользователя. При первом управляющем действии Agent покажет уведомление, а события сохранятся в журнале.</small></span></div></div>}
       </main>
     </section>}
   </>;
@@ -786,9 +797,13 @@ function RemoteConsole({ device, currentUser, csrf, compact = false }: { device:
   const canShell = currentUser.role === "owner" || currentUser.role === "admin";
 	const quickActions = diagnosticCommands(device.os, shell);
   const visibleJobs = jobs.filter((job) => !["files_list", "files_read", "files_write"].includes(job.type));
-	const shellOptions = isWindows ? [{ id: "powershell", label: "PowerShell" }, { id: "cmd", label: "CMD" }] : isMac ? [{ id: "zsh", label: "Zsh" }, { id: "sh", label: "Shell" }] : [{ id: "bash", label: "Bash" }, { id: "sh", label: "Shell" }];
+	const shellOptions = isWindows ? [{ id: "powershell", label: "PowerShell" }, { id: "cmd", label: "CMD" }] : isMac ? [{ id: "zsh", label: "Zsh" }, { id: "bash", label: "Bash" }] : [{ id: "bash", label: "Bash" }];
 	const shellLabel = shellOptions.find((item) => item.id === shell)?.label || "Shell";
-	const prompt = shell === "powershell" ? "PS>" : shell === "cmd" ? "C:\\>" : "$";
+	const terminalUser = (device.currentUser || (isWindows ? "Administrator" : "admin")).replace(/^.*[\\/]/, "").replace(/\$$/, "") || "admin";
+	const terminalHost = device.hostname || device.name;
+	const platformClass = isWindows ? "windows" : isMac ? "macos" : "linux";
+	const prompt = shell === "powershell" ? "PS C:\\>" : shell === "cmd" ? "C:\\>" : isMac && shell === "zsh" ? `${terminalUser}@${terminalHost} ~ %` : `${terminalUser}@${terminalHost}:~$`;
+	const terminalTitle = shell === "powershell" ? `Windows PowerShell — ${device.name}` : shell === "cmd" ? `Командная строка — ${device.name}` : `${terminalUser}@${terminalHost}: ~ — ${shellLabel}`;
 	const placeholder = shell === "powershell" ? "Get-ComputerInfo | Select-Object WindowsProductName, OsVersion" : shell === "cmd" ? "systeminfo" : isMac ? "sw_vers && uptime" : "uname -a && uptime";
 	const memoryPercent = device.memoryBytes ? Math.min(100, Math.round(device.memoryUsedBytes / device.memoryBytes * 100)) : 0;
 	const diskUsed = Math.max(0, device.diskTotalBytes - device.diskFreeBytes);
@@ -846,8 +861,8 @@ function RemoteConsole({ device, currentUser, csrf, compact = false }: { device:
     <div className="console-toolbar"><div className="console-device"><span className={`device-icon ${device.online ? "online" : ""}`}><DeviceOSIcon os={device.os} size={20} /></span><span><span className={`status-pill ${device.online ? "is-online" : "is-offline"}`}><span />{device.online ? "Агент в сети" : "Задание будет ждать агента"}</span><strong>{device.name}</strong><small>{device.os} {device.osVersion} · Remote ID {device.connectionCode}</small></span></div><button className="secondary-button" disabled={sending} onClick={() => void createJob("inventory")}><RefreshCw size={16} className={sending ? "spin" : ""} /> Обновить данные</button></div>
     <div className="terminal-resource-strip"><TerminalMetric icon={Cpu} label="Загрузка ЦП" value={`${Math.round(device.cpuLoadPercent || 0)}%`} percent={device.cpuLoadPercent || 0} /><TerminalMetric icon={Database} label="Память" value={device.memoryBytes ? `${memoryPercent}% · ${formatBytes(device.memoryUsedBytes)}` : "Ожидаем данные"} percent={memoryPercent} /><TerminalMetric icon={HardDrive} label="Диск" value={device.diskTotalBytes ? `${diskPercent}% · ${formatBytes(device.diskFreeBytes)} свободно` : "Ожидаем данные"} percent={diskPercent} /><TerminalMetric icon={Clock3} label="Время работы" value={device.uptimeSeconds ? formatUptime(device.uptimeSeconds) : "Ожидаем данные"} /></div>
     {canShell ? <form className="terminal-form" onSubmit={submit}>
-      <div className="terminal-shell-bar"><div className="terminal-shell-tabs" role="tablist" aria-label="Командная оболочка">{shellOptions.map((item) => <button type="button" role="tab" aria-selected={shell === item.id} className={shell === item.id ? "active" : ""} key={item.id} onClick={() => { setShell(item.id); setCommand(""); }}><TerminalSquare size={15} />{item.label}</button>)}</div><span><ShieldCheck size={14} /> UTF-8</span></div>
-      <div className="terminal-workspace"><div className="terminal-main"><div className="terminal-screen"><div className="terminal-title"><span /><span /><span /><strong>{shellLabel} · {device.name}</strong></div><div className="terminal-input"><span>{prompt}</span><textarea value={command} onChange={(event) => setCommand(event.target.value)} placeholder={placeholder} maxLength={8192} rows={compact ? 3 : 11} spellCheck={false} /></div></div><div className="terminal-quick-row">{quickActions.map((action) => <button type="button" key={action.label} onClick={() => setCommand(action.command)}><FileCode2 size={14} />{action.label}</button>)}</div></div><aside className="terminal-command-library"><header><span>Быстрые команды</span><small>{shellLabel}</small></header>{quickActions.map((action) => <button type="button" key={action.label} onClick={() => setCommand(action.command)}><span><FileCode2 size={14} /><strong>{action.label}</strong></span><code>{action.command}</code></button>)}</aside></div>
+      <div className="terminal-shell-bar">{shellOptions.length > 1 ? <div className="terminal-shell-tabs" role="tablist" aria-label="Командная оболочка">{shellOptions.map((item) => <button type="button" role="tab" aria-selected={shell === item.id} className={shell === item.id ? "active" : ""} key={item.id} onClick={() => { setShell(item.id); setCommand(""); }}><TerminalSquare size={15} />{item.label}</button>)}</div> : <span className="terminal-shell-single"><TerminalSquare size={15} /> Bash</span>}<span><ShieldCheck size={14} /> UTF-8</span></div>
+      <div className="terminal-workspace"><div className="terminal-main"><div className={`terminal-screen terminal-platform-${platformClass} terminal-shell-${shell}`}><div className="terminal-title">{isMac ? <><span /><span /><span /></> : <TerminalSquare size={14} />}<strong>{terminalTitle}</strong></div><div className="terminal-input"><span>{prompt}</span><textarea value={command} onChange={(event) => setCommand(event.target.value)} placeholder={placeholder} maxLength={8192} rows={compact ? 3 : 11} spellCheck={false} /></div></div><div className="terminal-quick-row">{quickActions.map((action) => <button type="button" key={action.label} onClick={() => setCommand(action.command)}><FileCode2 size={14} />{action.label}</button>)}</div></div><aside className="terminal-command-library"><header><span>Быстрые команды</span><small>{shellLabel}</small></header>{quickActions.map((action) => <button type="button" key={action.label} onClick={() => setCommand(action.command)}><span><FileCode2 size={14} /><strong>{action.label}</strong></span><code>{action.command}</code></button>)}</aside></div>
       <div className="terminal-actions"><label><span>Тайм-аут</span><select value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))}><option value={15}>15 секунд</option><option value={30}>30 секунд</option><option value={60}>60 секунд</option></select></label><button className="primary-button" disabled={sending || !command.trim()}>{sending ? <RefreshCw size={17} className="spin" /> : <Play size={17} />} Выполнить</button></div>
       <div className={`notice terminal-notice ${device.privileged ? "" : "limited-notice"}`}><ShieldCheck size={17} /><span>{device.privileged ? "Команда выполняется с системными правами." : "Агент установлен без прав администратора: команда ограничена правами текущего пользователя."} Её запуск, автор и результат фиксируются в RemoteIt.</span></div>
     </form> : <div className="notice"><ShieldCheck size={17} /><span>Удалённые команды доступны владельцу и администраторам. Техник может запрашивать диагностические данные.</span></div>}
@@ -867,40 +882,48 @@ function TerminalMetric({ icon: Icon, label, value, percent }: { icon: typeof Cp
 }
 
 function diagnosticCommands(osName: string, shell = "") {
-	if (osName.toLowerCase().includes("windows") && shell === "cmd") return [
+	const normalizedOS = osName.toLowerCase();
+	if (normalizedOS.includes("windows") && shell === "cmd") return [
 		{ label: "Система", command: "systeminfo" },
 		{ label: "Сеть", command: "ipconfig /all" },
 		{ label: "Процессы", command: "tasklist" },
 		{ label: "Службы", command: "sc query state= all" },
 		{ label: "Диски", command: "wmic logicaldisk get Caption,FileSystem,FreeSpace,Size 2>nul || fsutil volume diskfree C:" }
 	];
-	if (osName.toLowerCase().includes("windows")) return [
+	if (normalizedOS.includes("windows")) return [
 		{ label: "Система", command: "Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsArchitecture,CsName,CsTotalPhysicalMemory | Format-List" },
 		{ label: "Сеть", command: "Get-NetIPConfiguration | Format-List InterfaceAlias,IPv4Address,IPv4DefaultGateway,DNSServer" },
 		{ label: "Процессы", command: "Get-Process | Sort-Object CPU -Descending | Select-Object -First 20 Name,Id,CPU,WorkingSet | Format-Table -AutoSize" },
 		{ label: "Службы", command: "Get-Service | Where-Object Status -eq 'Stopped' | Select-Object -First 40 Name,DisplayName,Status | Format-Table -AutoSize" },
 		{ label: "Диски", command: "Get-Volume | Select-Object DriveLetter,FileSystemLabel,FileSystem,HealthStatus,SizeRemaining,Size | Format-Table -AutoSize" }
 	];
+	if (normalizedOS.includes("mac") || normalizedOS.includes("darwin")) return [
+		{ label: "Система", command: "sw_vers; echo; uname -m; echo; uptime" },
+		{ label: "Сеть", command: "ifconfig; echo; netstat -rn" },
+		{ label: "Процессы", command: "ps aux -r | head -n 21" },
+		{ label: "Службы", command: "launchctl list | head -n 50" },
+		{ label: "Диски", command: "df -h; echo; diskutil list" }
+	];
 	return [
-		{ label: "Система", command: "uname -a; echo; uptime; echo; (cat /etc/os-release 2>/dev/null || true)" },
-		{ label: "Сеть", command: "(ip -brief address 2>/dev/null || ifconfig 2>/dev/null); echo; (ip route 2>/dev/null || netstat -rn 2>/dev/null)" },
-		{ label: "Процессы", command: "ps aux --sort=-%cpu 2>/dev/null | head -n 21 || ps aux | head -n 21" },
-		{ label: "Службы", command: "systemctl --failed --no-pager 2>/dev/null || launchctl list 2>/dev/null | head -n 50 || true" },
-		{ label: "Диски", command: "df -h; echo; (lsblk 2>/dev/null || diskutil list 2>/dev/null || true)" }
+		{ label: "Система", command: "uname -a; echo; uptime; echo; cat /etc/os-release 2>/dev/null" },
+		{ label: "Сеть", command: "ip -brief address; echo; ip route" },
+		{ label: "Процессы", command: "ps aux --sort=-%cpu | head -n 21" },
+		{ label: "Службы", command: "systemctl --failed --no-pager" },
+		{ label: "Диски", command: "df -h; echo; lsblk" }
 	];
 }
 
 function DeviceAccessPanel({ device, currentUser, csrf, onChanged, gate = false }: { device: Device; currentUser: User; csrf: string; onChanged: (deviceId: string, accessProtected: boolean, accessGranted: boolean) => void; gate?: boolean }) {
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
-  const [editing, setEditing] = useState(!device.accessProtected);
+  const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const isOwner = currentUser.role === "owner";
 
   useEffect(() => {
     setPassword(""); setConfirmation(""); setError("");
-    setEditing(!device.accessProtected);
+    setEditing(false);
   }, [device.id, device.accessProtected]);
 
   async function submit(event: FormEvent) {
@@ -928,7 +951,7 @@ function DeviceAccessPanel({ device, currentUser, csrf, onChanged, gate = false 
     try {
       await api(`/api/devices/${device.id}/access-protection`, { method: "DELETE" }, csrf);
       onChanged(device.id, false, true);
-      setEditing(true);
+      setEditing(false);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Не удалось снять защиту"); }
     finally { setBusy(false); }
   }
@@ -943,14 +966,16 @@ function DeviceAccessPanel({ device, currentUser, csrf, onChanged, gate = false 
   }
 
   if (!device.accessProtected && !isOwner) return null;
-  const title = isOwner ? device.accessProtected ? "Устройство защищено вами" : "Закрыть устройство паролем" : device.accessGranted ? "Доступ разблокирован" : "Требуется пароль устройства";
+  const title = isOwner ? device.accessProtected ? "Пароль устройства включён" : "Доступ открыт по ролям" : device.accessGranted ? "Доступ разблокирован" : "Требуется пароль устройства";
   const description = isOwner
-    ? "Только главный владелец RemoteIt сможет управлять устройством без пароля. Администраторы и техники должны будут разблокировать его отдельно."
+    ? device.accessProtected
+      ? "Владелец подключается без пароля. Другим администраторам и техникам потребуется пароль этого устройства."
+      : "Сейчас владельцы, администраторы и техники могут подключаться согласно своей роли. При необходимости владелец может задать отдельный пароль."
     : device.accessGranted ? "Доступ действует четыре часа только в этой сессии панели." : "Владелец RemoteIt ограничил доступ. Пароль не передаётся агенту и не хранится на компьютере.";
 
-  return <section className={`device-access-card ${gate ? "access-gate" : ""}`}>
-    <div className="device-access-heading"><span className="device-access-icon"><LockKeyhole size={21} /></span><div><span className="eyebrow">ПЕРСОНАЛЬНАЯ ЗАЩИТА</span><h3>{title}</h3><p>{description}</p></div></div>
-    {currentUser.role === "viewer" ? <div className="notice limited-notice"><ShieldCheck size={17} /><span>У вашей учётной записи нет прав на разблокировку и управление устройствами.</span></div> : isOwner && device.accessProtected && !editing ? <div className="device-access-actions"><span className="protected-state"><CheckCircle2 size={17} /> Пароль включён</span><button type="button" className="secondary-button" disabled={busy} onClick={() => setEditing(true)}><KeyRound size={16} /> Сменить пароль</button><button type="button" className="danger-link" disabled={busy} onClick={() => void removeProtection()}>Снять защиту</button></div> : !isOwner && device.accessGranted ? <div className="device-access-actions"><span className="protected-state"><CheckCircle2 size={17} /> Разблокировано для {currentUser.username}</span><button type="button" className="secondary-button" disabled={busy} onClick={() => void lockNow()}><LockKeyhole size={16} /> Заблокировать сейчас</button></div> : <form className="device-access-form" onSubmit={submit}><label><span>{isOwner ? device.accessProtected ? "Новый пароль устройства" : "Пароль устройства" : "Пароль устройства"}</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} maxLength={128} autoComplete="new-password" required placeholder="От 8 до 128 символов" /></label>{isOwner && <label><span>Повторите пароль</span><input type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} minLength={8} maxLength={128} autoComplete="new-password" required placeholder="Введите пароль ещё раз" /></label>}<div className="device-access-submit"><button className="primary-button" disabled={busy || password.length < 8 || (isOwner && password !== confirmation)}>{busy ? <RefreshCw size={16} className="spin" /> : <KeyRound size={16} />} {isOwner ? device.accessProtected ? "Сохранить новый пароль" : "Включить защиту" : "Разблокировать"}</button>{isOwner && device.accessProtected && <button type="button" className="secondary-button" onClick={() => { setEditing(false); setPassword(""); setConfirmation(""); setError(""); }}>Отмена</button>}</div></form>}
+  return <section className={`device-access-card ${device.accessProtected ? "is-protected" : "is-open"} ${gate ? "access-gate" : ""}`}>
+    <div className="device-access-heading"><span className="device-access-icon">{device.accessProtected ? <LockKeyhole size={21} /> : <ShieldCheck size={21} />}</span><div><span className="eyebrow">ДОСТУП К УСТРОЙСТВУ</span><h3>{title}</h3><p>{description}</p></div></div>
+    {currentUser.role === "viewer" ? <div className="notice limited-notice"><ShieldCheck size={17} /><span>У вашей учётной записи нет прав на разблокировку и управление устройствами.</span></div> : isOwner && !device.accessProtected && !editing ? <div className="device-access-actions"><span className="open-access-state"><CheckCircle2 size={17} /> Отдельный пароль не задан</span><button type="button" className="secondary-button" disabled={busy} onClick={() => setEditing(true)}><KeyRound size={16} /> Настроить пароль</button></div> : isOwner && device.accessProtected && !editing ? <div className="device-access-actions"><span className="protected-state"><CheckCircle2 size={17} /> Пароль включён</span><button type="button" className="secondary-button" disabled={busy} onClick={() => setEditing(true)}><KeyRound size={16} /> Сменить пароль</button><button type="button" className="danger-link" disabled={busy} onClick={() => void removeProtection()}>Снять защиту</button></div> : !isOwner && device.accessGranted ? <div className="device-access-actions"><span className="protected-state"><CheckCircle2 size={17} /> Разблокировано для {currentUser.username}</span><button type="button" className="secondary-button" disabled={busy} onClick={() => void lockNow()}><LockKeyhole size={16} /> Заблокировать сейчас</button></div> : <form className="device-access-form" onSubmit={submit}><label><span>{isOwner ? device.accessProtected ? "Новый пароль устройства" : "Пароль устройства" : "Пароль устройства"}</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} maxLength={128} autoComplete="new-password" required placeholder="От 8 до 128 символов" /></label>{isOwner && <label><span>Повторите пароль</span><input type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} minLength={8} maxLength={128} autoComplete="new-password" required placeholder="Введите пароль ещё раз" /></label>}<div className="device-access-submit"><button className="primary-button" disabled={busy || password.length < 8 || (isOwner && password !== confirmation)}>{busy ? <RefreshCw size={16} className="spin" /> : <KeyRound size={16} />} {isOwner ? device.accessProtected ? "Сохранить новый пароль" : "Включить защиту" : "Разблокировать"}</button>{isOwner && <button type="button" className="secondary-button" onClick={() => { setEditing(false); setPassword(""); setConfirmation(""); setError(""); }}>Отмена</button>}</div></form>}
     {error && <div className="form-error">{error}</div>}
     {isOwner && <small className="device-access-footnote">Главный владелец не вводит этот пароль и не может случайно заблокировать собственный доступ.</small>}
   </section>;
@@ -987,13 +1012,24 @@ function DeviceDrawer({ device, currentUser, csrf, onClose, onAccessChanged, onR
 		} finally { setSaving(false); }
 	}
 
+	async function forgetDevice() {
+		if (!window.confirm(`Удалить «${device.name}» только из панели RemoteIt? Локальный Agent на выключенном компьютере останется установленным, но его текущие данные доступа будут отозваны и устройство сразу исчезнет из панели.`)) return;
+		setSaving(true); setError("");
+		try {
+			await api(`/api/devices/${device.id}/forget`, { method: "DELETE" }, csrf);
+			onDeleted();
+		} catch (reason) {
+			setError(reason instanceof Error ? reason.message : "Не удалось удалить устройство из панели");
+		} finally { setSaving(false); }
+	}
+
   return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="device-drawer"><header><div><span className="eyebrow">REMOTE ID {device.connectionCode}</span><h2>{device.name}</h2><span className={`status-pill ${device.pendingRemoval ? "waiting" : device.online ? "is-online" : "is-offline"}`}><span />{device.pendingRemoval ? "Ожидает удаления агента" : device.online ? "В сети" : `Не в сети · ${formatRelative(device.lastSeen)}`}</span></div><button className="icon-button" onClick={onClose}><X size={19} /></button></header><div className="drawer-scroll">
     <section className="device-facts"><div><span>Система</span><strong>{device.os}</strong><small>{device.osVersion || device.arch}</small></div><div><span>Публичный IP</span><strong>{device.publicIp || "—"}</strong><small>{device.localIps?.join(", ") || "локальный IP неизвестен"}</small></div><div><span>Пользователь</span><strong>{device.currentUser || "—"}</strong><small>{device.hostname || "имя хоста неизвестно"}</small></div><div><span>Права агента</span><strong>{device.privileged ? "Системные" : device.installMode === "user" ? "Пользовательские" : "Не определены"}</strong><small>{device.installMode === "user" ? "Работает только в сеансе пользователя" : "Фоновая системная служба"}</small></div><div><span>Версия агента</span><strong>{device.agentVersion || "—"}</strong><small>{device.agentVersion === LATEST_AGENT_VERSION ? "актуальная версия" : `доступна ${LATEST_AGENT_VERSION}`}</small></div><div><span>Ресурсы</span><strong>{device.memoryBytes ? formatBytes(device.memoryBytes) + " RAM" : "—"}</strong><small>{device.diskTotalBytes ? `${formatBytes(device.diskFreeBytes)} свободно из ${formatBytes(device.diskTotalBytes)}` : device.cpuModel || "данные ожидаются"}</small></div></section>
     {(currentUser.role === "owner" || device.accessProtected) && <DeviceAccessPanel device={device} currentUser={currentUser} csrf={csrf} onChanged={onAccessChanged} />}
     {canOperate && <RemoteDesktopPreview device={device} csrf={csrf} onConnect={setDesktopSessionId} />}
     {desktopSessionId && <RemoteDesktopModal device={device} csrf={csrf} initialSessionId={desktopSessionId} onClose={() => setDesktopSessionId("")} />}
     {canOperate && <form className="rename-form" onSubmit={rename}><label><span>Название в RemoteIt</span><input value={name} onChange={(event) => setName(event.target.value)} maxLength={64} required /></label><label><span>Группа</span><input value={group} onChange={(event) => setGroup(event.target.value)} maxLength={100} required /></label><div className="device-edit-actions"><button className="secondary-button" disabled={saving || (name.trim() === device.name && group.trim() === device.group)}><Save size={16} /> Сохранить</button></div>{error && <div className="form-error">{error}</div>}</form>}
-    {canDelete && device.accessGranted && <section className="device-removal-card"><div><strong>Полное удаление устройства</strong><small>{supportsConfirmedUninstall ? "RemoteIt сначала деинсталлирует Agent, службу, автозапуск и локальные данные на компьютере. Только после подтверждения устройство исчезнет из панели." : "Старый Agent не умеет подтверждать локальную очистку. Сначала установите RemoteIt Agent 0.6.0 поверх текущей версии — Remote ID сохранится автоматически."}</small></div>{device.pendingRemoval && <div className="notice limited-notice"><Clock3 size={17} /><span>Команда удаления уже в очереди и выполнится при следующем подключении агента.</span></div>}<div className="device-removal-actions"><button type="button" className="danger-button" disabled={saving || device.pendingRemoval || !supportsConfirmedUninstall} onClick={() => void removeDevice()}><Ban size={16} /> {supportsConfirmedUninstall ? "Удалить Agent и устройство" : "Сначала обновите Agent до 0.6.0"}</button></div></section>}
+    {canDelete && device.accessGranted && <section className="device-removal-card"><div><strong>Удаление устройства</strong><small>{supportsConfirmedUninstall ? "Можно дождаться подтверждённой деинсталляции Agent либо сразу убрать недоступный компьютер только из панели." : "Эту версию Agent нельзя деинсталлировать с подтверждением, но устройство можно сразу удалить только из панели."}</small></div>{device.pendingRemoval && <div className="notice limited-notice"><Clock3 size={17} /><span>Удаление Agent ожидает следующего подключения. Это не загрузка: команду можно оставить в очереди либо удалить запись из панели прямо сейчас.</span></div>}<div className="device-removal-actions"><button type="button" className="danger-button" disabled={saving || device.pendingRemoval || !supportsConfirmedUninstall} onClick={() => void removeDevice()}><Ban size={16} /> {supportsConfirmedUninstall ? "Удалить Agent и устройство" : "Подтверждённое удаление недоступно"}</button><button type="button" className="secondary-button forget-device-button" disabled={saving} onClick={() => void forgetDevice()}><Trash2 size={16} /> Удалить только из панели</button></div></section>}
     {canOperate && <RemoteFiles device={device} csrf={csrf} />}
     {canOperate && <RemoteConsole device={device} currentUser={currentUser} csrf={csrf} compact />}
   </div></aside></div>;
@@ -1722,13 +1758,13 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		transformOrigin: "center center",
 	} : undefined;
 
-  const workspace = <section className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""}`}><header><div><span className="eyebrow">ЗАЩИЩЁННЫЙ СЕАНС</span><h2>{device.name}</h2><small><span className={`desktop-live-dot ${status?.agentConnected ? "active" : ""}`} />{status?.agentConnected ? `Экран ${status.frameWidth || "—"}×${status.frameHeight || "—"} · ${status.controlEnabled ? "управление активно" : "предпросмотр — нажмите на экран для управления"}` : "Ожидание настольного Agent…"}</small></div><div className="desktop-actions"><span className="remote-mode-badge">{pointerMode === "direct" ? "Прямое касание" : "Тачпад"}</span><label className="remote-scale-control" title="Частота кадров"><span>FPS</span><select value={targetFPS} onChange={(event) => updateTargetFPS(event.target.value as typeof targetFPS)}><option value="auto">Авто · 30</option><option value="15">15</option><option value="30">30</option><option value="60">60 · Плавность</option></select></label><label className="remote-scale-control" title="Масштаб изображения удалённого экрана"><span>Масштаб</span><select value={screenScale} onChange={(event) => setScreenScale(event.target.value as typeof screenScale)}><option value="fit">По размеру</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option><option value="125">125%</option><option value="150">150%</option></select></label><button className="remote-header-tool" onClick={() => viewportRef.current?.requestFullscreen()} title="На весь экран"><Maximize2 size={17} /><span>Полный экран</span></button><button className="remote-header-tool" onClick={sendCtrlAltDelete} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button><button className="remote-header-tool" onClick={() => void pasteClipboard()} title="Вставить текст из локального буфера"><Clipboard size={17} /><span>Буфер</span></button><button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => { setKeyboardOpen((open) => !open); window.setTimeout(() => mobileKeyboardRef.current?.focus(), 50); }} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>{onOpenFiles && <button className="remote-header-tool" onClick={onOpenFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>}<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button></div></header><div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale === "fit" ? "fit" : "fixed"}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")}>
+  const workspace = <section className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""}`}><header><div><span className="eyebrow">ЗАЩИЩЁННЫЙ СЕАНС</span><h2>{device.name}</h2><small><span className={`desktop-live-dot ${status?.agentConnected ? "active" : ""}`} />{status?.agentConnected ? `Экран ${status.frameWidth || "—"}×${status.frameHeight || "—"} · ${status.controlEnabled ? "управление активно" : "предпросмотр — нажмите на экран для управления"}` : "Ожидание настольного Agent…"}</small></div><div className="desktop-actions"><span className="remote-mode-badge">{pointerMode === "direct" ? "Касание" : "Курсор"}</span><label className="remote-scale-control" title="Частота кадров"><span>FPS</span><select value={targetFPS} onChange={(event) => updateTargetFPS(event.target.value as typeof targetFPS)}><option value="auto">Авто · 30</option><option value="15">15</option><option value="30">30</option><option value="60">60 · Плавность</option></select></label><label className="remote-scale-control" title="Масштаб изображения удалённого экрана"><span>Масштаб</span><select value={screenScale} onChange={(event) => setScreenScale(event.target.value as typeof screenScale)}><option value="fit">По размеру</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option><option value="125">125%</option><option value="150">150%</option></select></label><button className="remote-header-tool" onClick={() => viewportRef.current?.requestFullscreen()} title="На весь экран"><Maximize2 size={17} /><span>Полный экран</span></button><button className="remote-header-tool" onClick={sendCtrlAltDelete} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button><button className="remote-header-tool" onClick={() => void pasteClipboard()} title="Вставить текст из локального буфера"><Clipboard size={17} /><span>Буфер</span></button><button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => { setKeyboardOpen((open) => !open); window.setTimeout(() => mobileKeyboardRef.current?.focus(), 50); }} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>{onOpenFiles && <button className="remote-header-tool" onClick={onOpenFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>}<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button></div></header><div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale === "fit" ? "fit" : "fixed"}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")}>
     {frameURL ? <><div className="remote-screen-canvas"><img ref={frameImageRef} className="remote-screen-image" style={remoteImageStyle} src={frameURL} draggable={false} onLoad={(event) => { const width = event.currentTarget.naturalWidth; const height = event.currentTarget.naturalHeight; setRenderedFrameSize((current) => current.width === width && current.height === height ? current : { width, height }); }} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onDoubleClick={() => setCamera({ zoom: 1, panX: 0, panY: 0 })} onWheel={wheel} onContextMenu={(event) => event.preventDefault()} /></div><span className="remote-stream-stats" title={status?.captureDiagnostics ? `${status.captureDiagnostics.captureBackend}: захват ${status.captureDiagnostics.captureMillis} мс, копирование ${status.captureDiagnostics.copyMillis} мс, масштаб ${status.captureDiagnostics.scaleMillis} мс, JPEG ${status.captureDiagnostics.encodeMillis} мс` : ""}><b>HD</b><span>{latencyMs || "—"} мс</span><em>{frameFPS || "—"} FPS</em><em>{camera.zoom > 1 ? `${Math.round(camera.zoom * 100)}%` : screenScale === "fit" ? "ПО РАЗМЕРУ" : `${screenScale}%`}</em></span></> : <div className="remote-screen-wait"><ScreenShare size={42} /><strong>{starting ? "Создаём сеанс…" : "Ожидаем первый кадр"}</strong><span>На удалённом компьютере должен быть запущен RemoteIt Agent 0.9.26 или новее.</span></div>}
   </div><footer className="remote-session-footer"><div className="remote-session-tools">
-    <span><MousePointer2 size={15} /> {pointerMode === "direct" ? "Касание — левый клик · удержание — правый" : "Ведите пальцем как по тачпаду; короткое касание — клик"}</span>
+    <span><MousePointer2 size={15} /> {pointerMode === "direct" ? "Касание — левый клик · удержание — правый" : "Ведите пальцем — перемещайте курсор; короткое касание — клик"}</span>
     <div className="remote-pointer-modes">
       <button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => { if (dragLock) toggleDragLock(); setPointerMode("direct"); }}><MousePointer2 size={14} /> Касание</button>
-      <button type="button" className={`remote-tool-button ${pointerMode === "trackpad" ? "active" : ""}`} aria-pressed={pointerMode === "trackpad"} onClick={() => setPointerMode("trackpad")}><Monitor size={14} /> Тачпад</button>
+      <button type="button" className={`remote-tool-button ${pointerMode === "trackpad" ? "active" : ""}`} aria-pressed={pointerMode === "trackpad"} onClick={() => setPointerMode("trackpad")}><MousePointer2 size={14} /> Курсор</button>
     </div>
     <button type="button" className="remote-tool-button" onClick={() => sendPointerTap("right")}><MousePointer2 size={14} /> ПКМ</button>
     <button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => { setKeyboardOpen((open) => !open); window.setTimeout(() => mobileKeyboardRef.current?.focus(), 50); }}><Keyboard size={14} /> Клавиатура</button>
@@ -1967,6 +2003,7 @@ const auditLabels: Record<string, string> = {
 	"device.renamed": "Устройство переименовано",
 	"device.updated": "Устройство изменено",
 	"device.deleted": "Устройство удалено",
+	"device.forgotten": "Устройство удалено только из панели",
 	"device.uninstall_requested": "Запрошено удаление агента",
 	"device.uninstall_scheduled": "Локальное удаление агента запущено",
 	"device.uninstall_failed": "Не удалось полностью удалить агент",

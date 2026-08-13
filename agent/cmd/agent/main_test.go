@@ -1,13 +1,38 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestNetworkSignatureStable(t *testing.T) {
+	first := networkSignature()
+	second := networkSignature()
+	if first == "" || first != second {
+		t.Fatalf("network signature is not stable: %q != %q", first, second)
+	}
+}
+
+func TestWaitForNetworkChangeExpires(t *testing.T) {
+	started := time.Now()
+	keepRunning, changed := waitForNetworkChange(context.Background(), 20*time.Millisecond, networkSignature())
+	if !keepRunning || changed || time.Since(started) < 15*time.Millisecond {
+		t.Fatalf("unexpected network wait result: running=%v changed=%v elapsed=%s", keepRunning, changed, time.Since(started))
+	}
+}
+
+func TestAPIClientUsesFreshBoundedConnections(t *testing.T) {
+	client := newAPIClient("https://supportgenesis.ru")
+	if client.http.Timeout != 12*time.Second || client.transport == nil || !client.transport.DisableKeepAlives {
+		t.Fatalf("network-aware control client was not configured: %#v", client)
+	}
+}
 
 func TestCappedBuffer(t *testing.T) {
 	buffer := &cappedBuffer{max: 5}

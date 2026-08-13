@@ -119,8 +119,18 @@ func installPlatform() error {
 	if openErr != nil && !errors.Is(openErr, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
 		return fmt.Errorf("не удалось проверить службу: %w", openErr)
 	}
+	serviceWasRunning := false
+	serviceRestarted := false
 	if service != nil {
 		defer service.Close()
+		if status, statusErr := service.Query(); statusErr == nil {
+			serviceWasRunning = status.State != svc.Stopped
+		}
+		defer func() {
+			if serviceWasRunning && !serviceRestarted {
+				_ = service.Start()
+			}
+		}()
 		if err := stopWindowsService(service); err != nil {
 			return err
 		}
@@ -177,6 +187,7 @@ func installPlatform() error {
 		if err := service.Start(); err != nil {
 			return fmt.Errorf("новая версия агента установлена, но служба не запустилась: %w", err)
 		}
+		serviceRestarted = true
 		cleanupLegacyWindowsInstall(legacyTarget)
 		return nil
 	}

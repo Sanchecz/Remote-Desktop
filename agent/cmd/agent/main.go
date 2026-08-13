@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	version       = "0.9.66"
+	version       = "0.9.67"
 	defaultServer = "https://supportgenesis.ru"
 )
 
@@ -67,8 +67,9 @@ type inventory struct {
 }
 
 type apiClient struct {
-	baseURL string
-	http    *http.Client
+	baseURL   string
+	http      *http.Client
+	transport *http.Transport
 }
 
 type remoteJob struct {
@@ -145,7 +146,7 @@ func realMain() error {
 	}
 }
 
-func installCommand() error {
+func installCommand() (resultErr error) {
 	flags := flag.NewFlagSet("install", flag.ContinueOnError)
 	token := flags.String("token", "", "токен регистрации RemoteIt")
 	name := flags.String("name", "", "название компьютера")
@@ -160,6 +161,10 @@ func installCommand() error {
 		if err != nil {
 			return fmt.Errorf("не удалось прочитать параметры установки: %w", err)
 		}
+		defer func() {
+			recordInstallResult(payload.ResultFile, resultErr)
+			appendInstallDiagnostic(resultErr)
+		}()
 		*token = payload.Token
 		*name = payload.Name
 		*server = payload.ServerURL
@@ -263,14 +268,22 @@ func runLoop(ctx context.Context) error {
 	lastUpdateVersion := ""
 	lastUpdateAttempt := time.Time{}
 	for {
+		networkBeforeHeartbeat := networkSignature()
 		deviceName := effectiveDeviceName(cfg)
 		inv := collectInventory(deviceName)
 		response, err := client.heartbeat(ctx, cfg, inv)
 		if err != nil {
 			log.Printf("нет связи с сервером: %v", err)
 			writeRuntimeStatus(false, err, true)
-			if !waitContext(ctx, backoff) {
+			client.closeIdleConnections()
+			keepRunning, networkChanged := waitForNetworkChange(ctx, backoff, networkBeforeHeartbeat)
+			if !keepRunning {
 				return nil
+			}
+			if networkChanged {
+				log.Printf("обнаружено изменение сети, повторное подключение выполняется сразу")
+				backoff = 5 * time.Second
+				continue
 			}
 			if backoff < 2*time.Minute {
 				backoff *= 2
@@ -337,8 +350,13 @@ func runLoop(ctx context.Context) error {
 			interval = 30
 		}
 		jitter := rand.IntN(7) - 3
-		if !waitContext(ctx, time.Duration(interval+jitter)*time.Second) {
+		keepRunning, networkChanged := waitForNetworkChange(ctx, time.Duration(interval+jitter)*time.Second, networkSignature())
+		if !keepRunning {
 			return nil
+		}
+		if networkChanged {
+			client.closeIdleConnections()
+			log.Printf("сетевые параметры изменились, обновляем IP и маршрут подключения")
 		}
 	}
 }
@@ -370,7 +388,29 @@ func statusCommand() error {
 }
 
 func newAPIClient(baseURL string) *apiClient {
-	return &apiClient{baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 25 * time.Second}}
+	// Heartbeats deliberately do not reuse a TCP/TLS connection. A persistent
+	// connection can keep the old VPN source address and route after TUN is
+	// disabled or the VPN location changes. A fresh connection makes every
+	// heartbeat reflect the currently active Windows/macOS/Linux route.
+	dialer := &net.Dialer{Timeout: 6 * time.Second, KeepAlive: 15 * time.Second}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = dialer.DialContext
+	transport.DisableKeepAlives = true
+	transport.TLSHandshakeTimeout = 6 * time.Second
+	transport.ResponseHeaderTimeout = 8 * time.Second
+	transport.ExpectContinueTimeout = time.Second
+	transport.IdleConnTimeout = 5 * time.Second
+	return &apiClient{
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		http:      &http.Client{Timeout: 12 * time.Second, Transport: transport},
+		transport: transport,
+	}
+}
+
+func (c *apiClient) closeIdleConnections() {
+	if c != nil && c.transport != nil {
+		c.transport.CloseIdleConnections()
+	}
 }
 
 func (c *apiClient) enroll(ctx context.Context, cfg *config) error {
@@ -673,6 +713,7 @@ func (c *apiClient) request(ctx context.Context, method, path string, payload an
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "RemoteIt-Agent/"+version)
+	req.Close = true
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
@@ -862,25 +903,70 @@ func linuxCPULoad() float64 {
 }
 
 func localIPs() []string {
-	addresses, _ := net.InterfaceAddrs()
-	result := make([]string, 0, 8)
-	for _, address := range addresses {
-		var ip net.IP
-		switch value := address.(type) {
-		case *net.IPNet:
-			ip = value.IP
-		case *net.IPAddr:
-			ip = value.IP
-		}
-		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+	interfaces, _ := net.Interfaces()
+	unique := make(map[string]struct{}, 16)
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		result = append(result, ip.String())
-		if len(result) == 16 {
-			break
+		addresses, err := networkInterface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			var ip net.IP
+			switch value := address.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+				continue
+			}
+			unique[ip.String()] = struct{}{}
 		}
 	}
+	result := make([]string, 0, len(unique))
+	for ip := range unique {
+		result = append(result, ip)
+	}
+	sort.Slice(result, func(left, right int) bool {
+		leftIP, rightIP := net.ParseIP(result[left]), net.ParseIP(result[right])
+		if leftIP.To4() != nil && rightIP.To4() == nil {
+			return true
+		}
+		if leftIP.To4() == nil && rightIP.To4() != nil {
+			return false
+		}
+		return result[left] < result[right]
+	})
+	if len(result) > 16 {
+		result = result[:16]
+	}
 	return result
+}
+
+func networkSignature() string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "unavailable"
+	}
+	parts := make([]string, 0, len(interfaces)*2)
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d:%s:%d:%d", networkInterface.Index, networkInterface.Name, networkInterface.MTU, networkInterface.Flags))
+		if addresses, addressErr := networkInterface.Addrs(); addressErr == nil {
+			for _, address := range addresses {
+				parts = append(parts, fmt.Sprintf("%d=%s", networkInterface.Index, address.String()))
+			}
+		}
+	}
+	sort.Strings(parts)
+	digest := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return fmt.Sprintf("%x", digest[:8])
 }
 
 func parseKeyValues(input string) map[string]string {
@@ -1047,5 +1133,25 @@ func waitContext(ctx context.Context, duration time.Duration) bool {
 		return false
 	case <-timer.C:
 		return true
+	}
+}
+
+func waitForNetworkChange(ctx context.Context, duration time.Duration, baseline string) (bool, bool) {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false, false
+		case <-timer.C:
+			return true, false
+		case <-ticker.C:
+			current := networkSignature()
+			if current != baseline {
+				return true, true
+			}
+		}
 	}
 }

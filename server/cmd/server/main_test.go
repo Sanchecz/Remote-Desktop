@@ -57,6 +57,39 @@ func TestSemanticVersionAtLeast(t *testing.T) {
 	}
 }
 
+func TestShellForDeviceOS(t *testing.T) {
+	tests := []struct {
+		name      string
+		deviceOS  string
+		requested string
+		want      string
+		wantError bool
+	}{
+		{name: "windows default", deviceOS: "Windows", want: "powershell"},
+		{name: "windows cmd", deviceOS: "Microsoft Windows", requested: "CMD", want: "cmd"},
+		{name: "linux default", deviceOS: "Ubuntu", want: "bash"},
+		{name: "linux bash", deviceOS: "Linux", requested: "bash", want: "bash"},
+		{name: "mac default", deviceOS: "macOS", want: "zsh"},
+		{name: "mac bash", deviceOS: "Darwin", requested: "bash", want: "bash"},
+		{name: "powershell rejected on linux", deviceOS: "Ubuntu", requested: "powershell", wantError: true},
+		{name: "zsh rejected on windows", deviceOS: "Windows", requested: "zsh", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := shellForDeviceOS(test.deviceOS, test.requested)
+			if test.wantError {
+				if err == nil {
+					t.Fatalf("shellForDeviceOS(%q, %q) = %q, want error", test.deviceOS, test.requested, got)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("shellForDeviceOS(%q, %q) = %q, %v; want %q", test.deviceOS, test.requested, got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestAgentReleaseArtifactValidation(t *testing.T) {
 	valid := agentReleaseArtifact{Path: "/downloads/remoteit-agent-windows-amd64.exe", SHA256: strings.Repeat("a", 64), Size: 1024}
 	if !validAgentReleaseArtifact(valid) {

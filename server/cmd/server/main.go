@@ -347,6 +347,7 @@ func main() {
 		r.With(s.requireCSRF).Delete("/devices/{id}/unlock", s.lockDeviceAccess)
 		r.With(s.requireCSRF).Patch("/devices/{id}", s.renameDevice)
 		r.With(s.requireCSRF).Delete("/devices/{id}", s.deleteDevice)
+		r.With(s.requireCSRF).Delete("/devices/{id}/forget", s.forgetDevice)
 		r.With(s.requireCSRF).Post("/devices/{id}/uninstall", s.requestDeviceUninstall)
 		r.With(s.requireCSRF).Post("/devices/{id}/desktop-sessions", s.startDesktopSession)
 		r.Get("/devices/{id}/jobs", s.listDeviceJobs)
@@ -762,13 +763,16 @@ func (s *server) deleteDevice(w http.ResponseWriter, r *http.Request) {
 	s.requestDeviceUninstall(w, r)
 }
 
-func (s *server) forgetDeviceLegacy(w http.ResponseWriter, r *http.Request) {
+func (s *server) forgetDevice(w http.ResponseWriter, r *http.Request) {
 	a := currentAuth(r)
 	if a.Role != "owner" && a.Role != "admin" {
 		writeError(w, http.StatusForbidden, "Удаление устройства доступно только владельцу и администраторам")
 		return
 	}
 	deviceID := chi.URLParam(r, "id")
+	if !s.requireDeviceAccess(w, r, deviceID) {
+		return
+	}
 	s.removeDeviceTransferFiles(deviceID)
 	result, err := s.db.Exec(r.Context(), `DELETE FROM devices WHERE id=$1`, deviceID)
 	if err != nil {
@@ -781,7 +785,7 @@ func (s *server) forgetDeviceLegacy(w http.ResponseWriter, r *http.Request) {
 	}
 	s.desktopAgentCredentials.Delete(deviceID)
 	s.deleteDesktopFramesForDevice(deviceID)
-	s.audit(r.Context(), a, nil, "device.deleted", "device", deviceID, clientIP(r), map[string]any{})
+	s.audit(r.Context(), a, nil, "device.forgotten", "device", deviceID, clientIP(r), map[string]any{"localAgentRemoved": false, "credentialsRevoked": true})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1311,7 +1315,10 @@ func (s *server) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		log.Printf("claim agent job failed for %s: %v", deviceID, jobErr)
 	}
 	update := s.agentUpdateFor(in.OS, in.Arch, in.AgentVersion)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nextHeartbeatSeconds": 30, "desiredName": desiredName, "desktopSecret": desktopSecret, "job": job, "agentUpdate": update})
+	// Fifteen seconds keeps public/local IP and online state responsive after a
+	// VPN route or network location changes without materially loading the API
+	// at the supported fleet size (up to 300 agents).
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nextHeartbeatSeconds": 15, "desiredName": desiredName, "desktopSecret": desktopSecret, "job": job, "agentUpdate": update})
 }
 
 func (s *server) claimNextAgentJob(ctx context.Context, deviceID string) (*agentJobPayload, error) {
@@ -1411,12 +1418,15 @@ func (s *server) createDeviceJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		payload["command"] = in.Command
-		in.Shell = strings.ToLower(strings.TrimSpace(in.Shell))
-		if in.Shell == "" {
-			in.Shell = "powershell"
+		var deviceOS string
+		if err := s.db.QueryRow(r.Context(), `SELECT os FROM devices WHERE id=$1`, deviceID).Scan(&deviceOS); err != nil {
+			writeError(w, http.StatusNotFound, "Устройство не найдено")
+			return
 		}
-		if in.Shell != "powershell" && in.Shell != "cmd" && in.Shell != "sh" && in.Shell != "bash" && in.Shell != "zsh" {
-			writeError(w, http.StatusBadRequest, "Неизвестная командная оболочка")
+		var shellErr error
+		in.Shell, shellErr = shellForDeviceOS(deviceOS, in.Shell)
+		if shellErr != nil {
+			writeError(w, http.StatusBadRequest, shellErr.Error())
 			return
 		}
 		payload["shell"] = in.Shell
@@ -1469,6 +1479,29 @@ func (s *server) createDeviceJob(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r.Context(), a, nil, "agent_job.created", "agent_job", id, clientIP(r), map[string]any{"deviceId": deviceID, "type": in.Type, "timeoutSeconds": in.TimeoutSeconds})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "deviceId": deviceID, "type": in.Type, "status": "queued", "timeoutSeconds": in.TimeoutSeconds, "createdAt": created, "expiresAt": expires})
+}
+
+func shellForDeviceOS(deviceOS, requested string) (string, error) {
+	osName := strings.ToLower(strings.TrimSpace(deviceOS))
+	shell := strings.ToLower(strings.TrimSpace(requested))
+	isWindows := strings.Contains(osName, "windows")
+	isMac := strings.Contains(osName, "mac") || strings.Contains(osName, "darwin")
+	if shell == "" {
+		if isWindows {
+			return "powershell", nil
+		}
+		if isMac {
+			return "zsh", nil
+		}
+		return "bash", nil
+	}
+	allowed := (isWindows && (shell == "powershell" || shell == "cmd")) ||
+		(isMac && (shell == "zsh" || shell == "bash" || shell == "sh")) ||
+		(!isWindows && !isMac && (shell == "bash" || shell == "sh"))
+	if !allowed {
+		return "", fmt.Errorf("оболочка %s недоступна для %s", shell, strings.TrimSpace(deviceOS))
+	}
+	return shell, nil
 }
 
 func (s *server) cancelDeviceJob(w http.ResponseWriter, r *http.Request) {

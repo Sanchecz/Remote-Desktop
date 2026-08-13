@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,21 +16,25 @@ import (
 )
 
 type trayView struct {
-	name           *walk.Label
-	connection     *walk.Label
-	connectionID   *walk.Label
-	localIP        *walk.Label
-	lastHeartbeat  *walk.Label
-	version        *walk.Label
-	installMode    *walk.Label
-	service        *walk.Label
-	remoteSession  *walk.Label
-	server         *walk.Label
-	serviceHealth  *walk.Label
-	serverHealth   *walk.Label
-	configHealth   *walk.Label
-	securityHealth *walk.Label
-	recentActivity *walk.Label
+	name             *walk.Label
+	connection       *walk.Label
+	connectionID     *walk.Label
+	localIP          *walk.Label
+	lastHeartbeat    *walk.Label
+	version          *walk.Label
+	installMode      *walk.Label
+	service          *walk.Label
+	remoteSession    *walk.Label
+	server           *walk.Label
+	serviceHealth    *walk.Label
+	serverHealth     *walk.Label
+	configHealth     *walk.Label
+	securityHealth   *walk.Label
+	recentActivity   *walk.Label
+	recentActivity2  *walk.Label
+	recentActivity3  *walk.Label
+	readyState       *walk.Label
+	readyDescription *walk.Label
 }
 
 func makeAgentIconLabel(parent walk.Container, icon *walk.Icon, size int) *walk.ImageView {
@@ -208,8 +213,8 @@ func trayCommand() error {
 	window.SetTitle("RemoteIt Agent")
 	// Match the spacious dashboard proportions without filling a 1080p work
 	// area. PerMonitorV2 keeps these logical sizes stable at 125/150% scaling.
-	window.SetSize(walk.Size{Width: 1280, Height: 900})
-	window.SetMinMaxSize(walk.Size{Width: 1060, Height: 760}, walk.Size{Width: 2100, Height: 1320})
+	window.SetSize(walk.Size{Width: 1450, Height: 1040})
+	window.SetMinMaxSize(walk.Size{Width: 1180, Height: 820}, walk.Size{Width: 2200, Height: 1500})
 	window.SetBackground(theme.pageBrush)
 	layout := walk.NewHBoxLayout()
 	layout.SetMargins(walk.Margins{})
@@ -233,13 +238,13 @@ func trayCommand() error {
 	view := trayView{}
 
 	sidebar, _ := walk.NewComposite(window)
-	sidebar.SetMinMaxSize(walk.Size{Width: 244}, walk.Size{Width: 244})
+	sidebar.SetMinMaxSize(walk.Size{Width: 304}, walk.Size{Width: 304})
 	if brush, brushErr := walk.NewSolidColorBrush(walk.RGB(252, 253, 252)); brushErr == nil {
 		defer brush.Dispose()
 		sidebar.SetBackground(brush)
 	}
 	sidebarLayout := walk.NewVBoxLayout()
-	sidebarLayout.SetMargins(walk.Margins{HNear: 20, VNear: 24, HFar: 20, VFar: 18})
+	sidebarLayout.SetMargins(walk.Margins{HNear: 34, VNear: 34, HFar: 18, VFar: 22})
 	sidebarLayout.SetSpacing(9)
 	_ = sidebar.SetLayout(sidebarLayout)
 
@@ -273,16 +278,28 @@ func trayCommand() error {
 	var refresh func()
 	var openAgentLogs func()
 	var openAgentFolder func()
+	var checkConnection func()
+	var copyRemoteID func()
+	var openAgentSettings func()
 	if _, err := newAgentActionCard(sidebar, theme, "●", "Обзор", "", true, 54, func() { refresh() }); err != nil {
 		return err
 	}
 	if _, err := newAgentActionCard(sidebar, theme, "↗", "Панель управления", "", false, 54, func() { _ = openURL(defaultServer) }); err != nil {
 		return err
 	}
+	if _, err := newAgentActionCard(sidebar, theme, "↻", "Проверить соединение", "", false, 54, func() { checkConnection() }); err != nil {
+		return err
+	}
+	if _, err := newAgentActionCard(sidebar, theme, "ID", "Remote ID", "", false, 54, func() { copyRemoteID() }); err != nil {
+		return err
+	}
 	if _, err := newAgentActionCard(sidebar, theme, "≡", "Журнал Agent", "", false, 54, func() { openAgentLogs() }); err != nil {
 		return err
 	}
-	if _, err := newAgentActionCard(sidebar, theme, "…", "Папка Agent", "", false, 54, func() { openAgentFolder() }); err != nil {
+	if _, err := newAgentActionCard(sidebar, theme, "▣", "Папка Agent", "", false, 54, func() { openAgentFolder() }); err != nil {
+		return err
+	}
+	if _, err := newAgentActionCard(sidebar, theme, "⚙", "Настройки", "", false, 54, func() { openAgentSettings() }); err != nil {
 		return err
 	}
 	walk.NewVSpacer(sidebar)
@@ -314,12 +331,12 @@ func trayCommand() error {
 
 	content, _ := walk.NewComposite(window)
 	contentLayout := walk.NewVBoxLayout()
-	contentLayout.SetMargins(walk.Margins{HNear: 28, VNear: 22, HFar: 28, VFar: 18})
-	contentLayout.SetSpacing(14)
+	contentLayout.SetMargins(walk.Margins{HNear: 40, VNear: 28, HFar: 34, VFar: 18})
+	contentLayout.SetSpacing(13)
 	_ = content.SetLayout(contentLayout)
 
 	header, _ := walk.NewComposite(content)
-	header.SetMinMaxSize(walk.Size{Height: 96}, walk.Size{Height: 96})
+	header.SetMinMaxSize(walk.Size{Height: 108}, walk.Size{Height: 108})
 	headerLayout := walk.NewHBoxLayout()
 	headerLayout.SetMargins(walk.Margins{})
 	headerLayout.SetSpacing(18)
@@ -365,7 +382,7 @@ func trayCommand() error {
 	_ = body.SetLayout(bodyLayout)
 
 	details, _ := walk.NewComposite(body)
-	details.SetMinMaxSize(walk.Size{Width: 420}, walk.Size{Width: 2000})
+	details.SetMinMaxSize(walk.Size{Width: 490}, walk.Size{Width: 2000})
 	if detailsBrush, brushErr := walk.NewSolidColorBrush(walk.RGB(255, 255, 255)); brushErr == nil {
 		defer detailsBrush.Dispose()
 		details.SetBackground(detailsBrush)
@@ -390,30 +407,40 @@ func trayCommand() error {
 	view.remoteSession = addTrayInfoRow(details, "Удалённый доступ")
 	view.server = addTrayInfoRow(details, "Сервер")
 
-	actions, _ := walk.NewComposite(body)
-	actions.SetMinMaxSize(walk.Size{Width: 410}, walk.Size{Width: 2000})
-	if brush, brushErr := walk.NewSolidColorBrush(walk.RGB(255, 255, 255)); brushErr == nil {
+	readiness, _ := walk.NewComposite(body)
+	readiness.SetMinMaxSize(walk.Size{Width: 590}, walk.Size{Width: 2000})
+	if brush, brushErr := walk.NewSolidColorBrush(walk.RGB(232, 249, 241)); brushErr == nil {
 		defer brush.Dispose()
-		actions.SetBackground(brush)
+		readiness.SetBackground(brush)
 	}
-	actionsLayout := walk.NewVBoxLayout()
-	actionsLayout.SetMargins(walk.Margins{HNear: 18, VNear: 18, HFar: 18, VFar: 18})
-	actionsLayout.SetSpacing(7)
-	_ = actions.SetLayout(actionsLayout)
-	actionsTitle, _ := walk.NewLabel(actions)
-	actionsTitle.SetText("ϟ   Быстрые действия")
-	if font, fontErr := walk.NewFont("Segoe UI", 12, walk.FontBold); fontErr == nil {
+	readinessLayout := walk.NewVBoxLayout()
+	readinessLayout.SetMargins(walk.Margins{HNear: 30, VNear: 34, HFar: 30, VFar: 24})
+	readinessLayout.SetSpacing(11)
+	_ = readiness.SetLayout(readinessLayout)
+	view.readyState, _ = walk.NewLabel(readiness)
+	view.readyState.SetText("✓   Онлайн и готов к подключению")
+	view.readyState.SetTextColor(walk.RGB(10, 142, 91))
+	if font, fontErr := walk.NewFont("Segoe UI", 17, walk.FontBold); fontErr == nil {
 		defer font.Dispose()
-		actionsTitle.SetFont(font)
+		view.readyState.SetFont(font)
 	}
-	var checkConnection func()
-	if _, err := newAgentActionCard(actions, theme, "↗", "Открыть панель управления", "Устройства, доступ и настройки", false, 62, func() { _ = openURL(defaultServer) }); err != nil {
-		return err
-	}
-	if _, err := newAgentActionCard(actions, theme, "↻", "Проверить соединение", "Связь с сервером RemoteIt", false, 62, func() { checkConnection() }); err != nil {
-		return err
-	}
-	if _, err := newAgentActionCard(actions, theme, "ID", "Скопировать Remote ID", "Идентификатор этого компьютера", false, 62, func() {
+	view.readyDescription, _ = walk.NewLabel(readiness)
+	view.readyDescription.SetText("Служба Agent работает корректно\nи подключена к серверу RemoteIt.")
+	view.readyDescription.SetTextColor(walk.RGB(66, 86, 77))
+	view.readyDescription.SetMinMaxSize(walk.Size{Height: 48}, walk.Size{Height: 48})
+	readyDivider, _ := walk.NewLabel(readiness)
+	readyDivider.SetText("────────────────────────────────────────────")
+	readyDivider.SetTextColor(walk.RGB(177, 222, 202))
+	readySummary, _ := walk.NewLabel(readiness)
+	readySummary.SetText("✓  Подключение       ◇  Сервер       TLS 1.2       ⬡  Шифрование включено")
+	readySummary.SetTextColor(walk.RGB(12, 142, 92))
+
+	actions, _ := walk.NewComposite(content)
+	actionsLayout := walk.NewHBoxLayout()
+	actionsLayout.SetMargins(walk.Margins{})
+	actionsLayout.SetSpacing(12)
+	_ = actions.SetLayout(actionsLayout)
+	copyRemoteID = func() {
 		value := strings.TrimSpace(view.connectionID.Text())
 		if value == "" || value == "—" {
 			_ = walk.MsgBox(window, "RemoteIt", "Remote ID появится после регистрации устройства на сервере.", walk.MsgBoxIconInformation)
@@ -424,15 +451,22 @@ func trayCommand() error {
 			return
 		}
 		_ = walk.MsgBox(window, "RemoteIt", "Remote ID скопирован: "+value, walk.MsgBoxIconInformation)
-	}); err != nil {
+	}
+	if _, err := newAgentActionCard(actions, theme, "▣", "Панель управления", "Устройства, доступ и настройки", false, 142, func() { _ = openURL(defaultServer) }); err != nil {
 		return err
 	}
-	if _, err := newAgentActionCard(actions, theme, "≡", "Открыть журнал Agent", "Диагностика и события службы", false, 62, func() { openAgentLogs() }); err != nil {
+	if _, err := newAgentActionCard(actions, theme, "⌁", "Проверить соединение", "Диагностика связи с сервером", false, 142, func() { checkConnection() }); err != nil {
+		return err
+	}
+	if _, err := newAgentActionCard(actions, theme, "ID", "Remote ID", "Уникальный ID этого устройства", false, 142, func() { copyRemoteID() }); err != nil {
+		return err
+	}
+	if _, err := newAgentActionCard(actions, theme, "≡", "Журнал Agent", "События службы и диагностика", false, 142, func() { openAgentLogs() }); err != nil {
 		return err
 	}
 
 	health, _ := walk.NewComposite(content)
-	health.SetMinMaxSize(walk.Size{Height: 108}, walk.Size{Height: 108})
+	health.SetMinMaxSize(walk.Size{Height: 84}, walk.Size{Height: 84})
 	if brush, brushErr := walk.NewSolidColorBrush(walk.RGB(255, 255, 255)); brushErr == nil {
 		defer brush.Dispose()
 		health.SetBackground(brush)
@@ -442,34 +476,40 @@ func trayCommand() error {
 	healthLayout.SetSpacing(12)
 	_ = health.SetLayout(healthLayout)
 	healthTitle, _ := walk.NewLabel(health)
-	healthTitle.SetText("⌁\nСостояние\nсистемы")
+	healthTitle.SetText("Состояние системы")
 	healthTitle.SetTextColor(walk.RGB(13, 148, 99))
-	healthTitle.SetMinMaxSize(walk.Size{Width: 90}, walk.Size{Width: 90})
+	healthTitle.SetMinMaxSize(walk.Size{Width: 150}, walk.Size{Width: 150})
 	view.serviceHealth = addTrayHealthItem(health, "Служба агента")
 	view.serverHealth = addTrayHealthItem(health, "Связь с сервером")
 	view.configHealth = addTrayHealthItem(health, "Конфигурация")
 	view.securityHealth = addTrayHealthItem(health, "Безопасность")
 
 	activity, _ := walk.NewComposite(content)
-	activity.SetMinMaxSize(walk.Size{Height: 64}, walk.Size{Height: 64})
+	activity.SetMinMaxSize(walk.Size{Height: 122}, walk.Size{Height: 122})
 	if brush, brushErr := walk.NewSolidColorBrush(walk.RGB(245, 251, 248)); brushErr == nil {
 		defer brush.Dispose()
 		activity.SetBackground(brush)
 	}
-	activityLayout := walk.NewHBoxLayout()
+	activityLayout := walk.NewVBoxLayout()
 	activityLayout.SetMargins(walk.Margins{HNear: 18, VNear: 10, HFar: 18, VFar: 10})
 	activityLayout.SetSpacing(12)
 	_ = activity.SetLayout(activityLayout)
 	activityTitle, _ := walk.NewLabel(activity)
 	activityTitle.SetText("◷  Недавняя активность")
-	activityTitle.SetMinMaxSize(walk.Size{Width: 190}, walk.Size{Width: 190})
+	activityTitle.SetMinMaxSize(walk.Size{Height: 24}, walk.Size{Height: 24})
 	if font, fontErr := walk.NewFont("Segoe UI", 10, walk.FontBold); fontErr == nil {
 		defer font.Dispose()
 		activityTitle.SetFont(font)
 	}
 	view.recentActivity, _ = walk.NewLabel(activity)
-	view.recentActivity.SetText("Ожидаем первую синхронизацию")
+	view.recentActivity.SetText("●  Ожидаем первую синхронизацию")
 	view.recentActivity.SetTextColor(walk.RGB(86, 98, 92))
+	view.recentActivity2, _ = walk.NewLabel(activity)
+	view.recentActivity2.SetText("●  Служба Agent запущена")
+	view.recentActivity2.SetTextColor(walk.RGB(86, 98, 92))
+	view.recentActivity3, _ = walk.NewLabel(activity)
+	view.recentActivity3.SetText("●  Конфигурация проверена")
+	view.recentActivity3.SetTextColor(walk.RGB(86, 98, 92))
 	openActivityLog := func(_, _ int, button walk.MouseButton) {
 		if button == walk.LeftButton && openAgentLogs != nil {
 			openAgentLogs()
@@ -477,6 +517,8 @@ func trayCommand() error {
 	}
 	activityTitle.MouseDown().Attach(openActivityLog)
 	view.recentActivity.MouseDown().Attach(openActivityLog)
+	view.recentActivity2.MouseDown().Attach(openActivityLog)
+	view.recentActivity3.MouseDown().Attach(openActivityLog)
 
 	info, _ := walk.NewLabel(content)
 	info.SetText("🛡  Название устройства меняется только администратором или техником в авторизованной панели и автоматически синхронизируется с Agent.")
@@ -487,22 +529,6 @@ func trayCommand() error {
 	footer.SetText("Фоновая служба запускается вместе с Windows. Закрытие окна сворачивает Agent обратно в трей.")
 	footer.SetTextColor(walk.RGB(111, 123, 117))
 	footer.SetMinMaxSize(walk.Size{Height: 22}, walk.Size{Height: 28})
-
-	bottomActions, _ := walk.NewComposite(content)
-	bottomActions.SetMinMaxSize(walk.Size{Height: 48}, walk.Size{Height: 48})
-	bottomLayout := walk.NewHBoxLayout()
-	bottomLayout.SetMargins(walk.Margins{})
-	bottomLayout.SetSpacing(10)
-	_ = bottomActions.SetLayout(bottomLayout)
-	refreshButton, _ := walk.NewPushButton(bottomActions)
-	refreshButton.SetText("↻  Обновить статус")
-	refreshButton.SetMinMaxSize(walk.Size{Width: 180, Height: 40}, walk.Size{Width: 180, Height: 40})
-	refreshButton.Clicked().Attach(func() { refresh() })
-	walk.NewHSpacer(bottomActions)
-	panelButton, _ := walk.NewPushButton(bottomActions)
-	panelButton.SetText("↗  Открыть панель управления")
-	panelButton.SetMinMaxSize(walk.Size{Width: 250, Height: 40}, walk.Size{Width: 250, Height: 40})
-	panelButton.Clicked().Attach(func() { _ = openURL(defaultServer) })
 
 	tray, err := walk.NewNotifyIcon(window)
 	if err != nil {
@@ -542,7 +568,16 @@ func trayCommand() error {
 		showAgentLogDialog(window)
 	}
 	openAgentFolder = func() {
-		_ = exec.Command("explorer.exe", filepath.Dir(defaultConfigPath())).Start()
+		path := filepath.Dir(defaultConfigPath())
+		if executable, executableErr := installedAgentPath(); executableErr == nil && strings.TrimSpace(executable) != "" {
+			path = filepath.Dir(executable)
+		}
+		if err := exec.Command("explorer.exe", path).Start(); err != nil {
+			_ = walk.MsgBox(window, "RemoteIt — папка Agent", "Не удалось открыть папку Agent: "+err.Error(), walk.MsgBoxIconError)
+		}
+	}
+	openAgentSettings = func() {
+		_ = walk.MsgBox(window, "RemoteIt — настройки", "Название и права доступа управляются в защищённой панели. Локальные файлы диагностики доступны через журнал и папку Agent.", walk.MsgBoxIconInformation)
 	}
 	openPanel := func() {
 		refresh()
@@ -678,7 +713,11 @@ func showAgentLogDialog(owner walk.Form) {
 	viewer.SetReadOnly(true)
 	viewer.SetMinMaxSize(walk.Size{Height: 330}, walk.Size{Height: 1200})
 	refreshLog := func() {
-		path := filepath.Join(filepath.Dir(defaultConfigPath()), "agent.log")
+		path, pathErr := readableAgentLogPath()
+		if pathErr != nil {
+			viewer.SetText(pathErr.Error())
+			return
+		}
 		data, readErr := os.ReadFile(path)
 		if os.IsNotExist(readErr) {
 			viewer.SetText("Журнал пока не создан. Агент начнёт записывать события после запуска фоновой службы.")
@@ -710,12 +749,42 @@ func showAgentLogDialog(owner walk.Form) {
 	refreshButton.Clicked().Attach(refreshLog)
 	openFolderButton, _ := walk.NewPushButton(buttons)
 	openFolderButton.SetText("Открыть папку Agent")
-	openFolderButton.Clicked().Attach(func() { _ = exec.Command("explorer.exe", filepath.Dir(defaultConfigPath())).Start() })
+	openFolderButton.Clicked().Attach(func() {
+		path, pathErr := readableAgentLogPath()
+		if pathErr != nil {
+			_ = walk.MsgBox(dialog, "RemoteIt — журнал Agent", pathErr.Error(), walk.MsgBoxIconError)
+			return
+		}
+		_ = exec.Command("explorer.exe", "/select,", path).Start()
+	})
 	walk.NewHSpacer(buttons)
 	closeButton, _ := walk.NewPushButton(buttons)
 	closeButton.SetText("Закрыть")
 	closeButton.Clicked().Attach(func() { dialog.Accept() })
 	dialog.Run()
+}
+
+func readableAgentLogPath() (string, error) {
+	path := filepath.Join(filepath.Dir(defaultConfigPath()), "agent.log")
+	if _, err := os.Stat(path); err == nil {
+		return path, nil
+	}
+	// A system service writes under ProgramData while a standard-user tray may
+	// use a different config root. Keep the lookup explicit and read-only.
+	programData := strings.TrimSpace(os.Getenv("ProgramData"))
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	candidates := []string{
+		filepath.Join(programData, "GenesisIt", "agent.log"),
+		filepath.Join(programData, "RemoteIt", "Agent", "agent.log"),
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return path, fmt.Errorf("Журнал пока не создан. Агент начнёт записывать события после запуска фоновой службы")
 }
 
 func addTrayInfoRow(parent walk.Container, caption string) *walk.Label {

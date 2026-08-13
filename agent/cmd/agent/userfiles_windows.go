@@ -38,6 +38,7 @@ func publishPublicRuntimeStatus(status runtimeStatus) {
 	}
 	info.Running = status.Running
 	info.Connected = status.Connected
+	info.LocalIPs = localIPs()
 	info.LastHeartbeat = status.LastHeartbeat
 	info.LastError = status.LastError
 	data, err := json.MarshalIndent(info, "", "  ")

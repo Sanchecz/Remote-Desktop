@@ -29,10 +29,11 @@ type boundInstallerPayload struct {
 }
 
 type setupInstallPayload struct {
-	Token     string `json:"token"`
-	Name      string `json:"name"`
-	ServerURL string `json:"serverUrl"`
-	UserMode  bool   `json:"userMode"`
+	Token      string `json:"token"`
+	Name       string `json:"name"`
+	ServerURL  string `json:"serverUrl"`
+	UserMode   bool   `json:"userMode"`
+	ResultFile string `json:"resultFile,omitempty"`
 }
 
 type shellExecuteInfo struct {
@@ -244,6 +245,17 @@ func runGraphicalInstall(payload setupInstallPayload) error {
 	if err != nil {
 		return err
 	}
+	resultFile, err := os.CreateTemp("", "RemoteIt-Setup-Result-*.txt")
+	if err != nil {
+		return fmt.Errorf("не удалось подготовить диагностику установки: %w", err)
+	}
+	resultPath := resultFile.Name()
+	if err = resultFile.Close(); err != nil {
+		_ = os.Remove(resultPath)
+		return fmt.Errorf("не удалось подготовить диагностику установки: %w", err)
+	}
+	defer os.Remove(resultPath)
+	payload.ResultFile = resultPath
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -268,12 +280,18 @@ func runGraphicalInstall(payload setupInstallPayload) error {
 		command := exec.Command(executable, "install", "--setup-file", setupPath)
 		command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 		if output, runErr := command.CombinedOutput(); runErr != nil {
+			if reason := readInstallResult(resultPath); reason != "" {
+				return errors.New(reason)
+			}
 			return fmt.Errorf("установка для текущего пользователя не выполнена: %w (%s)", runErr, strings.TrimSpace(string(output)))
 		}
 		return nil
 	}
 
 	if runErr := runElevatedInstaller(executable, setupPath); runErr != nil {
+		if reason := readInstallResult(resultPath); reason != "" {
+			return errors.New(reason)
+		}
 		return fmt.Errorf("установка с правами администратора отменена или завершилась ошибкой: %w", runErr)
 	}
 
@@ -288,6 +306,54 @@ func runGraphicalInstall(payload setupInstallPayload) error {
 		_ = tray.Process.Release()
 	}
 	return nil
+}
+
+func readInstallResult(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	result := strings.TrimSpace(string(data))
+	if result == "OK" {
+		return ""
+	}
+	return result
+}
+
+func recordInstallResult(path string, installErr error) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	result := "OK"
+	if installErr != nil {
+		result = installErr.Error()
+	}
+	_ = os.WriteFile(path, []byte(result), 0o600)
+}
+
+func appendInstallDiagnostic(installErr error) {
+	programData := strings.TrimSpace(os.Getenv("ProgramData"))
+	if requestedUserInstall {
+		programData = strings.TrimSpace(os.Getenv("LocalAppData"))
+	}
+	if programData == "" {
+		return
+	}
+	directory := filepath.Join(programData, "RemoteIt", "Agent")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return
+	}
+	status := "успешно"
+	if installErr != nil {
+		status = "ошибка: " + installErr.Error()
+	}
+	line := fmt.Sprintf("%s RemoteIt Agent %s: %s\r\n", time.Now().Format(time.RFC3339), version, status)
+	file, err := os.OpenFile(filepath.Join(directory, "install.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = file.WriteString(line)
 }
 
 func runElevatedInstaller(executable, setupPath string) error {
