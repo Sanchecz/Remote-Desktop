@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily GenesisIt PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=45m
+Persistent=true
+Unit=genesisit-backup.service
+
+[Install]
+WantedBy=timers.target

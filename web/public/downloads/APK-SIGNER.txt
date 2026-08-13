@@ -1,0 +1,9 @@
+RemoteIt Android release signing certificate
+
+Subject: CN=RemoteIt, OU=Private IT, O=RemoteIt, L=Moscow, C=RU
+Certificate SHA-256: d8a693ae3ae66393fa85cab9a14312106ac2c30d04d13742857a1392fbc1b2a6
+Public key SHA-256: 46e31a97d606360926357496781cfda5e6c5ef1681c0e67988c3eddd99c8ed66
+Key: RSA 3072 bit
+Verified schemes: APK Signature Scheme v2 and v3
+
+This stable RemoteIt release certificate is retained for subsequent Android updates. The private signing key is stored only in protected server storage.

@@ -1,0 +1,14 @@
+[Unit]
+Description=GenesisIt Docker cache maintenance
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker image prune --force --filter until=168h
+ExecStart=/usr/bin/docker builder prune --force --filter until=168h --keep-storage 5GB
+User=root
+Group=root
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true

@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+BACKUP_DIR=/opt/genesisit/backups
+PROJECT_DIR=/opt/genesisit/current
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+FINAL="$BACKUP_DIR/genesisit-$STAMP.dump"
+TEMP="$BACKUP_DIR/.genesisit-$STAMP.tmp"
+SHARED_FINAL="$BACKUP_DIR/genesisit-shared-$STAMP.tar.gz"
+SHARED_TEMP="$BACKUP_DIR/.genesisit-shared-$STAMP.tmp"
+
+umask 077
+install -d -o root -g root -m 700 "$BACKUP_DIR"
+trap 'rm -f "$TEMP" "$SHARED_TEMP"' EXIT HUP INT TERM
+
+cd "$PROJECT_DIR"
+docker compose -p genesisit --env-file /opt/genesisit/shared/.env exec -T db \
+  sh -c 'pg_dump -Fc -U "$POSTGRES_USER" "$POSTGRES_DB"' >"$TEMP"
+test -s "$TEMP"
+mv "$TEMP" "$FINAL"
+chmod 600 "$FINAL"
+
+tar -C /opt/genesisit/shared -czf "$SHARED_TEMP" .env android-release.jks android-signing.env
+test -s "$SHARED_TEMP"
+mv "$SHARED_TEMP" "$SHARED_FINAL"
+chmod 600 "$SHARED_FINAL"
+
+find "$BACKUP_DIR" -maxdepth 1 -type f -name 'genesisit-*.dump' -mtime +7 -delete
+find "$BACKUP_DIR" -maxdepth 1 -type f -name 'genesisit-shared-*.tar.gz' -mtime +7 -delete
+printf '%s\n' "$FINAL"

@@ -1,0 +1,115 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  transfers-init:
+    image: alpine:3.23
+    restart: "no"
+    command: ["sh", "-c", "install -d -o 100 -g 101 -m 700 /data"]
+    volumes:
+      - remoteit_transfers:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    logging: *default-logging
+
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - internal
+    logging: *default-logging
+
+  app:
+    build:
+      context: .
+      secrets:
+        - android_keystore
+        - android_signing
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+      GENESIS_ADMIN_USERNAME: ${GENESIS_ADMIN_USERNAME:-Admin}
+      GENESIS_ADMIN_PASSWORD: ${GENESIS_ADMIN_PASSWORD:-}
+      GENESIS_COOKIE_SECURE: ${GENESIS_COOKIE_SECURE:-true}
+      REMOTEIT_PUBLIC_URL: ${REMOTEIT_PUBLIC_URL:-https://supportgenesis.ru}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-terra}
+      WEB_ROOT: /app/web
+      TRANSFER_ROOT: /var/lib/remoteit-transfers
+    depends_on:
+      db:
+        condition: service_healthy
+      transfers-init:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - remoteit_transfers:/var/lib/remoteit-transfers
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    networks:
+      - internal
+    logging: *default-logging
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - internal
+    logging: *default-logging
+
+networks:
+  internal:
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+  remoteit_transfers:
+
+secrets:
+  android_keystore:
+    file: ${ANDROID_KEYSTORE_FILE:-/opt/genesisit/shared/android-release.jks}
+  android_signing:
+    file: ${ANDROID_SIGNING_FILE:-/opt/genesisit/shared/android-signing.env}

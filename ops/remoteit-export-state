@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+ROOT=/opt/genesisit
+PROJECT="$ROOT/current"
+SHARED="$ROOT/shared"
+DESTINATION="${1:-$ROOT/exports}"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+STAGE="$(mktemp -d /tmp/remoteit-export.XXXXXX)"
+FINAL="$DESTINATION/remoteit-state-$STAMP.tar.gz"
+CHECKSUM="$FINAL.sha256"
+COMPOSE="docker compose -p genesisit --env-file $SHARED/.env"
+APP_WAS_RUNNING=false
+
+cleanup() {
+  if [ "$APP_WAS_RUNNING" = true ]; then
+    (cd "$PROJECT" && $COMPOSE up -d --no-deps app) >/dev/null 2>&1 || true
+  fi
+  rm -rf -- "$STAGE"
+}
+trap cleanup EXIT HUP INT TERM
+
+[ "$(id -u)" -eq 0 ] || { echo 'Запустите экспорт от root' >&2; exit 1; }
+[ -L "$PROJECT" ] || { echo "$PROJECT должен быть symlink на release" >&2; exit 1; }
+[ -f "$SHARED/.env" ] || { echo 'Не найден закрытый .env' >&2; exit 1; }
+
+umask 077
+install -d -m 700 "$DESTINATION"
+
+if docker inspect -f '{{.State.Running}}' genesisit-app-1 2>/dev/null | grep -qx true; then
+  APP_WAS_RUNNING=true
+  (cd "$PROJECT" && $COMPOSE stop -t 30 app)
+fi
+
+(cd "$PROJECT" && $COMPOSE exec -T db sh -c 'pg_dump -Fc -U "$POSTGRES_USER" "$POSTGRES_DB"') >"$STAGE/database.dump"
+test -s "$STAGE/database.dump"
+(cd "$PROJECT" && $COMPOSE exec -T db sh -c 'pg_restore --list >/dev/null' <"$STAGE/database.dump")
+
+tar -C "$SHARED" -czf "$STAGE/shared.tar.gz" .
+test -s "$STAGE/shared.tar.gz"
+
+docker run --rm -v genesisit_remoteit_transfers:/source:ro -v "$STAGE:/backup" alpine:3.23 \
+  tar -C /source -czf /backup/transfers.tar.gz .
+test -s "$STAGE/transfers.tar.gz"
+
+readlink -f "$PROJECT" >"$STAGE/source-release.txt"
+(cd "$STAGE" && sha256sum database.dump shared.tar.gz transfers.tar.gz source-release.txt >MANIFEST.sha256)
+tar -C "$STAGE" -czf "$FINAL" .
+(cd "$DESTINATION" && sha256sum "$(basename "$FINAL")" >"$(basename "$CHECKSUM")")
+chmod 600 "$FINAL" "$CHECKSUM"
+
+if [ "$APP_WAS_RUNNING" = true ]; then
+  (cd "$PROJECT" && $COMPOSE up -d --no-deps app)
+  APP_WAS_RUNNING=false
+fi
+
+printf 'STATE_ARCHIVE=%s\nSTATE_SHA256=%s\n' "$FINAL" "$CHECKSUM"

@@ -1,0 +1,9 @@
+.git
+.gitignore
+.env
+outputs
+work
+web/node_modules
+web/dist
+*.log
+

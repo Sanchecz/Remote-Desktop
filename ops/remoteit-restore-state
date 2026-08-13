@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+ROOT=/opt/genesisit
+PROJECT="$ROOT/current"
+SHARED="$ROOT/shared"
+ARCHIVE="${1:-}"
+CONFIRM="${2:-}"
+STAGE="$(mktemp -d /tmp/remoteit-restore.XXXXXX)"
+
+cleanup() { rm -rf -- "$STAGE"; }
+trap cleanup EXIT HUP INT TERM
+
+[ "$(id -u)" -eq 0 ] || { echo 'Запустите восстановление от root' >&2; exit 1; }
+[ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ] || { echo 'Укажите state-архив' >&2; exit 1; }
+[ "$CONFIRM" = '--confirm-empty-target' ] || { echo 'Требуется --confirm-empty-target' >&2; exit 1; }
+[ -L "$PROJECT" ] || { echo "$PROJECT должен быть symlink на распакованный release" >&2; exit 1; }
+
+if docker ps -a --format '{{.Names}}' | grep -q '^genesisit-'; then
+  echo 'Обнаружены контейнеры genesisit: восстановление разрешено только на пустой цели' >&2
+  exit 1
+fi
+if docker volume ls --format '{{.Name}}' | grep -q '^genesisit_'; then
+  echo 'Обнаружены volumes genesisit: восстановление разрешено только на пустой цели' >&2
+  exit 1
+fi
+
+umask 077
+tar -xzf "$ARCHIVE" -C "$STAGE"
+(cd "$STAGE" && sha256sum -c MANIFEST.sha256)
+for required in database.dump shared.tar.gz transfers.tar.gz; do
+  [ -s "$STAGE/$required" ] || { echo "В архиве отсутствует $required" >&2; exit 1; }
+done
+
+install -d -m 750 "$SHARED"
+tar -C "$SHARED" -xzf "$STAGE/shared.tar.gz"
+getent group genesis >/dev/null 2>&1 || groupadd --system genesis
+id genesis >/dev/null 2>&1 || useradd --system --gid genesis --home-dir /opt/genesisit --shell /usr/sbin/nologin genesis
+chown root:genesis "$SHARED/.env"
+chmod 640 "$SHARED/.env"
+COMPOSE="docker compose -p genesisit --env-file $SHARED/.env"
+
+cd "$PROJECT"
+$COMPOSE up -d db transfers-init
+attempt=0
+until $COMPOSE exec -T db sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null 2>&1; do
+  attempt=$((attempt + 1)); [ "$attempt" -lt 30 ] || { echo 'PostgreSQL не запустился' >&2; exit 1; }; sleep 2
+done
+
+tables="$($COMPOSE exec -T db sh -c 'psql -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select count(*) from information_schema.tables where table_schema='"'"'public'"'"'"')"
+[ "$tables" = 0 ] || { echo 'Целевая БД не пуста; восстановление остановлено' >&2; exit 1; }
+$COMPOSE exec -T db sh -c 'pg_restore --no-owner --no-privileges -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <"$STAGE/database.dump"
+
+docker run --rm -v genesisit_remoteit_transfers:/target -v "$STAGE:/backup:ro" alpine:3.23 \
+  tar -C /target -xzf /backup/transfers.tar.gz
+
+$COMPOSE up -d
+printf 'RemoteIt восстановлен. Проверьте health, вход владельца, устройства и удалённый сеанс.\n'

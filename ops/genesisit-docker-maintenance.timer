@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly GenesisIt Docker cache maintenance
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+RandomizedDelaySec=60m
+Persistent=true
+Unit=genesisit-docker-maintenance.service
+
+[Install]
+WantedBy=timers.target
