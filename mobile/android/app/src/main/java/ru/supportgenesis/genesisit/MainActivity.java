@@ -80,7 +80,7 @@ public final class MainActivity extends Activity {
         settings.setTextZoom(100);
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " RemoteIt-Android/0.9.67");
+        settings.setUserAgentString(settings.getUserAgentString() + " RemoteIt-Android/0.9.68");
 		webView.addJavascriptInterface(new RemoteItAndroidBridge(), "RemoteItAndroid");
 
         CookieManager cookies = CookieManager.getInstance();
