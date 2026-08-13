@@ -611,8 +611,8 @@ func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(w, r, &in); err != nil {
 		return
 	}
-	if len([]rune(in.NewPassword)) < 15 {
-		writeError(w, http.StatusBadRequest, "Новый пароль должен содержать не менее 15 символов")
+	if !validAccountPassword(in.NewPassword) {
+		writeError(w, http.StatusBadRequest, "Пароль должен содержать от 4 до 256 символов")
 		return
 	}
 	var currentHash string
@@ -914,8 +914,8 @@ func (s *server) createUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Логин должен содержать 3–64 буквы, цифры, точки, дефисы или подчёркивания")
 		return
 	}
-	if len([]rune(in.TemporaryPassword)) < 15 {
-		writeError(w, http.StatusBadRequest, "Временный пароль должен содержать не менее 15 символов")
+	if !validAccountPassword(in.TemporaryPassword) {
+		writeError(w, http.StatusBadRequest, "Временный пароль должен содержать от 4 до 256 символов")
 		return
 	}
 	if !validRole(in.Role) || in.Role == "owner" || (a.Role == "admin" && in.Role == "admin") {
@@ -1002,8 +1002,8 @@ func (s *server) resetUserPassword(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(w, r, &in); err != nil {
 		return
 	}
-	if len([]rune(in.TemporaryPassword)) < 15 {
-		writeError(w, http.StatusBadRequest, "Временный пароль должен содержать не менее 15 символов")
+	if !validAccountPassword(in.TemporaryPassword) {
+		writeError(w, http.StatusBadRequest, "Временный пароль должен содержать от 4 до 256 символов")
 		return
 	}
 	var targetRole string
@@ -1045,6 +1045,11 @@ func validRole(role string) bool {
 	default:
 		return false
 	}
+}
+
+func validAccountPassword(password string) bool {
+	length := len([]rune(password))
+	return length >= 4 && length <= 256
 }
 
 func (s *server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {

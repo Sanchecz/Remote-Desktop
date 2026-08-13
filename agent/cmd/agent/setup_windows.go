@@ -295,16 +295,11 @@ func runGraphicalInstall(payload setupInstallPayload) error {
 		return fmt.Errorf("установка с правами администратора отменена или завершилась ошибкой: %w", runErr)
 	}
 
-	programFiles := os.Getenv("ProgramFiles")
-	if programFiles == "" {
-		programFiles = `C:\Program Files`
-	}
-	installed := filepath.Join(programFiles, "RemoteIt", "Agent", "RemoteIt-Agent.exe")
-	tray := exec.Command(installed, "tray")
-	tray.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
-	if err := tray.Start(); err == nil {
-		_ = tray.Process.Release()
-	}
+	// The Windows service owns exactly one interactive Agent companion per
+	// logged-on session. Starting another tray process here raced the broker and
+	// could leave an old dashboard window alive beside the newly installed UI.
+	// The broker starts the freshly installed dashboard immediately after the
+	// elevated installer restarts the service.
 	return nil
 }
 

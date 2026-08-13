@@ -7,11 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/lxn/walk"
+	"github.com/lxn/win"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -51,6 +51,30 @@ func newAgentUIScale(dpi int) agentUIScale {
 		dpi = 96
 	}
 	return agentUIScale{dpi: dpi, zoom: 1, baseW: 1450, baseH: 1085}
+}
+
+func compactAgentWindowPixels(screenWidth, screenHeight int) walk.Size {
+	const (
+		designWidth  = 1450
+		designHeight = 1085
+		maxWidth     = 1220
+		maxHeight    = 913
+	)
+	if screenWidth <= 0 {
+		screenWidth = 1920
+	}
+	if screenHeight <= 0 {
+		screenHeight = 1080
+	}
+	availableWidth := min(maxWidth, screenWidth*84/100)
+	availableHeight := min(maxHeight, screenHeight*82/100)
+	width := availableWidth
+	height := width * designHeight / designWidth
+	if height > availableHeight {
+		height = availableHeight
+		width = height * designWidth / designHeight
+	}
+	return walk.Size{Width: max(width, 800), Height: max(height, 599)}
 }
 
 // Walk layout dimensions are expressed in 96-DPI units.  The design reference
@@ -120,6 +144,8 @@ type agentUITheme struct {
 	cardTextFont    *walk.Font
 	iconFont        *walk.Font
 	arrowFont       *walk.Font
+	readyFont       *walk.Font
+	readyRingBrush  *walk.SolidColorBrush
 }
 
 func newAgentUITheme(scale agentUIScale) (*agentUITheme, error) {
@@ -172,6 +198,14 @@ func newAgentUITheme(scale agentUIScale) (*agentUITheme, error) {
 		theme.Dispose()
 		return nil, err
 	}
+	if theme.readyFont, err = walk.NewFont("Segoe UI Symbol", scale.font(40), walk.FontBold); err != nil {
+		theme.Dispose()
+		return nil, err
+	}
+	if theme.readyRingBrush, err = walk.NewSolidColorBrush(walk.RGB(255, 255, 255)); err != nil {
+		theme.Dispose()
+		return nil, err
+	}
 	return theme, nil
 }
 
@@ -182,12 +216,51 @@ func (theme *agentUITheme) Dispose() {
 	for _, disposable := range []agentUIDisposable{
 		theme.pageBrush, theme.cardBrush, theme.softGreenBrush, theme.iconBrush, theme.greenBrush,
 		theme.borderPen, theme.activeBorderPen, theme.navFont, theme.cardTitleFont,
-		theme.cardTextFont, theme.iconFont, theme.arrowFont,
+		theme.cardTextFont, theme.iconFont, theme.arrowFont, theme.readyFont, theme.readyRingBrush,
 	} {
 		if disposable != nil {
 			disposable.Dispose()
 		}
 	}
+}
+
+func newAgentReadyCheck(parent walk.Container, theme *agentUITheme, size int) (*walk.CustomWidget, error) {
+	var widget *walk.CustomWidget
+	widget, err := walk.NewCustomWidgetPixels(parent, 0, func(canvas *walk.Canvas, _ walk.Rectangle) error {
+		bounds := widget.ClientBoundsPixels()
+		if err := canvas.FillRectanglePixels(theme.softGreenBrush, bounds); err != nil {
+			return err
+		}
+		padding := max(2, bounds.Width/20)
+		ring := walk.Rectangle{X: padding, Y: padding, Width: bounds.Width - padding*2, Height: bounds.Height - padding*2}
+		if err := canvas.FillEllipsePixels(theme.readyRingBrush, ring); err != nil {
+			return err
+		}
+		innerPadding := max(3, bounds.Width/13)
+		inner := walk.Rectangle{X: innerPadding, Y: innerPadding, Width: bounds.Width - innerPadding*2, Height: bounds.Height - innerPadding*2}
+		if err := canvas.FillEllipsePixels(theme.greenBrush, inner); err != nil {
+			return err
+		}
+		return canvas.DrawTextPixels("✓", theme.readyFont, walk.RGB(255, 255, 255), inner, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine|walk.TextNoPrefix)
+	})
+	if err != nil {
+		return nil, err
+	}
+	widget.SetPaintMode(walk.PaintBuffered)
+	widget.SetMinMaxSize(walk.Size{Width: size, Height: size}, walk.Size{Width: size, Height: size})
+	return widget, nil
+}
+
+func lockAgentWindowGeometry(window *walk.MainWindow, size walk.Size, screenWidth, screenHeight int) {
+	// size is deliberately physical pixels. The UI metrics are independently
+	// DPI-normalised, so using SetSize here would make Windows scale the outer
+	// window a second time on 125/150/200% displays.
+	style := win.GetWindowLong(window.Handle(), win.GWL_STYLE)
+	style &^= int32(win.WS_THICKFRAME | win.WS_MAXIMIZEBOX)
+	win.SetWindowLong(window.Handle(), win.GWL_STYLE, style)
+	x := max(0, (screenWidth-size.Width)/2)
+	y := max(0, (screenHeight-size.Height)/2)
+	win.SetWindowPos(window.Handle(), 0, int32(x), int32(y), int32(size.Width), int32(size.Height), win.SWP_NOZORDER|win.SWP_FRAMECHANGED)
 }
 
 func addReadyStatusItem(parent walk.Container, icon, caption, value string, scale agentUIScale) {
@@ -323,23 +396,17 @@ func trayCommand() error {
 	}
 	defer window.Dispose()
 	scale := newAgentUIScale(window.DPI())
-	requestedWindowSize := walk.Size{Width: 1450, Height: 1085}
-	if width, parseErr := strconv.Atoi(strings.TrimSpace(os.Getenv("REMOTEIT_AGENT_WINDOW_WIDTH"))); parseErr == nil && width >= 1015 {
-		requestedWindowSize.Width = width
-	}
-	if height, parseErr := strconv.Atoi(strings.TrimSpace(os.Getenv("REMOTEIT_AGENT_WINDOW_HEIGHT"))); parseErr == nil && height >= 760 {
-		requestedWindowSize.Height = height
-	}
+	screenWidth := int(win.GetSystemMetrics(win.SM_CXSCREEN))
+	screenHeight := int(win.GetSystemMetrics(win.SM_CYSCREEN))
+	requestedWindowSize := compactAgentWindowPixels(screenWidth, screenHeight)
 	scale = scale.forWindowPixels(requestedWindowSize)
 	theme, err := newAgentUITheme(scale)
 	if err != nil {
 		return err
 	}
 	defer theme.Dispose()
-	// Walk sizes fonts for the monitor DPI.  The dashboard geometry is based on
-	// physical pixels, so use a DPI-normalized inherited body font as well.  This
-	// keeps captions and table rows at the same visual scale as the approved
-	// 1450x1085 mockup on 125/150% Windows displays.
+	// Fonts and every child metric follow the same aspect-preserving scale as the
+	// compact physical window, so the reference composition cannot stretch.
 	bodyFont, err := walk.NewFont("Segoe UI", scale.font(9), 0)
 	if err != nil {
 		return err
@@ -347,10 +414,7 @@ func trayCommand() error {
 	defer bodyFont.Dispose()
 	window.SetFont(bodyFont)
 	window.SetTitle("RemoteIt Agent")
-	// The approved mockup is 1450x1085 including the title bar.  Pixel APIs
-	// avoid Windows multiplying it again at 125/150% display scaling.
-	_ = window.SetSizePixels(requestedWindowSize)
-	_ = window.SetMinMaxSizePixels(walk.Size{Width: 1180, Height: 820}, walk.Size{Width: 2200, Height: 1500})
+	lockAgentWindowGeometry(window, requestedWindowSize, screenWidth, screenHeight)
 	window.SetBackground(theme.pageBrush)
 	layout := walk.NewHBoxLayout()
 	layout.SetMargins(walk.Margins{})
@@ -581,7 +645,9 @@ func trayCommand() error {
 	readyIconLayout.SetMargins(walk.Margins{})
 	readyIconLayout.SetSpacing(0)
 	_ = readyIconFrame.SetLayout(readyIconLayout)
-	makeAgentIconLabel(readyIconFrame, onlineIcon, 92, scale)
+	if _, readyIconErr := newAgentReadyCheck(readyIconFrame, theme, readyIconSize); readyIconErr != nil {
+		return readyIconErr
+	}
 	readyCopy, _ := walk.NewComposite(readyHero)
 	readyCopyLayout := walk.NewVBoxLayout()
 	readyCopyLayout.SetMargins(scale.margins(0, 18, 0, 0))
@@ -613,6 +679,8 @@ func trayCommand() error {
 	addReadyStatusItem(readySummary, "⬡", "Шифрование", "Включено", scale)
 
 	actions, _ := walk.NewComposite(content)
+	actionHeight := scale.unit(220)
+	actions.SetMinMaxSize(walk.Size{Height: actionHeight}, walk.Size{Height: actionHeight})
 	actionsLayout := walk.NewHBoxLayout()
 	actionsLayout.SetMargins(walk.Margins{})
 	actionsLayout.SetSpacing(scale.unit(12))
@@ -629,7 +697,6 @@ func trayCommand() error {
 		}
 		_ = walk.MsgBox(window, "RemoteIt", "Remote ID скопирован: "+value, walk.MsgBoxIconInformation)
 	}
-	actionHeight := scale.unit(220)
 	if _, err := newAgentDashboardCard(actions, theme, "▣", "Панель управления", "Откройте расширенную панель управления агентом: устройства, доступ и настройки.", "Открыть панель", actionHeight, func() { _ = openURL(defaultServer) }); err != nil {
 		return err
 	}

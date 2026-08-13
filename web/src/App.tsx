@@ -177,7 +177,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "0.9.68";
+const LATEST_AGENT_VERSION = "0.9.70";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -333,12 +333,12 @@ function ChangePassword({ user, csrf, onDone, theme, onTheme }: { user: User; cs
         <div className="login-copy">
           <span className="eyebrow"><ShieldCheck size={14} /> Первый вход</span>
           <h1>Защитите аккаунт {user.username}</h1>
-          <p>Временный пароль необходимо заменить. Используйте не менее 15 символов.</p>
+          <p>Временный пароль необходимо заменить. Используйте не менее 4 символов.</p>
         </div>
         <form onSubmit={submit}>
           <label><span>Текущий пароль</span><div className="input-wrap"><LockKeyhole size={18} /><input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} required autoFocus /></div></label>
-          <label><span>Новый пароль</span><div className="input-wrap"><KeyRound size={18} /><input type="password" minLength={15} value={next} onChange={(e) => setNext(e.target.value)} required /></div></label>
-          <label><span>Повторите новый пароль</span><div className="input-wrap"><KeyRound size={18} /><input type="password" minLength={15} value={confirm} onChange={(e) => setConfirm(e.target.value)} required /></div></label>
+          <label><span>Новый пароль</span><div className="input-wrap"><KeyRound size={18} /><input type="password" minLength={4} maxLength={256} value={next} onChange={(e) => setNext(e.target.value)} required /></div></label>
+          <label><span>Повторите новый пароль</span><div className="input-wrap"><KeyRound size={18} /><input type="password" minLength={4} maxLength={256} value={confirm} onChange={(e) => setConfirm(e.target.value)} required /></div></label>
           {error && <div className="form-error">{error}</div>}
           <button className="primary-button login-button" disabled={loading}>{loading ? <RefreshCw className="spin" size={18} /> : <ShieldCheck size={18} />} Сохранить пароль</button>
         </form>
@@ -1161,8 +1161,11 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [frameFPS, setFrameFPS] = useState(0);
 	const [keyboardOpen, setKeyboardOpen] = useState(false);
 	const [mobileText, setMobileText] = useState("");
-	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("direct");
-	const [coarsePointerClient] = useState(() => typeof window !== "undefined" && (window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0));
+	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
+	// The primary pointer, rather than the mere presence of a touchscreen,
+	// distinguishes a phone/tablet from a Windows laptop with touch support.
+	// Hybrid PCs must retain the normal local mouse cursor and absolute input.
+	const [coarsePointerClient] = useState(() => typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches);
 	const [dragLock, setDragLock] = useState(false);
 	const [controlsCollapsed, setControlsCollapsed] = useState(false);
 	const [screenScale, setScreenScale] = useState<"fit" | "50" | "75" | "100" | "125" | "150">("fit");
@@ -1191,7 +1194,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const flushInputQueueRef = useRef<() => void>(() => undefined);
 	const frameImageRef = useRef<HTMLImageElement>(null);
 	const frameSocketRef = useRef<WebSocket | null>(null);
-	const remoteCursorVisible = coarsePointerClient && pointerMode === "trackpad";
+	const mobileTrackpadMode = coarsePointerClient && pointerMode === "trackpad";
+	const remoteCursorVisible = mobileTrackpadMode;
 
 	useEffect(() => {
 		const viewport = viewportRef.current;
@@ -1564,7 +1568,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
   function movePointer(event: ReactPointerEvent<HTMLImageElement>) {
 	event.preventDefault();
 		if (event.pointerType !== "mouse" && updateTouchGesture(event)) return;
-		if (pointerMode === "trackpad") {
+		if (mobileTrackpadMode) {
 			if (trackpadGesture.current.pointerId !== event.pointerId) return;
 			const rect = event.currentTarget.getBoundingClientRect();
 			const size = ensureTrackpadCursor(event.currentTarget);
@@ -1618,7 +1622,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				return;
 			}
 		}
-		if (pointerMode === "trackpad") {
+		if (mobileTrackpadMode) {
 			ensureTrackpadCursor(event.currentTarget);
 			if (action === "down") {
 				event.currentTarget.setPointerCapture(event.pointerId);
@@ -1671,7 +1675,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
 			if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", x: directGesture.current.x, y: directGesture.current.y });
 			directGesture.current.pointerId = -1; directGesture.current.timer = 0;
-		} else if (pointerMode === "direct") {
+		} else if (!mobileTrackpadMode) {
 			sendInput({ type: "pointer", action: "up", button: "left", ...pointerPosition(event) });
 		}
 		trackpadGesture.current.pointerId = -1;
@@ -1763,8 +1767,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
   </div><footer className="remote-session-footer"><div className="remote-session-tools">
     <span><MousePointer2 size={15} /> {pointerMode === "direct" ? "Касание — левый клик · удержание — правый" : "Ведите пальцем — перемещайте курсор; короткое касание — клик"}</span>
     <div className="remote-pointer-modes">
-      <button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => { if (dragLock) toggleDragLock(); setPointerMode("direct"); }}><MousePointer2 size={14} /> Касание</button>
       <button type="button" className={`remote-tool-button ${pointerMode === "trackpad" ? "active" : ""}`} aria-pressed={pointerMode === "trackpad"} onClick={() => setPointerMode("trackpad")}><MousePointer2 size={14} /> Курсор</button>
+      <button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => { if (dragLock) toggleDragLock(); setPointerMode("direct"); }}><MousePointer2 size={14} /> Касание</button>
     </div>
     <button type="button" className="remote-tool-button" onClick={() => sendPointerTap("right")}><MousePointer2 size={14} /> ПКМ</button>
     <button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => { setKeyboardOpen((open) => !open); window.setTimeout(() => mobileKeyboardRef.current?.focus(), 50); }}><Keyboard size={14} /> Клавиатура</button>
@@ -2118,7 +2122,7 @@ function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User
     {(error || message) && <div className={error ? "panel-error settings-feedback" : "settings-success"}>{error || message}</div>}
     <section className="settings-grid">
       <article className="settings-card account-card"><div className="settings-card-head"><span className="stat-icon blue"><CircleUserRound size={20} /></span><div><h2>Профиль аккаунта</h2><p>Ваши текущие права в RemoteIt</p></div></div><div className="account-summary"><span className="avatar">{currentUser.username.slice(0, 1).toUpperCase()}</span><div><strong>{currentUser.username}</strong><small>{roleLabel}</small></div></div><div className="account-facts"><span><small>Права доступа</small><strong>{roleLabel}</strong></span><span><small>Имя входа</small><strong>@{currentUser.username}</strong></span><span><small>Защита</small><strong><ShieldCheck size={13} /> Включена</strong></span></div></article>
-      <article className="settings-card"><div className="settings-card-head"><span className="stat-icon green"><KeyRound size={20} /></span><div><h2>Изменить пароль</h2><p>Не менее 15 символов</p></div></div><form className="settings-form" onSubmit={changePassword}><label><span>Текущий пароль</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label><span>Новый пароль</span><input type="password" autoComplete="new-password" minLength={15} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label><label><span>Повторите новый пароль</span><input type="password" autoComplete="new-password" minLength={15} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label><button className="primary-button" disabled={loading}>{loading ? <RefreshCw size={17} className="spin" /> : <ShieldCheck size={17} />} Сохранить пароль</button></form></article>
+      <article className="settings-card"><div className="settings-card-head"><span className="stat-icon green"><KeyRound size={20} /></span><div><h2>Изменить пароль</h2><p>От 4 символов, без обязательных спецсимволов</p></div></div><form className="settings-form" onSubmit={changePassword}><label><span>Текущий пароль</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label><span>Новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label><label><span>Повторите новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label><button className="primary-button" disabled={loading}>{loading ? <RefreshCw size={17} className="spin" /> : <ShieldCheck size={17} />} Сохранить пароль</button></form></article>
       <article className="settings-card appearance-card"><div className="settings-card-head"><span className="stat-icon violet"><Palette size={20} /></span><div><h2>Внешний вид</h2><p>Белая тема используется по умолчанию</p></div></div><div className="theme-setting"><span>Оформление панели</span><ThemeSwitcher theme={theme} onChange={onTheme} /></div><small className="appearance-note">Выбор сохраняется только для этого браузера и не меняет тему у других администраторов.</small></article>
       <article className="settings-card sessions-card"><div className="settings-card-head"><span className="stat-icon violet"><Activity size={20} /></span><div><h2>Активные сессии</h2><p>{sessions.length} входов, срок каждой — 12 часов</p></div><button className="icon-button" onClick={() => void loadSessions()} aria-label="Обновить сессии"><RefreshCw size={17} className={sessionsLoading ? "spin" : ""} /></button></div><div className="sessions-list">{sessionsLoading && sessions.length === 0 ? <div className="session-placeholder">Загрузка…</div> : sessions.map((session) => <div className="session-row" key={session.id}><span className={`session-state ${session.current ? "current" : ""}`}><Monitor size={17} /></span><div><strong>{session.current ? "Текущая сессия" : session.userAgent || "Неизвестное устройство"}</strong><small>{session.ip || "IP неизвестен"} · активность {formatRelative(session.lastUsedAt)}</small></div>{session.current ? <span className="current-badge">эта сессия</span> : <button className="danger-button compact-action" onClick={() => void revokeSession(session.id)}><Ban size={14} /> Завершить</button>}</div>)}</div></article>
       <article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android APK</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a></div></article>
@@ -2224,7 +2228,7 @@ function ResetPasswordModal({ csrf, user, onClose, onDone }: { csrf: string; use
 			setError(reason instanceof Error ? reason.message : "Не удалось сбросить пароль");
 		} finally { setLoading(false); }
 	}
-	return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal small-modal"><div className="modal-head"><div><span className="eyebrow">СБРОС ДОСТУПА</span><h2>Новый пароль для {user.username}</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></div><form className="modal-form" onSubmit={submit}><label><span>Временный пароль</span><input type="password" minLength={15} value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></label><label><span>Повторите пароль</span><input type="password" minLength={15} value={confirm} onChange={(event) => setConfirm(event.target.value)} required /></label><div className="notice"><ShieldCheck size={18} /><span>Все текущие сессии пользователя завершатся. При следующем входе он обязан задать собственный пароль.</span></div>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Отмена</button><button className="primary-button" disabled={loading}>{loading ? <RefreshCw size={17} className="spin" /> : <KeyRound size={17} />} Сбросить</button></div></form></section></div>;
+	return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal small-modal"><div className="modal-head"><div><span className="eyebrow">СБРОС ДОСТУПА</span><h2>Новый пароль для {user.username}</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></div><form className="modal-form" onSubmit={submit}><label><span>Временный пароль</span><input type="password" minLength={4} maxLength={256} value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></label><label><span>Повторите пароль</span><input type="password" minLength={4} maxLength={256} value={confirm} onChange={(event) => setConfirm(event.target.value)} required /></label><div className="notice"><ShieldCheck size={18} /><span>Все текущие сессии пользователя завершатся. При следующем входе он обязан задать собственный пароль.</span></div>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Отмена</button><button className="primary-button" disabled={loading}>{loading ? <RefreshCw size={17} className="spin" /> : <KeyRound size={17} />} Сбросить</button></div></form></section></div>;
 }
 
 function CreateUserModal({ csrf, isOwner, onClose, onCreated }: { csrf: string; isOwner: boolean; onClose: () => void; onCreated: () => void }) {
@@ -2248,7 +2252,7 @@ function CreateUserModal({ csrf, isOwner, onClose, onCreated }: { csrf: string; 
     }
   }
 
-  return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}><section className="modal"><div className="modal-head"><div><span className="eyebrow">НОВАЯ УЧЁТНАЯ ЗАПИСЬ</span><h2>Создать пользователя</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></div><form onSubmit={submit} className="modal-form"><label><span>Отображаемое имя</span><input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Например, Алексей" maxLength={100} /></label><label><span>Логин</span><input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="alex" pattern="[A-Za-zА-Яа-яЁё0-9._-]{3,64}" required /></label><label><span>Роль</span><select value={role} onChange={(e) => setRole(e.target.value)}><option value="technician">Техник — инвентаризация без shell-команд</option><option value="viewer">Наблюдатель — только просмотр</option>{isOwner && <option value="admin">Администратор — пользователи и устройства</option>}</select></label><label><span>Временный пароль</span><input type="password" value={temporaryPassword} onChange={(e) => setTemporaryPassword(e.target.value)} minLength={15} placeholder="Минимум 15 символов" required /></label><div className="notice"><ShieldCheck size={18} /><span>При первом входе пользователь обязательно задаст собственный пароль.</span></div>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Отмена</button><button className="primary-button" disabled={loading}>{loading ? <RefreshCw className="spin" size={17} /> : <UserPlus size={17} />} Создать</button></div></form></section></div>;
+  return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}><section className="modal"><div className="modal-head"><div><span className="eyebrow">НОВАЯ УЧЁТНАЯ ЗАПИСЬ</span><h2>Создать пользователя</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></div><form onSubmit={submit} className="modal-form"><label><span>Отображаемое имя</span><input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Например, Алексей" maxLength={100} /></label><label><span>Логин</span><input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="alex" pattern="[A-Za-zА-Яа-яЁё0-9._-]{3,64}" required /></label><label><span>Роль</span><select value={role} onChange={(e) => setRole(e.target.value)}><option value="technician">Техник — инвентаризация без shell-команд</option><option value="viewer">Наблюдатель — только просмотр</option>{isOwner && <option value="admin">Администратор — пользователи и устройства</option>}</select></label><label><span>Временный пароль</span><input type="password" value={temporaryPassword} onChange={(e) => setTemporaryPassword(e.target.value)} minLength={4} maxLength={256} placeholder="Минимум 4 символа" required /></label><div className="notice"><ShieldCheck size={18} /><span>При первом входе пользователь обязательно задаст собственный пароль.</span></div>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Отмена</button><button className="primary-button" disabled={loading}>{loading ? <RefreshCw className="spin" size={17} /> : <UserPlus size={17} />} Создать</button></div></form></section></div>;
 }
 
 function TokensPage({ csrf, refreshKey, onCreate }: { csrf: string; refreshKey: number; onCreate: () => void }) {
