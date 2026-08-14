@@ -458,9 +458,6 @@ td code { color: #8becc2; font-size: 11px; padding: 4px 7px; border-radius: 5px;
 .remote-stream-stats > span { padding: 5px 7px; }
 .remote-stream-stats em { padding: 5px 7px; border-left: 1px solid rgba(255,255,255,.1); color: #aebac8; font-style: normal; letter-spacing: .04em; }
 .remote-screen.pointer-trackpad .remote-screen-image { cursor: default; }
-@media (pointer:coarse) {
-	.remote-screen.pointer-trackpad .remote-screen-image { cursor: none; }
-}
 .remote-screen-wait { width: 100%; height: 100%; display: grid; place-content: center; place-items: center; gap: 10px; padding: 28px; color: #718096; text-align: center; }
 .remote-screen-wait svg { color: #39e79b; opacity: .7; }
 .remote-screen-wait strong { color: #dce5ef; font-size: 14px; }

@@ -1214,7 +1214,7 @@ type desktopCapturer struct {
 	lastFrameWidth          int
 	lastFrameHeight         int
 	lastQuality             int
-	lastFullChroma          bool
+	lastChroma              desktopJPEGChroma
 	lastCursor              desktopCursorState
 	lastCursorVisible       bool
 }
@@ -1381,7 +1381,7 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 		(!cursorVisible || cursor == capturer.lastCursor) &&
 		cursorVisible == capturer.lastCursorVisible &&
 		capturer.lastFrameWidth == desiredWidth && capturer.lastFrameHeight == desiredHeight &&
-		capturer.lastQuality == profile.quality && capturer.lastFullChroma == profile.fullChroma {
+		capturer.lastQuality == profile.quality && capturer.lastChroma == profile.chroma {
 		return desktopCapture{
 			JPEG:           capturer.lastJPEG,
 			FrameWidth:     capturer.lastFrameWidth,
@@ -1478,7 +1478,7 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 	// 4-7 FPS ceiling measured on a 2560 px desktop.
 	captureMillis := int(time.Since(captureStartedAt).Milliseconds())
 	encodeStartedAt := time.Now()
-	encoded, encodeErr := capturer.encoder.EncodeBGRA(framePixels, frameWidth, frameHeight, profile.quality, profile.fullChroma)
+	encoded, encodeErr := capturer.encoder.EncodeBGRA(framePixels, frameWidth, frameHeight, profile.quality, profile.chroma)
 	if encodeErr != nil {
 		return desktopCapture{}, encodeErr
 	}
@@ -1487,7 +1487,7 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 	}
 	capturer.lastJPEG = encoded
 	capturer.lastFrameWidth, capturer.lastFrameHeight = frameWidth, frameHeight
-	capturer.lastQuality, capturer.lastFullChroma = profile.quality, profile.fullChroma
+	capturer.lastQuality, capturer.lastChroma = profile.quality, profile.chroma
 	capturer.lastCursor = cursor
 	capturer.lastCursorVisible = cursorVisible
 	return desktopCapture{JPEG: capturer.lastJPEG, FrameWidth: frameWidth, FrameHeight: frameHeight, ScreenX: capturer.screenX, ScreenY: capturer.screenY, ScreenWidth: capturer.screenWidth, ScreenHeight: capturer.screenHeight, CaptureMillis: captureMillis, CopyMillis: copyMillis, ScaleMillis: scaleMillis, EncodeMillis: int(time.Since(encodeStartedAt).Milliseconds()), CaptureBackend: captureBackend}, nil

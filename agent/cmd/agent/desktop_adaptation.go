@@ -2,21 +2,19 @@ package main
 
 import "time"
 
-// desktopCaptureInterval is the producer deadline, not the advertised output
-// limit. Windows/DWM, DXGI acquisition and the Go scheduler add a small fixed
-// delay between two deadlines; scheduling at exactly 16.67/33.33 ms therefore
-// produced only 52/28 observable surface frames. A modest acquisition lead
-// lets DXGI meet the next DWM presentation without queuing or duplicating old
-// images. The desktop itself still caps genuinely new frames at its refresh
-// rate, and all transport queues remain latest-only.
+// desktopCaptureInterval is the hard producer limit for the selected mode.
+// Capture is paced from absolute deadlines, so capture/encode time does not get
+// added to every period.  Do not schedule ahead of the advertised cadence:
+// doing so generated about 80 JPEGs/s in the 60 FPS mode on a real 1080p host,
+// wasting CPU and bandwidth while the viewer could only display the newest 60.
 func desktopCaptureInterval(targetFPS int) time.Duration {
 	switch targetFPS {
 	case 60:
-		return 12 * time.Millisecond
+		return time.Second / 60
 	case 30:
-		return 28 * time.Millisecond
+		return time.Second / 30
 	case 15:
-		return 64 * time.Millisecond
+		return time.Second / 15
 	default:
 		return time.Second / 30
 	}

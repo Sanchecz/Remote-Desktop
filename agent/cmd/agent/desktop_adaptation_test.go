@@ -5,14 +5,14 @@ import (
 	"time"
 )
 
-func TestDesktopCaptureIntervalLeadsDWMWithoutChangingModeLimit(t *testing.T) {
-	if got := desktopCaptureInterval(60); got != 12*time.Millisecond {
+func TestDesktopCaptureIntervalMatchesAdvertisedModeLimit(t *testing.T) {
+	if got := desktopCaptureInterval(60); got != time.Second/60 {
 		t.Fatalf("60 FPS producer interval = %s", got)
 	}
-	if got := desktopCaptureInterval(30); got != 28*time.Millisecond {
+	if got := desktopCaptureInterval(30); got != time.Second/30 {
 		t.Fatalf("30 FPS producer interval = %s", got)
 	}
-	if got := desktopCaptureInterval(15); got != 64*time.Millisecond {
+	if got := desktopCaptureInterval(15); got != time.Second/15 {
 		t.Fatalf("15 FPS producer interval = %s", got)
 	}
 }

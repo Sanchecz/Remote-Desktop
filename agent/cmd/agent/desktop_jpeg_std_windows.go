@@ -15,7 +15,7 @@ type desktopJPEGEncoder struct{}
 
 func (*desktopJPEGEncoder) Close() {}
 
-func (*desktopJPEGEncoder) EncodeBGRA(pixels []byte, width, height, quality int, _ bool) ([]byte, error) {
+func (*desktopJPEGEncoder) EncodeBGRA(pixels []byte, width, height, quality int, _ desktopJPEGChroma) ([]byte, error) {
 	if width <= 0 || height <= 0 || len(pixels) < width*height*4 {
 		return nil, errors.New("invalid desktop frame buffer")
 	}
