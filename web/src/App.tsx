@@ -177,7 +177,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "0.9.70";
+const LATEST_AGENT_VERSION = "0.9.72";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1165,7 +1165,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	// The primary pointer, rather than the mere presence of a touchscreen,
 	// distinguishes a phone/tablet from a Windows laptop with touch support.
 	// Hybrid PCs must retain the normal local mouse cursor and absolute input.
-	const [coarsePointerClient] = useState(() => typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches);
+	const [coarsePointerClient] = useState(() => typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches && !window.matchMedia("(any-pointer: fine)").matches);
 	const [dragLock, setDragLock] = useState(false);
 	const [controlsCollapsed, setControlsCollapsed] = useState(false);
 	const [screenScale, setScreenScale] = useState<"fit" | "50" | "75" | "100" | "125" | "150">("fit");
@@ -1196,6 +1196,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const frameSocketRef = useRef<WebSocket | null>(null);
 	const mobileTrackpadMode = coarsePointerClient && pointerMode === "trackpad";
 	const remoteCursorVisible = mobileTrackpadMode;
+	// Pointer input has its own WebSocket and must not be tied to the video FPS.
+	// 8 ms keeps a desktop mouse close to its native 125 Hz report cadence; touch
+	// stays at 60 Hz to avoid radio/battery churn while remaining immediate.
+	const pointerSendInterval = coarsePointerClient ? 16 : 8;
 
 	useEffect(() => {
 		const viewport = viewportRef.current;
@@ -1279,6 +1283,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		let fallbackStarted = false;
 		let lastFrameStatsAt = 0;
 		let lastPresentedSequence = -1;
+		let pendingPresentation: { frame: Blob; order: number } | null = null;
+		let presentationRunning = false;
+		let presentationOrder = 0;
 		frameArrivalTimes.current = [];
 		setFrameFPS(0);
     const refreshStatus = async () => {
@@ -1296,22 +1303,55 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
         if (!disposed) statusTimer = window.setTimeout(() => void refreshStatus(), 900);
       }
     };
+		const drainPresentationQueue = async () => {
+			if (presentationRunning || disposed) return;
+			presentationRunning = true;
+			try {
+				while (!disposed && pendingPresentation) {
+					const candidate = pendingPresentation;
+					pendingPresentation = null;
+					const nextURL = URL.createObjectURL(candidate.frame);
+					const preloaded = new Image();
+					preloaded.decoding = "async";
+					const loaded = new Promise<void>((resolve, reject) => {
+						preloaded.onload = () => resolve();
+						preloaded.onerror = () => reject(new Error("JPEG decode failed"));
+					});
+					preloaded.src = nextURL;
+					try {
+						await preloaded.decode();
+					} catch {
+						try { await loaded; } catch { URL.revokeObjectURL(nextURL); continue; }
+					}
+					if (disposed) { URL.revokeObjectURL(nextURL); break; }
+					// JPEG decode is deliberately single-flight. If several of the six
+					// transport lanes delivered newer frames while this one decoded, skip
+					// the obsolete bitmap instead of showing latency-producing history.
+					if (presentationOrder > candidate.order) {
+						URL.revokeObjectURL(nextURL);
+						continue;
+					}
+					const previousURL = currentURL;
+					currentURL = nextURL;
+					if (frameImageRef.current) frameImageRef.current.src = nextURL;
+					else setFrameURL(nextURL);
+					if (previousURL) URL.revokeObjectURL(previousURL);
+					const now = performance.now();
+					frameArrivalTimes.current = [...frameArrivalTimes.current.filter((timestamp) => now - timestamp < 1_000), now];
+					if (now - lastFrameStatsAt >= 250) {
+						lastFrameStatsAt = now;
+						setFrameFPS(frameArrivalTimes.current.length);
+					}
+				}
+			} finally {
+				presentationRunning = false;
+				if (!disposed && pendingPresentation) void drainPresentationQueue();
+			}
+		};
     const presentFrame = (frame: Blob) => {
 			if (disposed || frame.size < 100) return;
-			const nextURL = URL.createObjectURL(frame);
-			if (currentURL) URL.revokeObjectURL(currentURL);
-			currentURL = nextURL;
-			const now = performance.now();
-			frameArrivalTimes.current = [...frameArrivalTimes.current.filter((timestamp) => now - timestamp < 1_000), now];
-			// Re-rendering the complete toolbar for every JPEG made 60 FPS starve
-			// pointer handlers. Mount the first frame with React, then swap the image
-			// source directly and refresh the numeric statistics only four times/sec.
-			if (frameImageRef.current) frameImageRef.current.src = nextURL;
-			else setFrameURL(nextURL);
-			if (now - lastFrameStatsAt >= 250) {
-				lastFrameStatsAt = now;
-				setFrameFPS(frameArrivalTimes.current.length);
-			}
+			pendingPresentation = { frame, order: ++presentationOrder };
+			void drainPresentationQueue();
 		};
     const refreshFrame = async () => {
       if (disposed) return;
@@ -1388,6 +1428,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
     void refreshStatus();
     return () => {
       disposed = true;
+			pendingPresentation = null;
 			frameSockets.forEach((socket) => socket.close());
 			inputSocket?.close();
 			if (frameSocketRef.current === inputSocket) frameSocketRef.current = null;
@@ -1583,7 +1624,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			};
 			trackpadCursor.current = { ...next, ready: true };
 			const now = performance.now();
-			if (now - lastPointerSent.current >= 32) {
+			if (now - lastPointerSent.current >= pointerSendInterval) {
 				lastPointerSent.current = now;
 				// A trackpad drag is an explicit control action. Activating control on
 				// the first movement makes the cursor follow the finger immediately;
@@ -1604,7 +1645,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			}
 		}
     const now = performance.now();
-		if (now-lastPointerSent.current < 32) return;
+		if (now-lastPointerSent.current < pointerSendInterval) return;
     lastPointerSent.current = now;
 		sendInput({ type: "pointer", action: "move", ...pointerPosition(event) }, directGesture.current.leftDown);
   }

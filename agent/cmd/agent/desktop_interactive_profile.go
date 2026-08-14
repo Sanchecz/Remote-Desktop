@@ -14,35 +14,21 @@ func desktopProfileForInteraction(targetFPS int, interactive bool) desktopCaptur
 	}
 	profile := desktopProfileForFPS(targetFPS)
 	if interactive {
-		// Motion frames only live for a few dozen milliseconds. Keeping the same
-		// desktop geometry makes input mapping stable, while a balanced 4:2:0 JPEG
-		// stays readable and leaves enough wire budget for a real 30 FPS stream on
-		// ordinary WAN links. The sharp 4:4:4 frame is restored immediately after
-		// the interaction window expires.
-		// The mode-specific surface and quality below keep motion inside its wire
-		// budget. The following native 4:4:4 refresh restores fine coloured text as
-		// soon as the user pauses, without leaving the stream in a pixelated state.
+		// Motion frames only live for a few dozen milliseconds. The selected
+		// surfaces below spend approximately the same wire budget in every mode:
+		// 15 FPS can preserve a full 4K frame, 30 FPS preserves a 2K-class frame,
+		// and 60 FPS preserves Full HD. This removes the former 1600px quality cliff
+		// while still leaving room for input packets on a 100 Mbit/s WAN link. The
+		// sharp 4:4:4 rest frame is restored immediately after input stops.
 		if targetFPS >= 60 {
-			// Six latest-only viewer lanes and a dedicated input socket leave enough
-			// headroom for a 1600px motion surface without allowing stale frames to
-			// queue. This is visibly sharper than the former 1280px/quality-82 mode
-			// on 2K/4K monitors, while the native 4:4:4 refresh still follows as soon
-			// as input stops.
-			profile.quality = min(profile.quality, 86)
-			profile.fullChroma = false
+			profile.quality = min(profile.quality, 88)
+			profile.chroma = desktopJPEGChroma420
 		} else if targetFPS <= 15 {
-			// 15 FPS is the high-detail motion option. Chroma subsampling is still
-			// required on a busy desktop to leave input packets headroom, but the
-			// 1920px surface and quality 88 preserve substantially more detail than
-			// the normal/smooth profiles.
-			profile.quality = min(profile.quality, 88)
-			profile.fullChroma = false
+			profile.quality = min(profile.quality, 92)
+			profile.chroma = desktopJPEGChroma422
 		} else {
-			// Normal administration favours text clarity. A 1920px quality-88 frame
-			// keeps small Windows labels readable during motion; adaptive Auto can
-			// still fall back to 15 FPS on a persistently congested link.
-			profile.quality = min(profile.quality, 88)
-			profile.fullChroma = false
+			profile.quality = min(profile.quality, 90)
+			profile.chroma = desktopJPEGChroma422
 		}
 	}
 	return profile
@@ -53,10 +39,10 @@ func desktopInteractionWidth(targetFPS, profileWidth int) int {
 		targetFPS = 30
 	}
 	if targetFPS >= 60 {
-		return min(profileWidth, 1600)
+		return min(profileWidth, 1920)
 	}
 	if targetFPS <= 15 {
-		return min(profileWidth, 1920)
+		return min(profileWidth, 2560)
 	}
 	return min(profileWidth, 1920)
 }

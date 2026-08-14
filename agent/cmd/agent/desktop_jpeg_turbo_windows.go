@@ -35,7 +35,7 @@ func (encoder *desktopJPEGEncoder) Close() {
 	}
 }
 
-func (encoder *desktopJPEGEncoder) EncodeBGRA(pixels []byte, width, height, quality int, fullChroma bool) ([]byte, error) {
+func (encoder *desktopJPEGEncoder) EncodeBGRA(pixels []byte, width, height, quality int, chroma desktopJPEGChroma) ([]byte, error) {
 	if width <= 0 || height <= 0 || len(pixels) < width*height*4 {
 		return nil, errors.New("invalid desktop frame buffer")
 	}
@@ -46,7 +46,9 @@ func (encoder *desktopJPEGEncoder) EncodeBGRA(pixels []byte, width, height, qual
 		}
 	}
 	subsampling := C.int(C.TJSAMP_420)
-	if fullChroma {
+	if chroma == desktopJPEGChroma422 {
+		subsampling = C.int(C.TJSAMP_422)
+	} else if chroma == desktopJPEGChroma444 {
 		// Desktop text and thin UI glyphs lose a surprising amount of detail with
 		// 4:2:0 chroma subsampling. The 15/30 FPS profiles use 4:4:4 so coloured
 		// text stays crisp; the 60 FPS profile also keeps 4:4:4 while controlling
