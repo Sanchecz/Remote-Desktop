@@ -8,10 +8,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lxn/walk"
 	"github.com/lxn/win"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -52,13 +54,13 @@ func newAgentUIScale(dpi int) agentUIScale {
 	if dpi < 96 {
 		dpi = 96
 	}
-	return agentUIScale{dpi: dpi, zoom: 1, baseW: 1450, baseH: 1085, fontPointFactor: 1.0}
+	return agentUIScale{dpi: dpi, zoom: 1, baseW: 1536, baseH: 1024, fontPointFactor: 1.0}
 }
 
 func compactAgentWindowPixels(screenWidth, screenHeight int) walk.Size {
 	const (
-		designWidth  = 1450
-		designHeight = 1085
+		designWidth  = 1536
+		designHeight = 1024
 		maxWidth     = designWidth
 		maxHeight    = designHeight
 	)
@@ -69,10 +71,10 @@ func compactAgentWindowPixels(screenWidth, screenHeight int) walk.Size {
 		screenHeight = 1080
 	}
 	// SetWindowPos receives the outer window rectangle.  Keep enough room for the
-	// Windows title bar and frame so a 1085px reference canvas never spills below
-	// the work area on a 1080/1200px display.  On the workstation used for the
-	// approved reference (1840x1162) this yields the native 1450x1085 composition.
-	const chromeReserve = 58
+	// Windows title bar and frame so the reference canvas never spills below the
+	// work area. The approved 1536x1024 composition is rendered at native size on
+	// Full HD displays and scales as vector geometry on smaller workstations.
+	const chromeReserve = 56
 	availableWidth := min(maxWidth, max(800, screenWidth-60))
 	availableHeight := min(maxHeight, max(599, screenHeight-chromeReserve))
 	width := availableWidth
@@ -173,12 +175,32 @@ type agentDashboardSnapshot struct {
 	RemoteSession  string
 	Server         string
 	Connected      bool
+	Severity       agentConnectionSeverity
 	ConnectionText string
 	LastHeartbeat  string
 }
 
+type agentConnectionSeverity uint8
+
+const (
+	agentStatusCritical agentConnectionSeverity = iota
+	agentStatusReconnecting
+	agentStatusHealthy
+)
+
+func agentSeverityFor(connected, serviceRunning, serviceKnown bool) agentConnectionSeverity {
+	if connected {
+		return agentStatusHealthy
+	}
+	if serviceKnown && serviceRunning {
+		return agentStatusReconnecting
+	}
+	return agentStatusCritical
+}
+
 type agentDashboardAction struct {
 	Bounds walk.Rectangle
+	Key    int
 	Run    func()
 }
 
@@ -203,187 +225,861 @@ func newAgentDashboard(parent walk.Container, window *walk.MainWindow, theme *ag
 	// unrelated text symbols.
 	fluentIcons, _ := walk.NewFont("Segoe MDL2 Assets", scale.font(14), 0)
 	fonts = append(fonts, fluentIcons)
-	for _, item := range fonts { if item == nil { return nil, fmt.Errorf("create Agent dashboard font") } }
+	for _, item := range fonts {
+		if item == nil {
+			return nil, fmt.Errorf("create Agent dashboard font")
+		}
+	}
 	_ = window // The owner retains the dashboard and its process-lifetime fonts.
 	var widget *walk.CustomWidget
 	var hitTargets []agentDashboardAction
 	widget, err := walk.NewCustomWidgetPixels(parent, 0, func(canvas *walk.Canvas, _ walk.Rectangle) error {
 		bounds := widget.ClientBoundsPixels()
-		if bounds.Width < 100 || bounds.Height < 100 { return nil }
+		if bounds.Width < 100 || bounds.Height < 100 {
+			return nil
+		}
 		sx, sy := float64(bounds.Width)/1450.0, float64(bounds.Height)/1085.0
 		s := min(sx, sy)
-		r := func(x, y, w, h int) walk.Rectangle { return walk.Rectangle{X: int(float64(x)*sx+.5), Y: int(float64(y)*sy+.5), Width: max(1,int(float64(w)*sx+.5)), Height: max(1,int(float64(h)*sy+.5))} }
-		text := func(value string, f *walk.Font, color walk.Color, rect walk.Rectangle, format walk.DrawTextFormat) { _ = canvas.DrawTextPixels(value, f, color, rect, format|walk.TextNoPrefix) }
-		fill := func(brush walk.Brush, rect walk.Rectangle, radius int) { _ = canvas.FillRoundedRectanglePixels(brush, rect, walk.Size{Width:max(1,int(float64(radius)*s)),Height:max(1,int(float64(radius)*s))}) }
-		stroke := func(pen walk.Pen, rect walk.Rectangle, radius int) { _ = canvas.DrawRoundedRectanglePixels(pen, rect, walk.Size{Width:max(1,int(float64(radius)*s)),Height:max(1,int(float64(radius)*s))}) }
-		linePen, _ := walk.NewCosmeticPen(walk.PenSolid, walk.RGB(222,231,226)); defer linePen.Dispose()
-		shadowFar, _ := walk.NewSolidColorBrush(walk.RGB(237, 242, 239)); defer shadowFar.Dispose()
-		shadowNear, _ := walk.NewSolidColorBrush(walk.RGB(245, 247, 246)); defer shadowNear.Dispose()
-		offlineBrush, _ := walk.NewSolidColorBrush(walk.RGB(211, 67, 67)); defer offlineBrush.Dispose()
-		sidebarBrush, _ := walk.NewSolidColorBrush(walk.RGB(252, 253, 252)); defer sidebarBrush.Dispose()
-		greenHaloBrush, _ := walk.NewSolidColorBrush(walk.RGB(218, 244, 232)); defer greenHaloBrush.Dispose()
-		sidebarAccentBrush, _ := walk.NewSolidColorBrush(walk.RGB(239, 249, 244)); defer sidebarAccentBrush.Dispose()
-		muted, ink, green := walk.RGB(95,107,101), walk.RGB(24,32,29), walk.RGB(12,151,98)
-		greenPen, _ := walk.NewGeometricPen(walk.PenSolid, max(2, int(2*s+.5)), theme.greenBrush); defer greenPen.Dispose()
-		badgePen, _ := walk.NewGeometricPen(walk.PenSolid, max(2, int(2.2*s+.5)), theme.greenBrush); defer badgePen.Dispose()
-		whitePen, _ := walk.NewGeometricPen(walk.PenSolid, max(2, int(4*s+.5)), theme.readyRingBrush); defer whitePen.Dispose()
-		whiteThinPen, _ := walk.NewGeometricPen(walk.PenSolid, max(1, int(2*s+.5)), theme.readyRingBrush); defer whiteThinPen.Dispose()
+		r := func(x, y, w, h int) walk.Rectangle {
+			return walk.Rectangle{X: int(float64(x)*sx + .5), Y: int(float64(y)*sy + .5), Width: max(1, int(float64(w)*sx+.5)), Height: max(1, int(float64(h)*sy+.5))}
+		}
+		text := func(value string, f *walk.Font, color walk.Color, rect walk.Rectangle, format walk.DrawTextFormat) {
+			_ = canvas.DrawTextPixels(value, f, color, rect, format|walk.TextNoPrefix)
+		}
+		fill := func(brush walk.Brush, rect walk.Rectangle, radius int) {
+			_ = canvas.FillRoundedRectanglePixels(brush, rect, walk.Size{Width: max(1, int(float64(radius)*s)), Height: max(1, int(float64(radius)*s))})
+		}
+		stroke := func(pen walk.Pen, rect walk.Rectangle, radius int) {
+			_ = canvas.DrawRoundedRectanglePixels(pen, rect, walk.Size{Width: max(1, int(float64(radius)*s)), Height: max(1, int(float64(radius)*s))})
+		}
+		linePen, _ := walk.NewCosmeticPen(walk.PenSolid, walk.RGB(222, 231, 226))
+		defer linePen.Dispose()
+		shadowFar, _ := walk.NewSolidColorBrush(walk.RGB(237, 242, 239))
+		defer shadowFar.Dispose()
+		shadowNear, _ := walk.NewSolidColorBrush(walk.RGB(245, 247, 246))
+		defer shadowNear.Dispose()
+		offlineBrush, _ := walk.NewSolidColorBrush(walk.RGB(211, 67, 67))
+		defer offlineBrush.Dispose()
+		offlineSoftBrush, _ := walk.NewSolidColorBrush(walk.RGB(255, 242, 242))
+		defer offlineSoftBrush.Dispose()
+		sidebarBrush, _ := walk.NewSolidColorBrush(walk.RGB(252, 253, 252))
+		defer sidebarBrush.Dispose()
+		greenHaloBrush, _ := walk.NewSolidColorBrush(walk.RGB(218, 244, 232))
+		defer greenHaloBrush.Dispose()
+		sidebarAccentBrush, _ := walk.NewSolidColorBrush(walk.RGB(239, 249, 244))
+		defer sidebarAccentBrush.Dispose()
+		muted, ink, green := walk.RGB(95, 107, 101), walk.RGB(24, 32, 29), walk.RGB(12, 151, 98)
+		greenPen, _ := walk.NewGeometricPen(walk.PenSolid, max(2, int(2*s+.5)), theme.greenBrush)
+		defer greenPen.Dispose()
+		badgePen, _ := walk.NewGeometricPen(walk.PenSolid, max(2, int(2.2*s+.5)), theme.greenBrush)
+		defer badgePen.Dispose()
+		whitePen, _ := walk.NewGeometricPen(walk.PenSolid, max(2, int(4*s+.5)), theme.readyRingBrush)
+		defer whitePen.Dispose()
+		whiteThinPen, _ := walk.NewGeometricPen(walk.PenSolid, max(1, int(2*s+.5)), theme.readyRingBrush)
+		defer whiteThinPen.Dispose()
 		surface := func(rect walk.Rectangle, radius int, brush walk.Brush, pen walk.Pen) {
 			far := rect
-			far.X += max(1, int(2*s+.5)); far.Y += max(2, int(7*s+.5)); far.Width -= max(2, int(4*s+.5)); far.Height -= max(1, int(3*s+.5))
+			far.X += max(1, int(2*s+.5))
+			far.Y += max(2, int(7*s+.5))
+			far.Width -= max(2, int(4*s+.5))
+			far.Height -= max(1, int(3*s+.5))
 			fill(shadowFar, far, radius+2)
 			near := rect
-			near.X += max(1, int(1*s+.5)); near.Y += max(1, int(3*s+.5)); near.Width -= max(2, int(2*s+.5)); near.Height -= max(1, int(1*s+.5))
+			near.X += max(1, int(1*s+.5))
+			near.Y += max(1, int(3*s+.5))
+			near.Width -= max(2, int(2*s+.5))
+			near.Height -= max(1, int(1*s+.5))
 			fill(shadowNear, near, radius+1)
 			fill(brush, rect, radius)
 			stroke(pen, rect, radius)
 		}
 		glyphs := map[string]string{
-				"home": "\ue80f", "panel": "\ue8a7", "refresh": "\ue895", "log": "\ue8fd",
-				"folder": "\ue838", "settings": "\ue713", "device": "\ue7f4", "connection": "\ue701",
-				"server": "\ue774", "protocol": "\ue9d9", "shield": "\ue83d", "lock": "\ue72e",
+			"home": "\ue80f", "panel": "\ue8a7", "refresh": "\ue895", "log": "\ue8fd",
+			"folder": "\ue838", "settings": "\ue713", "device": "\ue7f4", "connection": "\ue701",
+			"server": "\ue774", "protocol": "\ue9d9", "shield": "\ue83d", "lock": "\ue72e",
 		}
 		drawGlyph := func(kind string, box walk.Rectangle, color walk.Color) bool {
 			glyph, ok := glyphs[kind]
-			if !ok { return false }
+			if !ok {
+				return false
+			}
 			text(glyph, fonts[13], color, box, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
 			return true
 		}
 		drawIcon := func(kind string, box walk.Rectangle) {
-			if drawGlyph(kind, box, green) { return }
-			p := func(x, y float64) walk.Point { return walk.Point{X:box.X+int(float64(box.Width)*x+.5),Y:box.Y+int(float64(box.Height)*y+.5)} }
-			draw := func(points ...walk.Point) { for index:=1; index<len(points); index++ { _=canvas.DrawLinePixels(greenPen,points[index-1],points[index]) } }
-			switch kind {
-			case "home": draw(p(.18,.50),p(.50,.20),p(.82,.50)); draw(p(.28,.43),p(.28,.80),p(.72,.80),p(.72,.43))
-			case "panel": draw(p(.20,.72),p(.72,.20)); draw(p(.48,.20),p(.72,.20),p(.72,.44)); draw(p(.20,.80),p(.80,.80))
-			case "refresh": draw(p(.25,.42),p(.38,.25),p(.63,.25),p(.78,.42)); draw(p(.78,.58),p(.63,.75),p(.38,.75),p(.22,.58)); draw(p(.20,.28),p(.38,.25),p(.34,.43)); draw(p(.80,.72),p(.63,.75),p(.67,.57))
-			case "log": draw(p(.24,.27),p(.76,.27)); draw(p(.24,.50),p(.76,.50)); draw(p(.24,.73),p(.76,.73))
-			case "folder": draw(p(.16,.34),p(.38,.34),p(.45,.24),p(.75,.24),p(.84,.36),p(.84,.76),p(.16,.76),p(.16,.34))
-			case "settings": draw(p(.20,.28),p(.80,.28)); draw(p(.20,.50),p(.80,.50)); draw(p(.20,.72),p(.80,.72)); _=canvas.FillEllipsePixels(theme.greenBrush,walk.Rectangle{X:p(.38,.28).X-2,Y:p(.38,.28).Y-2,Width:5,Height:5}); _=canvas.FillEllipsePixels(theme.greenBrush,walk.Rectangle{X:p(.65,.50).X-2,Y:p(.65,.50).Y-2,Width:5,Height:5}); _=canvas.FillEllipsePixels(theme.greenBrush,walk.Rectangle{X:p(.46,.72).X-2,Y:p(.46,.72).Y-2,Width:5,Height:5})
-			case "device": draw(p(.18,.22),p(.82,.22),p(.82,.68),p(.18,.68),p(.18,.22)); draw(p(.38,.80),p(.62,.80)); draw(p(.50,.68),p(.50,.80))
-			case "connection": draw(p(.16,.61),p(.29,.48),p(.42,.61),p(.58,.41),p(.72,.54),p(.84,.41))
-			case "server": draw(p(.50,.16),p(.82,.50),p(.50,.84),p(.18,.50),p(.50,.16))
-			case "protocol": draw(p(.28,.25),p(.28,.75)); draw(p(.50,.38),p(.50,.75)); draw(p(.72,.18),p(.72,.75))
-			case "shield": draw(p(.50,.14),p(.80,.27),p(.75,.65),p(.50,.84),p(.25,.65),p(.20,.27),p(.50,.14))
-			case "check":
-				if box.Width <= max(22, int(24*s+.5)) {
-					_ = canvas.FillEllipsePixels(greenHaloBrush, box)
-					_ = canvas.DrawLinePixels(badgePen, p(.24,.52), p(.43,.70))
-					_ = canvas.DrawLinePixels(badgePen, p(.43,.70), p(.78,.29))
-					return
+			if drawGlyph(kind, box, green) {
+				return
+			}
+			p := func(x, y float64) walk.Point {
+				return walk.Point{X: box.X + int(float64(box.Width)*x+.5), Y: box.Y + int(float64(box.Height)*y+.5)}
+			}
+			draw := func(points ...walk.Point) {
+				for index := 1; index < len(points); index++ {
+					_ = canvas.DrawLinePixels(greenPen, points[index-1], points[index])
 				}
+			}
+			switch kind {
+			case "home":
+				draw(p(.18, .50), p(.50, .20), p(.82, .50))
+				draw(p(.28, .43), p(.28, .80), p(.72, .80), p(.72, .43))
+			case "panel":
+				draw(p(.20, .72), p(.72, .20))
+				draw(p(.48, .20), p(.72, .20), p(.72, .44))
+				draw(p(.20, .80), p(.80, .80))
+			case "refresh":
+				draw(p(.25, .42), p(.38, .25), p(.63, .25), p(.78, .42))
+				draw(p(.78, .58), p(.63, .75), p(.38, .75), p(.22, .58))
+				draw(p(.20, .28), p(.38, .25), p(.34, .43))
+				draw(p(.80, .72), p(.63, .75), p(.67, .57))
+			case "log":
+				draw(p(.24, .27), p(.76, .27))
+				draw(p(.24, .50), p(.76, .50))
+				draw(p(.24, .73), p(.76, .73))
+			case "folder":
+				draw(p(.16, .34), p(.38, .34), p(.45, .24), p(.75, .24), p(.84, .36), p(.84, .76), p(.16, .76), p(.16, .34))
+			case "settings":
+				draw(p(.20, .28), p(.80, .28))
+				draw(p(.20, .50), p(.80, .50))
+				draw(p(.20, .72), p(.80, .72))
+				_ = canvas.FillEllipsePixels(theme.greenBrush, walk.Rectangle{X: p(.38, .28).X - 2, Y: p(.38, .28).Y - 2, Width: 5, Height: 5})
+				_ = canvas.FillEllipsePixels(theme.greenBrush, walk.Rectangle{X: p(.65, .50).X - 2, Y: p(.65, .50).Y - 2, Width: 5, Height: 5})
+				_ = canvas.FillEllipsePixels(theme.greenBrush, walk.Rectangle{X: p(.46, .72).X - 2, Y: p(.46, .72).Y - 2, Width: 5, Height: 5})
+			case "device":
+				draw(p(.18, .22), p(.82, .22), p(.82, .68), p(.18, .68), p(.18, .22))
+				draw(p(.38, .80), p(.62, .80))
+				draw(p(.50, .68), p(.50, .80))
+			case "connection":
+				draw(p(.16, .61), p(.29, .48), p(.42, .61), p(.58, .41), p(.72, .54), p(.84, .41))
+			case "server":
+				draw(p(.50, .16), p(.82, .50), p(.50, .84), p(.18, .50), p(.50, .16))
+			case "protocol":
+				draw(p(.28, .25), p(.28, .75))
+				draw(p(.50, .38), p(.50, .75))
+				draw(p(.72, .18), p(.72, .75))
+			case "shield":
+				draw(p(.50, .14), p(.80, .27), p(.75, .65), p(.50, .84), p(.25, .65), p(.20, .27), p(.50, .14))
+			case "check":
 				_ = canvas.FillEllipsePixels(greenHaloBrush, box)
 				inset := max(1, int(2*s+.5))
-				inner := walk.Rectangle{X:box.X+inset,Y:box.Y+inset,Width:max(1,box.Width-2*inset),Height:max(1,box.Height-2*inset)}
+				inner := walk.Rectangle{X: box.X + inset, Y: box.Y + inset, Width: max(1, box.Width-2*inset), Height: max(1, box.Height-2*inset)}
 				_ = canvas.FillEllipsePixels(theme.greenBrush, inner)
-				ip := func(x, y float64) walk.Point { return walk.Point{X:inner.X+int(float64(inner.Width)*x+.5),Y:inner.Y+int(float64(inner.Height)*y+.5)} }
-				_ = canvas.DrawLinePixels(whiteThinPen,ip(.22,.52),ip(.43,.72))
-				_ = canvas.DrawLinePixels(whiteThinPen,ip(.43,.72),ip(.79,.29))
+				ip := func(x, y float64) walk.Point {
+					return walk.Point{X: inner.X + int(float64(inner.Width)*x+.5), Y: inner.Y + int(float64(inner.Height)*y+.5)}
+				}
+				_ = canvas.DrawLinePixels(whiteThinPen, ip(.22, .52), ip(.43, .72))
+				_ = canvas.DrawLinePixels(whiteThinPen, ip(.43, .72), ip(.79, .29))
 			}
 		}
 		drawStatusBadge := func(box walk.Rectangle) {
 			_ = canvas.FillEllipsePixels(greenHaloBrush, box)
+			inset := max(1, int(2*s+.5))
+			inner := walk.Rectangle{X: box.X + inset, Y: box.Y + inset, Width: max(1, box.Width-2*inset), Height: max(1, box.Height-2*inset)}
+			_ = canvas.FillEllipsePixels(theme.greenBrush, inner)
 			point := func(x, y float64) walk.Point {
-				return walk.Point{X: box.X + int(float64(box.Width)*x+.5), Y: box.Y + int(float64(box.Height)*y+.5)}
+				return walk.Point{X: inner.X + int(float64(inner.Width)*x+.5), Y: inner.Y + int(float64(inner.Height)*y+.5)}
 			}
-			_ = canvas.DrawLinePixels(badgePen, point(.24,.52), point(.43,.70))
-			_ = canvas.DrawLinePixels(badgePen, point(.43,.70), point(.78,.29))
+			_ = canvas.DrawLinePixels(whiteThinPen, point(.24, .52), point(.43, .70))
+			_ = canvas.DrawLinePixels(whiteThinPen, point(.43, .70), point(.78, .29))
 		}
 		_ = canvas.FillRectanglePixels(theme.pageBrush, bounds)
-		_ = canvas.FillRectanglePixels(sidebarBrush, r(0,0,304,1085))
-		_ = canvas.FillRectanglePixels(sidebarAccentBrush, r(0,0,7,1085))
-		_ = canvas.DrawLinePixels(linePen, walk.Point{X:r(304,0,1,1).X,Y:0}, walk.Point{X:r(304,0,1,1).X,Y:bounds.Height})
+		_ = canvas.FillRectanglePixels(sidebarBrush, r(0, 0, 304, 1085))
+		_ = canvas.FillRectanglePixels(sidebarAccentBrush, r(0, 0, 7, 1085))
+		_ = canvas.DrawLinePixels(linePen, walk.Point{X: r(304, 0, 1, 1).X, Y: 0}, walk.Point{X: r(304, 0, 1, 1).X, Y: bounds.Height})
 
 		// Brand and navigation.
-		fill(theme.iconBrush, r(39,43,50,50), 15)
-		_ = canvas.DrawImageStretchedPixels(onlineIcon, r(46,51,36,36))
-		text("RemoteIt", fonts[2], ink, r(104,44,164,48), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-		text("Агент безопасного\nудалённого доступа", fonts[4], muted, r(40,108,220,44), walk.TextLeft|walk.TextTop|walk.TextWordbreak)
-		nav := []struct{ icon, label string }{{"home","Обзор"},{"panel","Панель управления"},{"refresh","Проверить соединение"},{"id","Remote ID"},{"log","Журнал Agent"},{"folder","Папка Agent"},{"settings","Настройки"}}
+		fill(theme.iconBrush, r(34, 35, 62, 62), 18)
+		stroke(theme.activeBorderPen, r(34, 35, 62, 62), 18)
+		_ = canvas.DrawImageStretchedPixels(onlineIcon, r(45, 46, 40, 40))
+		text("RemoteIt", fonts[2], ink, r(108, 42, 164, 48), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text("АГЕНТ УДАЛЁННОГО ДОСТУПА", fonts[12], green, r(40, 112, 224, 20), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text("Защищённое подключение к панели", fonts[6], muted, r(40, 133, 224, 22), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		text("УПРАВЛЕНИЕ", fonts[12], muted, r(40, 166, 180, 18), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		nav := []struct{ icon, label string }{{"home", "Обзор"}, {"panel", "Панель управления"}, {"refresh", "Проверить соединение"}, {"id", "Remote ID"}, {"log", "Журнал Agent"}, {"folder", "Папка Agent"}, {"settings", "Настройки"}}
+		status := snapshot()
 		hitTargets = hitTargets[:0]
 		for index, item := range nav {
-			y := 183+index*57; card := r(30,y,244,48)
-			if index==6 { _=canvas.DrawLinePixels(linePen,walk.Point{X:r(42,y-6,1,1).X,Y:r(42,y-6,1,1).Y},walk.Point{X:r(262,y-6,1,1).X,Y:r(262,y-6,1,1).Y}) }
-			if index==0 { fill(theme.softGreenBrush,card,12); stroke(theme.activeBorderPen,card,12); fill(theme.greenBrush,r(30,y+9,4,30),2) }
-			iconBox:=r(43,y+7,34,34)
-			if index==0 {
-				fill(theme.greenBrush,iconBox,10)
-				if item.icon=="id" { text("ID",fonts[5],walk.RGB(255,255,255),iconBox,walk.TextCenter|walk.TextVCenter|walk.TextSingleLine) } else { _=drawGlyph(item.icon,r(51,y+15,18,18),walk.RGB(255,255,255)) }
-			} else {
-				fill(theme.iconBrush,iconBox,10)
-				if item.icon=="id" { text("ID",fonts[5],green,iconBox,walk.TextCenter|walk.TextVCenter|walk.TextSingleLine) } else { drawIcon(item.icon,r(51,y+15,18,18)) }
+			y := 190 + index*57
+			card := r(30, y, 244, 48)
+			if index == 6 {
+				_ = canvas.DrawLinePixels(linePen, walk.Point{X: r(42, y-6, 1, 1).X, Y: r(42, y-6, 1, 1).Y}, walk.Point{X: r(262, y-6, 1, 1).X, Y: r(262, y-6, 1, 1).Y})
 			}
-			labelFont, labelColor:=fonts[4],ink; if index==0 { labelFont,labelColor=fonts[5],green }; text(item.label,labelFont,labelColor,r(89,y,170,48),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
-			if index>0 && index-1 < len(actions) { hitTargets=append(hitTargets,agentDashboardAction{Bounds:card,Run:actions[index-1]}) }
+			if index == 0 {
+				surface(card, 12, theme.softGreenBrush, theme.activeBorderPen)
+				fill(theme.greenBrush, r(30, y+8, 5, 32), 3)
+			}
+			iconBox := r(43, y+7, 34, 34)
+			if index == 0 {
+				fill(theme.greenBrush, iconBox, 10)
+				if item.icon == "id" {
+					text("ID", fonts[5], walk.RGB(255, 255, 255), iconBox, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+				} else {
+					_ = drawGlyph(item.icon, r(51, y+15, 18, 18), walk.RGB(255, 255, 255))
+				}
+			} else {
+				fill(theme.iconBrush, iconBox, 10)
+				if item.icon == "id" {
+					text("ID", fonts[5], green, iconBox, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+				} else {
+					drawIcon(item.icon, r(51, y+15, 18, 18))
+				}
+			}
+			labelFont, labelColor := fonts[4], ink
+			if index == 0 {
+				labelFont, labelColor = fonts[5], green
+			}
+			text(item.label, labelFont, labelColor, r(89, y, 170, 48), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+			if index > 0 {
+				text("›", fonts[7], muted, r(249, y, 15, 48), walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+			}
+			if index > 0 && index-1 < len(actions) {
+				hitTargets = append(hitTargets, agentDashboardAction{Bounds: card, Run: actions[index-1]})
+			}
 		}
-		status:=snapshot()
-		sideCard:=r(30,835,244,150); surface(sideCard,12,theme.softGreenBrush,theme.activeBorderPen)
-		fill(theme.greenBrush,r(30,852,4,95),2)
-		drawStatusBadge(r(44,851,27,27))
-		text("Агент работает",fonts[11],green,r(73,853,165,25),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-		text("Служба запущена и готова\nк безопасному подключению.",fonts[6],muted,r(46,889,190,42),walk.TextLeft|walk.TextTop|walk.TextWordbreak)
-		text("Открыть панель управления  ↗",fonts[11],green,r(46,944,205,25),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-		if len(actions)>0 { hitTargets=append(hitTargets,agentDashboardAction{Bounds:sideCard,Run:actions[0]}) }
-		text("Версия Agent "+status.Version,fonts[6],muted,r(30,1007,185,30),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-		drawIcon("shield", r(244,1012,16,16))
+		sideCard := r(30, 835, 244, 150)
+		surface(sideCard, 12, theme.softGreenBrush, theme.activeBorderPen)
+		sideTitle, sideBody, sideColor := "Агент работает", "Служба запущена и готова\nк безопасному подключению.", green
+		var sideAccentBrush walk.Brush = theme.greenBrush
+		if !status.Connected {
+			sideTitle, sideBody, sideColor, sideAccentBrush = "Восстанавливаем связь", "Agent работает локально и повторно\nподключается к серверу.", walk.RGB(211, 67, 67), offlineBrush
+		}
+		fill(sideAccentBrush, r(30, 852, 4, 95), 2)
+		if status.Connected {
+			drawStatusBadge(r(44, 851, 27, 27))
+		} else {
+			_ = canvas.FillEllipsePixels(offlineSoftBrush, r(44, 851, 27, 27))
+			_ = canvas.FillEllipsePixels(offlineBrush, r(50, 857, 15, 15))
+		}
+		text(sideTitle, fonts[11], sideColor, r(73, 853, 165, 25), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text(sideBody, fonts[6], muted, r(46, 889, 190, 42), walk.TextLeft|walk.TextTop|walk.TextWordbreak)
+		text("Открыть панель управления  ↗", fonts[11], green, r(46, 944, 205, 25), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		if len(actions) > 0 {
+			hitTargets = append(hitTargets, agentDashboardAction{Bounds: sideCard, Run: actions[0]})
+		}
+		text("Версия Agent "+status.Version, fonts[6], muted, r(30, 1007, 185, 30), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		drawIcon("shield", r(244, 1012, 16, 16))
 
 		// Header.
-		text("RemoteIt",fonts[0],ink,r(347,49,390,58),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-		text("Агент безопасного удалённого доступа",fonts[4],muted,r(349,105,390,26),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-		statusBox:=r(1074,37,340,104); surface(statusBox,13,theme.softGreenBrush,theme.activeBorderPen)
-		statusColor:=green; if !status.Connected { statusColor=walk.RGB(211,67,67) }
-		if status.Connected { drawIcon("check", r(1095,57,26,26)) } else { _=canvas.FillEllipsePixels(offlineBrush,r(1095,57,26,26)) }
-		connectionLabel:=strings.TrimSpace(strings.TrimLeft(status.ConnectionText,"●• "))
-		text(connectionLabel,fonts[3],statusColor,r(1134,49,190,37),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
-		heartbeatValue:=strings.TrimSpace(strings.TrimPrefix(status.LastHeartbeat,"Последняя синхронизация:"))
-		text("Последняя синхронизация",fonts[6],muted,r(1134,82,190,19),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-		text(heartbeatValue,fonts[5],muted,r(1134,101,190,20),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		text("RemoteIt", fonts[0], ink, r(347, 49, 390, 58), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text("Агент безопасного удалённого доступа", fonts[4], muted, r(349, 105, 390, 26), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		var statusBrush walk.Brush = theme.softGreenBrush
+		var statusPen walk.Pen = theme.activeBorderPen
+		if !status.Connected {
+			statusBrush, statusPen = offlineSoftBrush, theme.borderPen
+		}
+		statusBox := r(1074, 37, 340, 104)
+		surface(statusBox, 13, statusBrush, statusPen)
+		statusColor := green
+		if !status.Connected {
+			statusColor = walk.RGB(211, 67, 67)
+		}
+		if status.Connected {
+			drawIcon("check", r(1095, 57, 26, 26))
+		} else {
+			_ = canvas.FillEllipsePixels(offlineBrush, r(1095, 57, 26, 26))
+		}
+		connectionLabel := strings.TrimSpace(strings.TrimLeft(status.ConnectionText, "●• "))
+		text(connectionLabel, fonts[3], statusColor, r(1134, 49, 190, 37), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		heartbeatValue := strings.TrimSpace(strings.TrimPrefix(status.LastHeartbeat, "Последняя синхронизация:"))
+		text("Последняя синхронизация", fonts[6], muted, r(1134, 82, 190, 19), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text(heartbeatValue, fonts[5], muted, r(1134, 101, 190, 20), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
 		// Concentric rings stay crisp on every DPI and use only primitives that
 		// are present on all supported Windows 10/11/Server systems.
-		_ = canvas.FillEllipsePixels(theme.iconBrush, r(1335,57,80,80))
-		_ = canvas.FillEllipsePixels(theme.softGreenBrush, r(1343,65,64,64))
-		_ = canvas.FillEllipsePixels(theme.iconBrush, r(1352,74,46,46))
-		_ = canvas.FillEllipsePixels(theme.softGreenBrush, r(1360,82,30,30))
-		_ = canvas.FillEllipsePixels(theme.greenBrush, r(1370,92,12,12))
+		_ = canvas.FillEllipsePixels(theme.iconBrush, r(1335, 57, 80, 80))
+		_ = canvas.FillEllipsePixels(theme.softGreenBrush, r(1343, 65, 64, 64))
+		_ = canvas.FillEllipsePixels(theme.iconBrush, r(1352, 74, 46, 46))
+		_ = canvas.FillEllipsePixels(theme.softGreenBrush, r(1360, 82, 30, 30))
+		_ = canvas.FillEllipsePixels(theme.greenBrush, r(1370, 92, 12, 12))
 
 		// Device and readiness cards.
-		deviceCard:=r(347,176,492,306); surface(deviceCard,13,theme.cardBrush,theme.borderPen)
-		drawIcon("device",r(371,198,28,28))
-		text("Устройство",fonts[3],ink,r(415,195,210,35),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-		rows:=[][2]string{{"Название",status.Name},{"Remote ID",status.ConnectionID},{"Локальный IP",status.LocalIP},{"Версия",status.Version},{"Установка",status.InstallMode},{"Фоновый агент",status.Service},{"Удалённый доступ",status.RemoteSession},{"Сервер",status.Server}}
-		for i,row:=range rows { y:=237+i*28; text(row[0],fonts[4],muted,r(369,y,170,24),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine); text(row[1],fonts[1],ink,r(586,y,220,24),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis) }
-		ready:=r(865,176,549,306); surface(ready,13,theme.softGreenBrush,theme.activeBorderPen)
-		_ = canvas.FillEllipsePixels(shadowFar,r(895,218,88,88))
-		circle:=r(891,212,88,88); _=canvas.FillEllipsePixels(theme.cardBrush,circle); inner:=r(897,218,76,76); _=canvas.FillEllipsePixels(theme.greenBrush,inner)
+		deviceCard := r(347, 176, 492, 306)
+		surface(deviceCard, 13, theme.cardBrush, theme.borderPen)
+		drawIcon("device", r(371, 198, 28, 28))
+		text("Устройство", fonts[3], ink, r(415, 195, 210, 35), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		rows := [][2]string{{"Название", status.Name}, {"Remote ID", status.ConnectionID}, {"Локальный IP", status.LocalIP}, {"Версия", status.Version}, {"Установка", status.InstallMode}, {"Фоновый агент", status.Service}, {"Удалённый доступ", status.RemoteSession}, {"Сервер", status.Server}}
+		for i, row := range rows {
+			y := 237 + i*28
+			text(row[0], fonts[4], muted, r(369, y, 170, 24), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+			text(row[1], fonts[1], ink, r(586, y, 220, 24), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		}
+		var readyBrush walk.Brush = theme.softGreenBrush
+		var readyPen walk.Pen = theme.activeBorderPen
+		var readyCircle walk.Brush = theme.greenBrush
+		readyTitle, readyDescription := "Онлайн и готов к подключению", "Служба Agent работает корректно\nи подключена к серверу RemoteIt."
+		if !status.Connected {
+			readyBrush, readyPen, readyCircle = offlineSoftBrush, theme.borderPen, offlineBrush
+			readyTitle, readyDescription = "Соединение восстанавливается", "Agent работает локально и автоматически\nповторяет защищённое подключение."
+		}
+		ready := r(865, 176, 549, 306)
+		surface(ready, 13, readyBrush, readyPen)
+		_ = canvas.FillEllipsePixels(shadowFar, r(895, 218, 88, 88))
+		circle := r(891, 212, 88, 88)
+		_ = canvas.FillEllipsePixels(theme.cardBrush, circle)
+		inner := r(897, 218, 76, 76)
+		_ = canvas.FillEllipsePixels(readyCircle, inner)
 		// Draw the success mark as geometry; font glyph substitution made the
 		// old check mark and status symbols inconsistent across Windows builds.
-		_ = canvas.DrawLinePixels(whitePen, walk.Point{X:r(919,254,1,1).X,Y:r(919,254,1,1).Y}, walk.Point{X:r(934,270,1,1).X,Y:r(934,270,1,1).Y})
-		_ = canvas.DrawLinePixels(whitePen, walk.Point{X:r(934,270,1,1).X,Y:r(934,270,1,1).Y}, walk.Point{X:r(956,236,1,1).X,Y:r(956,236,1,1).Y})
-		readyTitle:="Онлайн и готов к подключению"; if !status.Connected { readyTitle="Соединение восстанавливается" }
-		text(readyTitle,fonts[7],ink,r(998,218,370,42),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
-		text("Служба Agent работает корректно\nи подключена к серверу RemoteIt.",fonts[4],muted,r(998,264,365,53),walk.TextLeft|walk.TextTop|walk.TextWordbreak)
-		_ = canvas.DrawLinePixels(linePen,walk.Point{X:r(891,345,1,1).X,Y:r(891,345,1,1).Y},walk.Point{X:r(1383,345,1,1).X,Y:r(1383,345,1,1).Y})
-		summary:=[]struct{icon,label,value string}{{"check","Подключение","Подключено"},{"server","Сервер","supportgenesis.ru"},{"protocol","Протокол","TLS 1.2"},{"shield","Шифрование","Включено"}}
-		for i,item:=range summary { x:=891+i*123; drawIcon(item.icon,r(x,372,16,16)); text(item.label,fonts[6],muted,r(x+22,370,94,23),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine); text(item.value,fonts[5],green,r(x,397,116,23),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis) }
+		_ = canvas.DrawLinePixels(whitePen, walk.Point{X: r(919, 254, 1, 1).X, Y: r(919, 254, 1, 1).Y}, walk.Point{X: r(934, 270, 1, 1).X, Y: r(934, 270, 1, 1).Y})
+		_ = canvas.DrawLinePixels(whitePen, walk.Point{X: r(934, 270, 1, 1).X, Y: r(934, 270, 1, 1).Y}, walk.Point{X: r(956, 236, 1, 1).X, Y: r(956, 236, 1, 1).Y})
+		text(readyTitle, fonts[7], ink, r(998, 218, 370, 42), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		text(readyDescription, fonts[4], muted, r(998, 264, 365, 53), walk.TextLeft|walk.TextTop|walk.TextWordbreak)
+		_ = canvas.DrawLinePixels(linePen, walk.Point{X: r(891, 345, 1, 1).X, Y: r(891, 345, 1, 1).Y}, walk.Point{X: r(1383, 345, 1, 1).X, Y: r(1383, 345, 1, 1).Y})
+		connectionValue, connectionColor := "Подключено", green
+		if !status.Connected {
+			connectionValue, connectionColor = "Ожидание", walk.RGB(211, 67, 67)
+		}
+		summary := []struct {
+			icon, label, value string
+			color              walk.Color
+		}{{"check", "Подключение", connectionValue, connectionColor}, {"server", "Сервер", "supportgenesis.ru", green}, {"protocol", "Протокол", "TLS 1.2", green}, {"shield", "Шифрование", "Включено", green}}
+		for i, item := range summary {
+			x := 891 + i*123
+			drawIcon(item.icon, r(x, 372, 16, 16))
+			text(item.label, fonts[6], muted, r(x+22, 370, 94, 23), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+			text(item.value, fonts[5], item.color, r(x, 397, 116, 23), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		}
 
 		// High-value action cards.
-		cards:=[]struct{icon,title,desc,cta string; action int}{{"device","Панель управления","Устройства, доступ и настройки.","Открыть панель",0},{"connection","Проверить соединение","Диагностика связи с сервером.","Проверить",1},{"id","Remote ID","Идентификатор этого компьютера.","Копировать ID",2},{"log","Журнал Agent","События службы и диагностика.","Открыть журнал",3}}
-		for i,item:=range cards { x:=347+i*267; card:=r(x,505,254,228); surface(card,12,theme.cardBrush,theme.borderPen); icon:=r(x+17,523,47,47); fill(theme.iconBrush,icon,12); if item.icon=="id" { text("ID",fonts[8],green,icon,walk.TextCenter|walk.TextVCenter|walk.TextSingleLine) } else { drawIcon(item.icon,r(x+29,535,23,23)) }; text(item.title,fonts[3],ink,r(x+17,581,220,28),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis); text(item.desc,fonts[4],muted,r(x+17,613,220,56),walk.TextLeft|walk.TextTop|walk.TextWordbreak); button:=r(x+17,686,220,32); fill(theme.iconBrush,button,8); stroke(theme.activeBorderPen,button,8); text(item.cta,fonts[11],green,r(x+29,686,174,32),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine); text("›",fonts[3],green,r(x+204,686,24,32),walk.TextCenter|walk.TextVCenter|walk.TextSingleLine); if item.action<len(actions){hitTargets=append(hitTargets,agentDashboardAction{Bounds:card,Run:actions[item.action]})} }
+		cards := []struct {
+			icon, title, desc, cta string
+			action                 int
+		}{{"device", "Панель управления", "Устройства, доступ и настройки.", "Открыть панель", 0}, {"connection", "Проверить соединение", "Диагностика связи с сервером.", "Проверить", 1}, {"id", "Remote ID", "Идентификатор этого компьютера.", "Копировать ID", 2}, {"log", "Журнал Agent", "События службы и диагностика.", "Открыть журнал", 3}}
+		for i, item := range cards {
+			x := 347 + i*267
+			card := r(x, 505, 254, 228)
+			surface(card, 12, theme.cardBrush, theme.borderPen)
+			icon := r(x+17, 523, 47, 47)
+			fill(theme.iconBrush, icon, 12)
+			if item.icon == "id" {
+				text("ID", fonts[8], green, icon, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+			} else {
+				drawIcon(item.icon, r(x+29, 535, 23, 23))
+			}
+			text(item.title, fonts[3], ink, r(x+17, 581, 220, 28), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+			text(item.desc, fonts[4], muted, r(x+17, 613, 220, 56), walk.TextLeft|walk.TextTop|walk.TextWordbreak)
+			button := r(x+17, 686, 220, 32)
+			fill(theme.iconBrush, button, 8)
+			stroke(theme.activeBorderPen, button, 8)
+			text(item.cta, fonts[11], green, r(x+29, 686, 174, 32), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+			text("›", fonts[3], green, r(x+204, 686, 24, 32), walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+			if item.action < len(actions) {
+				hitTargets = append(hitTargets, agentDashboardAction{Bounds: card, Run: actions[item.action]})
+			}
+		}
 
-		health:=r(347,739,1067,78); surface(health,11,theme.cardBrush,theme.borderPen); text("Состояние системы",fonts[10],ink,r(369,752,168,52),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-		healths:=[][2]string{{"Служба Agent","Работает"},{"Синхронизация","Подключено"},{"Конфигурация","Актуальна"},{"Безопасность","Защищено"},{"Последняя проверка","Сегодня"}}
-		for i,item:=range healths{x:=540+i*166; drawStatusBadge(r(x,748,28,28)); text(item[0],fonts[5],green,r(x+38,750,120,24),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine);text(item[1],fonts[6],muted,r(x+38,779,118,20),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)}
-		activity:=r(347,833,1067,171); surface(activity,11,theme.cardBrush,theme.borderPen); text("Недавняя активность",fonts[3],ink,r(369,846,270,32),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-		now:=time.Now().Local().Format("02.01.2006 15:04:05"); events:=[][3]string{{now,"Синхронизация выполнена","Конфигурация успешно синхронизирована с сервером"},{now,"Подключение к серверу","Успешное подключение к supportgenesis.ru"},{now,"Служба Agent запущена","Служба запущена и готова к работе"}}
-		for i,item:=range events{y:=885+i*34; drawStatusBadge(r(369,y-1,24,24));text(item[0],fonts[6],muted,r(405,y,160,22),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine);text(item[1],fonts[5],ink,r(575,y,240,22),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine);text(item[2],fonts[6],muted,r(826,y,500,22),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis);text("⌄",fonts[5],muted,r(1358,y,30,22),walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)}
-		drawIcon("lock",r(506,1030,14,14)); text("Безопасное соединение установлено. Данные защищены.",fonts[6],muted,r(528,1023,500,28),walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		health := r(347, 739, 1067, 78)
+		surface(health, 11, theme.cardBrush, theme.borderPen)
+		text("Состояние системы", fonts[10], ink, r(369, 752, 168, 52), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		healths := [][2]string{{"Служба Agent", "Работает"}, {"Синхронизация", "Подключено"}, {"Конфигурация", "Актуальна"}, {"Безопасность", "Защищено"}, {"Последняя проверка", "Сегодня"}}
+		for i, item := range healths {
+			x := 540 + i*166
+			drawStatusBadge(r(x, 748, 28, 28))
+			text(item[0], fonts[5], green, r(x+38, 750, 120, 24), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+			text(item[1], fonts[6], muted, r(x+38, 779, 118, 20), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		}
+		activity := r(347, 833, 1067, 171)
+		surface(activity, 11, theme.cardBrush, theme.borderPen)
+		text("Недавняя активность", fonts[3], ink, r(369, 846, 270, 32), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		now := time.Now().Local().Format("02.01.2006 15:04:05")
+		events := [][3]string{{now, "Синхронизация выполнена", "Конфигурация успешно синхронизирована с сервером"}, {now, "Подключение к серверу", "Успешное подключение к supportgenesis.ru"}, {now, "Служба Agent запущена", "Служба запущена и готова к работе"}}
+		for i, item := range events {
+			y := 885 + i*34
+			drawStatusBadge(r(369, y-1, 24, 24))
+			text(item[0], fonts[6], muted, r(405, y, 160, 22), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+			text(item[1], fonts[5], ink, r(575, y, 240, 22), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+			text(item[2], fonts[6], muted, r(826, y, 500, 22), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+			text("⌄", fonts[5], muted, r(1358, y, 30, 22), walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+		}
+		drawIcon("lock", r(506, 1030, 14, 14))
+		text("Безопасное соединение установлено. Данные защищены.", fonts[6], muted, r(528, 1023, 500, 28), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
 		return nil
 	})
-	if err != nil { return nil, err }
-	widget.Disposing().Attach(func() { for _, item := range fonts { item.Dispose() } })
-	widget.SetPaintMode(walk.PaintBuffered); widget.SetInvalidatesOnResize(true)
-	widget.MouseDown().Attach(func(x,y int,button walk.MouseButton){ if button!=walk.LeftButton{return}; for _,item:=range hitTargets{if x>=item.Bounds.X&&x<item.Bounds.X+item.Bounds.Width&&y>=item.Bounds.Y&&y<item.Bounds.Y+item.Bounds.Height&&item.Run!=nil{item.Run();return}} })
-	return widget,nil
+	if err != nil {
+		return nil, err
+	}
+	widget.Disposing().Attach(func() {
+		for _, item := range fonts {
+			item.Dispose()
+		}
+	})
+	widget.SetPaintMode(walk.PaintBuffered)
+	widget.SetInvalidatesOnResize(true)
+	widget.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
+		if button != walk.LeftButton {
+			return
+		}
+		for _, item := range hitTargets {
+			if x >= item.Bounds.X && x < item.Bounds.X+item.Bounds.Width && y >= item.Bounds.Y && y < item.Bounds.Y+item.Bounds.Height && item.Run != nil {
+				item.Run()
+				return
+			}
+		}
+	})
+	return widget, nil
+}
+
+// newAgentDashboardV2 is the production dashboard introduced in 0.9.73.  It
+// deliberately shows fewer, larger controls than the first painted dashboard:
+// the Agent is a status application, not an admin panel squeezed into one
+// window.  All secondary operations remain available, but the visual hierarchy
+// is now status -> device -> three primary actions -> recent activity.
+func newAgentDashboardV2(parent walk.Container, window *walk.MainWindow, theme *agentUITheme, scale agentUIScale, onlineIcon *walk.Icon, snapshot func() agentDashboardSnapshot, actions []func()) (*walk.CustomWidget, error) {
+	newFont := func(points float64, style walk.FontStyle) (*walk.Font, error) {
+		return walk.NewFont("Segoe UI", scale.font(points), style)
+	}
+	titleFont, err := newFont(28, walk.FontBold)
+	if err != nil {
+		return nil, err
+	}
+	brandFont, err := newFont(20, walk.FontBold)
+	if err != nil {
+		titleFont.Dispose()
+		return nil, err
+	}
+	heroFont, err := newFont(17, walk.FontBold)
+	if err != nil {
+		titleFont.Dispose()
+		brandFont.Dispose()
+		return nil, err
+	}
+	deviceFont, err := newFont(15, walk.FontBold)
+	if err != nil {
+		titleFont.Dispose()
+		brandFont.Dispose()
+		heroFont.Dispose()
+		return nil, err
+	}
+	sectionFont, err := newFont(12, walk.FontBold)
+	if err != nil {
+		titleFont.Dispose()
+		brandFont.Dispose()
+		heroFont.Dispose()
+		deviceFont.Dispose()
+		return nil, err
+	}
+	bodyFont, err := newFont(10, 0)
+	if err != nil {
+		titleFont.Dispose()
+		brandFont.Dispose()
+		heroFont.Dispose()
+		deviceFont.Dispose()
+		sectionFont.Dispose()
+		return nil, err
+	}
+	bodyBoldFont, err := newFont(10, walk.FontBold)
+	if err != nil {
+		titleFont.Dispose()
+		brandFont.Dispose()
+		heroFont.Dispose()
+		deviceFont.Dispose()
+		sectionFont.Dispose()
+		bodyFont.Dispose()
+		return nil, err
+	}
+	metaFont, err := newFont(8.5, 0)
+	if err != nil {
+		titleFont.Dispose()
+		brandFont.Dispose()
+		heroFont.Dispose()
+		deviceFont.Dispose()
+		sectionFont.Dispose()
+		bodyFont.Dispose()
+		bodyBoldFont.Dispose()
+		return nil, err
+	}
+	metaBoldFont, err := newFont(8.5, walk.FontBold)
+	if err != nil {
+		titleFont.Dispose()
+		brandFont.Dispose()
+		heroFont.Dispose()
+		deviceFont.Dispose()
+		sectionFont.Dispose()
+		bodyFont.Dispose()
+		bodyBoldFont.Dispose()
+		metaFont.Dispose()
+		return nil, err
+	}
+	iconFont, err := walk.NewFont("Segoe MDL2 Assets", scale.font(18), 0)
+	if err != nil {
+		titleFont.Dispose()
+		brandFont.Dispose()
+		heroFont.Dispose()
+		deviceFont.Dispose()
+		sectionFont.Dispose()
+		bodyFont.Dispose()
+		bodyBoldFont.Dispose()
+		metaFont.Dispose()
+		metaBoldFont.Dispose()
+		return nil, err
+	}
+	largeIconFont, err := walk.NewFont("Segoe MDL2 Assets", scale.font(22), 0)
+	if err != nil {
+		titleFont.Dispose()
+		brandFont.Dispose()
+		heroFont.Dispose()
+		deviceFont.Dispose()
+		sectionFont.Dispose()
+		bodyFont.Dispose()
+		bodyBoldFont.Dispose()
+		metaFont.Dispose()
+		metaBoldFont.Dispose()
+		iconFont.Dispose()
+		return nil, err
+	}
+	checkFont, err := walk.NewFont("Segoe UI Symbol", scale.font(27), walk.FontBold)
+	if err != nil {
+		titleFont.Dispose()
+		brandFont.Dispose()
+		heroFont.Dispose()
+		deviceFont.Dispose()
+		sectionFont.Dispose()
+		bodyFont.Dispose()
+		bodyBoldFont.Dispose()
+		metaFont.Dispose()
+		metaBoldFont.Dispose()
+		iconFont.Dispose()
+		largeIconFont.Dispose()
+		return nil, err
+	}
+	fonts := []*walk.Font{titleFont, brandFont, heroFont, deviceFont, sectionFont, bodyFont, bodyBoldFont, metaFont, metaBoldFont, iconFont, largeIconFont, checkFont}
+	_ = window
+
+	var widget *walk.CustomWidget
+	var hitTargets []agentDashboardAction
+	widget, err = walk.NewCustomWidgetPixels(parent, 0, func(canvas *walk.Canvas, _ walk.Rectangle) error {
+		bounds := widget.ClientBoundsPixels()
+		if bounds.Width < 100 || bounds.Height < 100 {
+			return nil
+		}
+		sx, sy := float64(bounds.Width)/1280.0, float64(bounds.Height)/820.0
+		s := min(sx, sy)
+		r := func(x, y, width, height int) walk.Rectangle {
+			return walk.Rectangle{X: int(float64(x)*sx + .5), Y: int(float64(y)*sy + .5), Width: max(1, int(float64(width)*sx+.5)), Height: max(1, int(float64(height)*sy+.5))}
+		}
+		text := func(value string, font *walk.Font, color walk.Color, rect walk.Rectangle, format walk.DrawTextFormat) {
+			_ = canvas.DrawTextPixels(value, font, color, rect, format|walk.TextNoPrefix)
+		}
+		fill := func(brush walk.Brush, rect walk.Rectangle, radius int) {
+			_ = canvas.FillRoundedRectanglePixels(brush, rect, walk.Size{Width: max(1, int(float64(radius)*s+.5)), Height: max(1, int(float64(radius)*s+.5))})
+		}
+		stroke := func(pen walk.Pen, rect walk.Rectangle, radius int) {
+			_ = canvas.DrawRoundedRectanglePixels(pen, rect, walk.Size{Width: max(1, int(float64(radius)*s+.5)), Height: max(1, int(float64(radius)*s+.5))})
+		}
+
+		ink := walk.RGB(20, 29, 26)
+		muted := walk.RGB(94, 107, 101)
+		green := walk.RGB(10, 153, 99)
+		red := walk.RGB(203, 62, 62)
+		white := walk.RGB(255, 255, 255)
+		pageBrush, _ := walk.NewSolidColorBrush(walk.RGB(246, 249, 247))
+		defer pageBrush.Dispose()
+		sidebarBrush, _ := walk.NewSolidColorBrush(walk.RGB(252, 253, 252))
+		defer sidebarBrush.Dispose()
+		cardBrush, _ := walk.NewSolidColorBrush(white)
+		defer cardBrush.Dispose()
+		softBrush, _ := walk.NewSolidColorBrush(walk.RGB(233, 247, 240))
+		defer softBrush.Dispose()
+		softBrush2, _ := walk.NewSolidColorBrush(walk.RGB(242, 250, 246))
+		defer softBrush2.Dispose()
+		greenBrush, _ := walk.NewSolidColorBrush(green)
+		defer greenBrush.Dispose()
+		redBrush, _ := walk.NewSolidColorBrush(red)
+		defer redBrush.Dispose()
+		redSoftBrush, _ := walk.NewSolidColorBrush(walk.RGB(255, 242, 242))
+		defer redSoftBrush.Dispose()
+		shadowBrush, _ := walk.NewSolidColorBrush(walk.RGB(232, 238, 235))
+		defer shadowBrush.Dispose()
+		dividerPen, _ := walk.NewCosmeticPen(walk.PenSolid, walk.RGB(223, 231, 227))
+		defer dividerPen.Dispose()
+		softPen, _ := walk.NewCosmeticPen(walk.PenSolid, walk.RGB(203, 226, 215))
+		defer softPen.Dispose()
+		redPen, _ := walk.NewCosmeticPen(walk.PenSolid, walk.RGB(238, 199, 199))
+		defer redPen.Dispose()
+
+		surface := func(rect walk.Rectangle, brush walk.Brush, pen walk.Pen, radius int) {
+			shadow := rect
+			shadow.X += max(1, int(2*s+.5))
+			shadow.Y += max(2, int(5*s+.5))
+			shadow.Width -= max(2, int(4*s+.5))
+			shadow.Height -= max(1, int(2*s+.5))
+			fill(shadowBrush, shadow, radius+1)
+			fill(brush, rect, radius)
+			stroke(pen, rect, radius)
+		}
+		glyphs := map[string]string{
+			"home": "\ue80f", "panel": "\ue8a7", "refresh": "\ue895", "log": "\ue8fd",
+			"folder": "\ue838", "settings": "\ue713", "device": "\ue7f4", "copy": "\ue8c8",
+			"connection": "\ue701", "server": "\ue774", "shield": "\ue83d", "clock": "\ue823",
+		}
+		drawIcon := func(kind string, box walk.Rectangle, color walk.Color, large bool) {
+			if kind == "id" {
+				text("ID", bodyBoldFont, color, box, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+				return
+			}
+			glyph := glyphs[kind]
+			font := iconFont
+			if large {
+				font = largeIconFont
+			}
+			text(glyph, font, color, box, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+		}
+		drawCheck := func(box walk.Rectangle, connected bool) {
+			if connected {
+				_ = canvas.FillEllipsePixels(greenBrush, box)
+			} else {
+				_ = canvas.FillEllipsePixels(redBrush, box)
+			}
+			if connected {
+				text("✓", checkFont, white, box, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+			} else {
+				text("!", sectionFont, white, box, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+			}
+		}
+		hitTargets = hitTargets[:0]
+		status := snapshot()
+
+		_ = canvas.FillRectanglePixels(pageBrush, bounds)
+		_ = canvas.FillRectanglePixels(sidebarBrush, r(0, 0, 260, 820))
+		_ = canvas.DrawLinePixels(dividerPen, walk.Point{X: r(260, 0, 1, 1).X, Y: 0}, walk.Point{X: r(260, 0, 1, 1).X, Y: bounds.Height})
+
+		// Product identity and calm, full-height navigation.
+		fill(softBrush, r(24, 24, 52, 52), 15)
+		stroke(softPen, r(24, 24, 52, 52), 15)
+		_ = canvas.DrawImageStretchedPixels(onlineIcon, r(34, 34, 32, 32))
+		text("RemoteIt", brandFont, ink, r(88, 25, 132, 34), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text("AGENT", metaBoldFont, green, r(89, 57, 88, 18), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text("Защищённый доступ", metaFont, muted, r(24, 91, 196, 20), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text("УПРАВЛЕНИЕ", metaBoldFont, muted, r(25, 129, 180, 18), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		nav := []struct {
+			icon, label string
+			action      int
+			active      bool
+		}{
+			{"home", "Обзор", -1, true}, {"panel", "Панель управления", 0, false},
+			{"refresh", "Проверить соединение", 1, false}, {"log", "Журнал Agent", 3, false},
+			{"folder", "Папка Agent", 4, false}, {"settings", "Настройки", 5, false},
+		}
+		for index, item := range nav {
+			y := 154 + index*58
+			box := r(18, y, 226, 50)
+			if item.active {
+				fill(softBrush, box, 13)
+				fill(greenBrush, r(18, y+10, 4, 32), 2)
+			}
+			iconBox := r(32, y+7, 36, 36)
+			if item.active {
+				fill(greenBrush, iconBox, 11)
+				drawIcon(item.icon, r(40, y+15, 20, 20), white, false)
+			} else {
+				fill(softBrush2, iconBox, 11)
+				drawIcon(item.icon, r(40, y+15, 20, 20), green, false)
+			}
+			labelColor := ink
+			if item.active {
+				labelColor = green
+			}
+			labelFont := bodyFont
+			if item.active {
+				labelFont = bodyBoldFont
+			}
+			text(item.label, labelFont, labelColor, r(82, y, 150, 50), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+			if item.action >= 0 && item.action < len(actions) {
+				hitTargets = append(hitTargets, agentDashboardAction{Bounds: box, Run: actions[item.action]})
+			}
+		}
+
+		sideStatus := r(18, 642, 226, 118)
+		if status.Connected {
+			surface(sideStatus, softBrush, softPen, 14)
+		} else {
+			surface(sideStatus, redSoftBrush, redPen, 14)
+		}
+		if status.Connected {
+			_ = canvas.FillEllipsePixels(greenBrush, r(34, 661, 13, 13))
+		} else {
+			_ = canvas.FillEllipsePixels(redBrush, r(34, 661, 13, 13))
+		}
+		sideStatusColor := green
+		sideStatusTitle := "Агент работает"
+		sideStatusBody := "Служба запущена и готова\nк безопасному подключению."
+		if !status.Connected {
+			sideStatusColor = red
+			sideStatusTitle = "Связь восстанавливается"
+			sideStatusBody = "Агент работает локально\nи повторяет подключение."
+		}
+		text(sideStatusTitle, bodyBoldFont, sideStatusColor, r(56, 651, 172, 34), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		text(sideStatusBody, metaFont, muted, r(34, 693, 184, 38), walk.TextLeft|walk.TextTop|walk.TextWordbreak)
+		text("Открыть панель  ↗", metaBoldFont, green, r(34, 731, 160, 20), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		if len(actions) > 0 {
+			hitTargets = append(hitTargets, agentDashboardAction{Bounds: sideStatus, Run: actions[0]})
+		}
+		text("Версия Agent "+status.Version, metaFont, muted, r(24, 782, 160, 22), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		drawIcon("shield", r(203, 783, 18, 18), green, false)
+
+		// Header. The status is intentionally a readable pill, not another card.
+		text("RemoteIt Agent", titleFont, ink, r(290, 25, 360, 44), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text("Состояние удалённого доступа на этом компьютере", bodyFont, muted, r(292, 68, 430, 24), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		statusPill := r(1004, 25, 236, 68)
+		if status.Connected {
+			fill(softBrush, statusPill, 14)
+			stroke(softPen, statusPill, 14)
+			_ = canvas.FillEllipsePixels(greenBrush, r(1023, 44, 18, 18))
+		} else {
+			fill(redSoftBrush, statusPill, 14)
+			stroke(redPen, statusPill, 14)
+			_ = canvas.FillEllipsePixels(redBrush, r(1023, 44, 18, 18))
+		}
+		statusColor := green
+		statusLabel := strings.TrimSpace(strings.TrimLeft(status.ConnectionText, "●• "))
+		if statusLabel == "" {
+			statusLabel = "Проверка связи"
+		}
+		if !status.Connected {
+			statusColor = red
+		}
+		text(statusLabel, sectionFont, statusColor, r(1054, 31, 165, 30), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		heartbeat := strings.TrimSpace(strings.TrimPrefix(status.LastHeartbeat, "Последняя синхронизация:"))
+		text(heartbeat, metaFont, muted, r(1054, 57, 165, 22), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+
+		// One generous readiness surface replaces a collection of tiny status cards.
+		hero := r(290, 112, 950, 166)
+		if status.Connected {
+			surface(hero, softBrush, softPen, 17)
+		} else {
+			surface(hero, redSoftBrush, redPen, 17)
+		}
+		if status.Connected {
+			fill(greenBrush, r(290, 112, 6, 166), 3)
+		} else {
+			fill(redBrush, r(290, 112, 6, 166), 3)
+		}
+		drawCheck(r(310, 145, 72, 72), status.Connected)
+		heroTitle := "Онлайн и готов к подключению"
+		heroBody := "Фоновая служба работает, конфигурация синхронизирована.\nRemoteIt готов принять защищённое подключение."
+		if !status.Connected {
+			heroTitle = "Восстанавливаем соединение"
+			heroBody = "Фоновая служба продолжает работу и автоматически повторяет\nподключение при смене сети, IP-адреса или VPN."
+		}
+		text(heroTitle, heroFont, ink, r(410, 135, 465, 40), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		text(heroBody, bodyFont, muted, r(410, 177, 500, 50), walk.TextLeft|walk.TextTop|walk.TextWordbreak)
+		_ = canvas.DrawLinePixels(dividerPen, walk.Point{X: r(410, 232, 1, 1).X, Y: r(410, 232, 1, 1).Y}, walk.Point{X: r(1210, 232, 1, 1).X, Y: r(1210, 232, 1, 1).Y})
+		metricConnection := "Подключено"
+		if !status.Connected {
+			metricConnection = "Ожидание"
+		}
+		metrics := []struct{ icon, label, value string }{{"connection", "Соединение", metricConnection}, {"server", "Сервер", "supportgenesis.ru"}, {"shield", "Шифрование", "Включено"}, {"clock", "Последняя проверка", "только что"}}
+		for index, item := range metrics {
+			x := 410 + index*200
+			drawIcon(item.icon, r(x, 239, 24, 24), statusColor, false)
+			text(item.label, metaFont, muted, r(x+32, 237, 150, 17), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+			text(item.value, metaBoldFont, statusColor, r(x+32, 253, 154, 18), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		}
+
+		// Device information is condensed into three readable rows with two columns.
+		deviceCard := r(290, 298, 514, 258)
+		surface(deviceCard, cardBrush, dividerPen, 16)
+		fill(softBrush, r(306, 320, 44, 44), 12)
+		drawIcon("device", r(316, 330, 24, 24), green, true)
+		text("Этот компьютер", sectionFont, ink, r(366, 316, 210, 28), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text(status.Name, deviceFont, ink, r(366, 345, 260, 32), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		idChip := r(626, 327, 150, 38)
+		fill(softBrush2, idChip, 10)
+		text("ID  "+status.ConnectionID, metaBoldFont, green, r(640, 327, 120, 38), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		_ = canvas.DrawLinePixels(dividerPen, walk.Point{X: r(306, 389, 1, 1).X, Y: r(306, 389, 1, 1).Y}, walk.Point{X: r(778, 389, 1, 1).X, Y: r(778, 389, 1, 1).Y})
+		fields := []struct {
+			label, value string
+			x, y         int
+		}{
+			{"Локальный IP", status.LocalIP, 306, 404}, {"Версия", status.Version, 552, 404},
+			{"Установка", status.InstallMode, 306, 447}, {"Фоновый агент", status.Service, 552, 447},
+			{"Удалённый доступ", status.RemoteSession, 306, 490}, {"Сервер", status.Server, 552, 490},
+		}
+		for _, field := range fields {
+			text(field.label, metaFont, muted, r(field.x, field.y, 220, 18), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+			text(field.value, bodyBoldFont, ink, r(field.x, field.y+17, 220, 24), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+		}
+		// Three high-value actions use full-width, 52px targets.
+		actionCard := r(824, 298, 416, 258)
+		surface(actionCard, cardBrush, dividerPen, 16)
+		text("Быстрые действия", sectionFont, ink, r(850, 316, 250, 30), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text("Самое нужное — без лишних экранов", metaFont, muted, r(850, 344, 300, 22), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		quick := []struct {
+			icon, title, caption string
+			action               int
+			primary              bool
+		}{
+			{"panel", "Открыть панель управления", "Устройства, доступ и настройки", 0, true},
+			{"refresh", "Проверить соединение", "Диагностика связи с сервером", 1, false},
+			{"copy", "Скопировать Remote ID", status.ConnectionID, 2, false},
+		}
+		for index, item := range quick {
+			y := 378 + index*57
+			box := r(846, y, 372, 49)
+			if item.primary {
+				fill(greenBrush, box, 12)
+			} else {
+				fill(softBrush2, box, 12)
+			}
+			iconColor, titleColor, captionColor := green, ink, muted
+			if item.primary {
+				iconColor, titleColor, captionColor = white, white, walk.RGB(224, 246, 237)
+			}
+			drawIcon(item.icon, r(862, y+12, 24, 24), iconColor, false)
+			text(item.title, bodyBoldFont, titleColor, r(900, y+4, 245, 23), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+			text(item.caption, metaFont, captionColor, r(900, y+25, 245, 18), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+			text("›", sectionFont, iconColor, r(1179, y, 24, 49), walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+			if item.action < len(actions) {
+				hitTargets = append(hitTargets, agentDashboardAction{Bounds: box, Run: actions[item.action]})
+			}
+		}
+
+		// Activity is a single calm panel. Clicking it opens the real Agent log.
+		activity := r(290, 576, 950, 188)
+		surface(activity, cardBrush, dividerPen, 16)
+		text("Недавняя активность", sectionFont, ink, r(306, 592, 250, 30), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		text("Открыть журнал", metaBoldFont, green, r(1085, 592, 120, 30), walk.TextRight|walk.TextVCenter|walk.TextSingleLine)
+		_ = canvas.DrawLinePixels(dividerPen, walk.Point{X: r(306, 628, 1, 1).X, Y: r(306, 628, 1, 1).Y}, walk.Point{X: r(1214, 628, 1, 1).X, Y: r(1214, 628, 1, 1).Y})
+		now := time.Now().Local().Format("15:04:05")
+		events := [][3]string{{now, "Синхронизация выполнена", "Конфигурация успешно обновлена"}, {now, "Подключение к серверу", "Защищённое соединение установлено"}, {now, "Служба Agent запущена", "Фоновая служба готова к работе"}}
+		for index, item := range events {
+			y := 638 + index*39
+			_ = canvas.FillEllipsePixels(greenBrush, r(308, y+11, 10, 10))
+			text(item[0], metaFont, muted, r(332, y, 72, 32), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+			text(item[1], bodyBoldFont, ink, r(414, y, 240, 32), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+			text(item[2], bodyFont, muted, r(674, y, 460, 32), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+			text("›", sectionFont, muted, r(1175, y, 24, 32), walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+		}
+		if len(actions) > 3 {
+			hitTargets = append(hitTargets, agentDashboardAction{Bounds: activity, Run: actions[3]})
+		}
+		drawIcon("shield", r(646, 786, 16, 16), green, false)
+		text("Защищённое соединение установлено. Данные Agent защищены.", metaFont, muted, r(670, 779, 430, 30), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+		return nil
+	})
+	if err != nil {
+		for _, font := range fonts {
+			font.Dispose()
+		}
+		return nil, err
+	}
+	widget.Disposing().Attach(func() {
+		for _, font := range fonts {
+			font.Dispose()
+		}
+	})
+	widget.SetPaintMode(walk.PaintBuffered)
+	widget.SetInvalidatesOnResize(false)
+	widget.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
+		if button != walk.LeftButton {
+			return
+		}
+		for _, item := range hitTargets {
+			if x >= item.Bounds.X && x < item.Bounds.X+item.Bounds.Width && y >= item.Bounds.Y && y < item.Bounds.Y+item.Bounds.Height && item.Run != nil {
+				item.Run()
+				return
+			}
+		}
+	})
+	return widget, nil
 }
 
 func newAgentUITheme(scale agentUIScale) (*agentUITheme, error) {
@@ -508,7 +1204,8 @@ func lockAgentWindowGeometry(window *walk.MainWindow, size walk.Size, screenWidt
 	style &^= int32(win.WS_THICKFRAME | win.WS_MAXIMIZEBOX)
 	win.SetWindowLong(window.Handle(), win.GWL_STYLE, style)
 	x := max(0, (screenWidth-size.Width)/2)
-	y := max(0, (screenHeight-size.Height)/2)
+	usableHeight := max(size.Height, screenHeight-48)
+	y := max(0, (usableHeight-size.Height)/2)
 	win.SetWindowPos(window.Handle(), 0, int32(x), int32(y), int32(size.Width), int32(size.Height), win.SWP_NOZORDER|win.SWP_FRAMECHANGED)
 }
 
@@ -691,6 +1388,7 @@ func loadAgentDashboardSnapshot() agentDashboardSnapshot {
 		InstallMode:    "Системная служба",
 		Service:        "Статус неизвестен",
 		RemoteSession:  "Нет активного сеанса",
+		Severity:       agentStatusCritical,
 	}
 	if useUserConfig() {
 		snapshot.InstallMode = "Текущий пользователь"
@@ -714,20 +1412,27 @@ func loadAgentDashboardSnapshot() agentDashboardSnapshot {
 			snapshot.LastHeartbeat = "Последняя синхронизация: " + status.LastHeartbeat.Local().Format("02.01.2006 15:04:05")
 		}
 	}
-	if snapshot.Connected {
-		snapshot.ConnectionText = "●  В сети"
-	}
-	if running, known := windowsServiceState(); !known {
+	running, known := windowsServiceState()
+	snapshot.Severity = agentSeverityFor(snapshot.Connected, running, known)
+	if !known {
 		snapshot.Service = "Статус неизвестен"
 	} else if running {
 		snapshot.Service = "Агент работает"
 	} else {
 		snapshot.Service = "Служба остановлена"
 	}
+	switch snapshot.Severity {
+	case agentStatusHealthy:
+		snapshot.ConnectionText = "В сети"
+	case agentStatusReconnecting:
+		snapshot.ConnectionText = "Переподключение"
+	default:
+		snapshot.ConnectionText = "Нет связи"
+	}
 	_, control, _ := publishedDesktopSessionState()
 	if control {
 		snapshot.RemoteSession = "Активен — экран и управление"
-		snapshot.ConnectionText = "●  Идёт удалённый сеанс"
+		snapshot.ConnectionText = "Идёт удалённый сеанс"
 	}
 	return snapshot
 }
@@ -772,20 +1477,25 @@ func trayCommand() error {
 		return err
 	}
 	defer offlineIcon.Dispose()
-	_ = window.SetIcon(offlineIcon)
+	initialStatus := loadAgentDashboardSnapshot()
+	initialIcon := offlineIcon
+	if initialStatus.Connected {
+		initialIcon = onlineIcon
+	}
+	_ = window.SetIcon(initialIcon)
 
 	tray, err := walk.NewNotifyIcon(window)
 	if err != nil {
 		return err
 	}
 	defer tray.Dispose()
-	if err := tray.SetIcon(offlineIcon); err != nil {
+	if err := tray.SetIcon(initialIcon); err != nil {
 		return err
 	}
 	_ = tray.SetToolTip("RemoteIt Agent — подключение проверяется")
 
 	var dashboard *walk.CustomWidget
-	var connected bool
+	connected := initialStatus.Connected
 	notificationState := loadDesktopNotificationState()
 	refresh := func() {
 		status := loadAgentDashboardSnapshot()
@@ -806,7 +1516,7 @@ func trayCommand() error {
 		}
 		_, control, sessionID := publishedDesktopSessionState()
 		if sessionID != "" && control && (sessionID != notificationState.SessionID || !notificationState.Control) {
-			_ = tray.ShowCustom("RemoteIt", "Администратор подключился к удалённому управлению этим компьютером.", onlineIcon)
+			showRemoteItNotification(tray, window, "RemoteIt", "Администратор подключился к удалённому управлению этим компьютером.", true, onlineIcon, offlineIcon)
 			notificationState = desktopNotificationState{SessionID: sessionID, Control: control}
 			saveDesktopNotificationState(notificationState)
 		}
@@ -816,12 +1526,14 @@ func trayCommand() error {
 	}
 	openPanelURL := func() { _ = openURL(defaultServer) }
 	checkConnection := func() {
+		status := loadAgentDashboardSnapshot()
+		connected = status.Connected
 		refresh()
-		message, icon := "Соединение с сервером пока восстанавливается.", offlineIcon
+		message := "Соединение с сервером пока восстанавливается."
 		if connected {
-			message, icon = "Соединение с сервером работает.", onlineIcon
+			message = "Соединение с сервером работает."
 		}
-		_ = tray.ShowCustom("RemoteIt — проверка соединения", message, icon)
+		showRemoteItNotification(tray, window, "RemoteIt — проверка соединения", message, connected, onlineIcon, offlineIcon)
 	}
 	copyRemoteID := func() {
 		value := strings.TrimSpace(loadAgentDashboardSnapshot().ConnectionID)
@@ -833,7 +1545,7 @@ func trayCommand() error {
 			_ = walk.MsgBox(window, "RemoteIt", "Не удалось скопировать Remote ID.", walk.MsgBoxIconError)
 			return
 		}
-		_ = tray.ShowCustom("RemoteIt", "Remote ID скопирован: "+value, onlineIcon)
+		showRemoteItNotification(tray, window, "RemoteIt", "Remote ID скопирован: "+value, true, onlineIcon, offlineIcon)
 	}
 	openLogs := func() { showAgentLogDialog(window) }
 	openFolder := func() {
@@ -848,8 +1560,39 @@ func trayCommand() error {
 	openSettings := func() {
 		_ = walk.MsgBox(window, "RemoteIt — настройки", "Название и права доступа управляются в защищённой панели. Локальная диагностика доступна через журнал Agent.", walk.MsgBoxIconInformation)
 	}
-	actions := []func(){openPanelURL, checkConnection, copyRemoteID, openLogs, openFolder, openSettings}
-	dashboard, err = newAgentDashboard(window, window, theme, scale, onlineIcon, loadAgentDashboardSnapshot, actions)
+	openAbout := func() {
+		status := loadAgentDashboardSnapshot()
+		_ = walk.MsgBox(window, "О RemoteIt Agent", "RemoteIt Agent "+status.Version+"\n\nЗащищённый агент удалённого доступа.\nСервер: supportgenesis.ru", walk.MsgBoxIconInformation)
+	}
+	checkUpdate := func() {
+		target, targetErr := installedAgentPath()
+		if targetErr != nil || (!allowedWindowsAgentTarget(target, false) && !allowedWindowsAgentTarget(target, true)) {
+			_ = walk.MsgBox(window, "RemoteIt — обновление", "Проверка обновлений доступна для установленной копии RemoteIt Agent.", walk.MsgBoxIconInformation)
+			return
+		}
+		go func() {
+			var updateErr error
+			if allowedWindowsAgentTarget(target, true) {
+				command := exec.Command(target, "force-update-check")
+				command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP}
+				updateErr = command.Start()
+				if updateErr == nil {
+					updateErr = command.Process.Release()
+				}
+			} else {
+				updateErr = runElevatedAgentCommand(target, "force-update-check")
+			}
+			window.Synchronize(func() {
+				if updateErr != nil {
+					_ = walk.MsgBox(window, "RemoteIt — обновление", "Не удалось запустить ручную проверку обновлений: "+updateErr.Error(), walk.MsgBoxIconError)
+					return
+				}
+				showRemoteItNotification(tray, window, "RemoteIt — обновление", "Проверка новой версии запущена. Agent автоматически переподключится.", true, onlineIcon, offlineIcon)
+			})
+		}()
+	}
+	actions := []func(){openPanelURL, checkConnection, copyRemoteID, openLogs, openFolder, openSettings, openAbout, checkUpdate}
+	dashboard, err = newAgentDashboardV3(window, scale, onlineIcon, offlineIcon, loadAgentDashboardSnapshot, actions)
 	if err != nil {
 		return err
 	}
@@ -978,7 +1721,12 @@ func trayLegacyCommand() error {
 		return err
 	}
 	defer offlineIcon.Dispose()
-	_ = window.SetIcon(offlineIcon)
+	initialStatus := loadAgentDashboardSnapshot()
+	initialIcon := offlineIcon
+	if initialStatus.Connected {
+		initialIcon = onlineIcon
+	}
+	_ = window.SetIcon(initialIcon)
 
 	view := trayView{}
 
@@ -1315,34 +2063,32 @@ func trayLegacyCommand() error {
 		return err
 	}
 	defer tray.Dispose()
-	if err := tray.SetIcon(offlineIcon); err != nil {
+	if err := tray.SetIcon(initialIcon); err != nil {
 		return err
 	}
 	_ = tray.SetToolTip("RemoteIt Agent — подключение проверяется")
 
-	connected := false
+	connected := initialStatus.Connected
 	notificationState := loadDesktopNotificationState()
 	refresh = func() {
 		connected = refreshTrayView(view, connected, tray, window, onlineIcon, offlineIcon)
 		_, control, sessionID := publishedDesktopSessionState()
 		if sessionID != "" && control && (sessionID != notificationState.SessionID || !notificationState.Control) {
 			message := "Администратор подключился к удалённому управлению этим компьютером."
-			_ = tray.ShowCustom("RemoteIt", message, onlineIcon)
+			showRemoteItNotification(tray, window, "RemoteIt", message, true, onlineIcon, offlineIcon)
 			notificationState = desktopNotificationState{SessionID: sessionID, Control: control}
 			saveDesktopNotificationState(notificationState)
 		}
 	}
 	checkConnection = func() {
+		status := loadAgentDashboardSnapshot()
+		connected = status.Connected
 		refresh()
 		message := "Соединение с сервером пока восстанавливается."
 		if connected {
 			message = "Соединение с сервером работает."
 		}
-		notificationIcon := offlineIcon
-		if connected {
-			notificationIcon = onlineIcon
-		}
-		_ = tray.ShowCustom("RemoteIt — проверка соединения", message, notificationIcon)
+		showRemoteItNotification(tray, window, "RemoteIt — проверка соединения", message, connected, onlineIcon, offlineIcon)
 	}
 	openAgentLogs = func() {
 		showAgentLogDialog(window)

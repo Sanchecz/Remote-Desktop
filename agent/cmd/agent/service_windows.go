@@ -92,6 +92,51 @@ func agentExecutionMode() (string, bool) {
 	return "system", true
 }
 
+// forceAgentUpdateCheckPlatform is the explicit fallback behind the Agent
+// settings button. The normal path remains the 15-second signed heartbeat
+// update; restarting only the RemoteIt background component forces that check
+// immediately without changing network, SSH or device configuration.
+func forceAgentUpdateCheckPlatform() error {
+	target, err := installedAgentPath()
+	if err != nil {
+		return err
+	}
+	if useUserConfig() {
+		if !allowedWindowsAgentTarget(target, true) {
+			return errors.New("ручная проверка разрешена только для установленного RemoteIt Agent")
+		}
+		if err := stopWindowsUserProcesses(target); err != nil {
+			return err
+		}
+		for _, argument := range []string{"run", "tray"} {
+			command := exec.Command(target, argument)
+			command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+			if err := command.Start(); err != nil {
+				return fmt.Errorf("не удалось перезапустить пользовательский Agent: %w", err)
+			}
+			_ = command.Process.Release()
+		}
+		return nil
+	}
+	manager, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("не удалось открыть диспетчер служб: %w", err)
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(windowsServiceName)
+	if err != nil {
+		return fmt.Errorf("служба RemoteIt не найдена: %w", err)
+	}
+	defer service.Close()
+	if err := stopWindowsService(service); err != nil {
+		return err
+	}
+	if err := service.Start(); err != nil {
+		return fmt.Errorf("не удалось запустить службу RemoteIt: %w", err)
+	}
+	return nil
+}
+
 func installPlatform() error {
 	if useUserConfig() {
 		return installWindowsUser()
@@ -135,6 +180,10 @@ func installPlatform() error {
 			return err
 		}
 	}
+	// Stop every companion whose executable is inside the two explicitly
+	// allowed RemoteIt install roots. This removes stale tray/desktop processes
+	// from previous upgrades while never touching downloaded files elsewhere.
+	stopWindowsProcessesInDirs([]string{installDir, filepath.Dir(legacyTarget)})
 	if !samePath(current, target) {
 		if err := stopWindowsUserProcesses(target); err != nil {
 			if service != nil {
@@ -152,6 +201,7 @@ func installPlatform() error {
 			return err
 		}
 	}
+	cleanupStaleAgentFiles(installDir, target)
 	configDir := filepath.Dir(defaultConfigPath())
 	if output, err := windowsHiddenCommand("icacls", configDir, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(RX)").CombinedOutput(); err != nil {
 		return fmt.Errorf("не удалось защитить каталог агента: %w (%s)", err, string(output))
@@ -286,6 +336,27 @@ func cleanupLegacyWindowsInstall(legacyTarget string) {
 	legacyAgentDir := filepath.Dir(legacyTarget)
 	_ = os.RemoveAll(legacyAgentDir)
 	_ = os.Remove(filepath.Dir(legacyAgentDir))
+}
+
+func cleanupStaleAgentFiles(installDir, activeTarget string) {
+	entries, err := os.ReadDir(installDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(installDir, entry.Name())
+		if samePath(path, activeTarget) {
+			continue
+		}
+		name := strings.ToLower(entry.Name())
+		if (strings.HasPrefix(name, "remoteit-agent") || strings.HasPrefix(name, "genesis-agent")) &&
+			(strings.HasSuffix(name, ".exe") || strings.HasSuffix(name, ".old") || strings.HasSuffix(name, ".new") || strings.HasSuffix(name, ".tmp")) {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 func stopWindowsUserProcesses(target string) error {

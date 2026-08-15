@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	version       = "0.9.72"
+	version       = "0.9.75"
 	defaultServer = "https://supportgenesis.ru"
 )
 
@@ -81,6 +81,7 @@ type remoteJob struct {
 
 type heartbeatResponse struct {
 	DesiredName          string       `json:"desiredName"`
+	ConnectionCode       string       `json:"connectionCode"`
 	DesktopSecret        string       `json:"desktopSecret"`
 	NextHeartbeatSeconds int          `json:"nextHeartbeatSeconds"`
 	Job                  *remoteJob   `json:"job"`
@@ -128,6 +129,8 @@ func realMain() error {
 		return cleanupPlatformCommand()
 	case "update-helper":
 		return updatePlatformCommand()
+	case "force-update-check":
+		return forceAgentUpdateCheckPlatform()
 	case "status":
 		return statusCommand()
 	case "tray":
@@ -260,6 +263,14 @@ func runLoop(ctx context.Context) error {
 			return err
 		}
 	}
+	// Upgrades replace the service binary without re-running enrollment. Always
+	// republish the secret-free user-facing files so the tray immediately shows
+	// the current version and any existing Remote ID. Preserve an admin-renamed
+	// device name that was already written to device-name.txt.
+	cfg.DeviceName = effectiveDeviceName(cfg)
+	if err := setupAgentUserFiles(cfg); err != nil {
+		log.Printf("не удалось обновить общедоступное состояние Agent: %v", err)
+	}
 
 	log.Printf("агент запущен, Remote ID %s", cfg.ConnectionCode)
 	go runInteractiveCompanionBroker(ctx)
@@ -295,20 +306,26 @@ func runLoop(ctx context.Context) error {
 		}
 		writeRuntimeStatus(true, nil, true)
 		backoff = 5 * time.Second
+		configurationChanged := false
 		if response.DesiredName != "" && response.DesiredName != deviceName {
 			if err := persistDeviceName(response.DesiredName); err != nil {
 				log.Printf("не удалось применить новое название: %v", err)
 			} else {
 				cfg.DeviceName = response.DesiredName
+				configurationChanged = true
 				log.Printf("название устройства изменено на %q", response.DesiredName)
 			}
 		}
-		if response.DesktopSecret != "" && response.DesktopSecret != cfg.DesktopSecret {
-			cfg.DesktopSecret = response.DesktopSecret
+		identityChanged, remoteIDChanged := applyHeartbeatIdentity(cfg, response)
+		if remoteIDChanged {
+			log.Printf("Remote ID восстановлен из подтверждённой регистрации")
+		}
+		configurationChanged = configurationChanged || identityChanged
+		if configurationChanged {
 			if err := saveConfig(cfg); err != nil {
-				log.Printf("не удалось сохранить ключ удалённого экрана: %v", err)
+				log.Printf("не удалось сохранить обновлённую конфигурацию: %v", err)
 			} else if err := setupAgentUserFiles(cfg); err != nil {
-				log.Printf("не удалось опубликовать параметры удалённого экрана: %v", err)
+				log.Printf("не удалось опубликовать обновлённые параметры Agent: %v", err)
 			}
 		}
 		if response.Job != nil {
@@ -359,6 +376,23 @@ func runLoop(ctx context.Context) error {
 			log.Printf("сетевые параметры изменились, обновляем IP и маршрут подключения")
 		}
 	}
+}
+
+func applyHeartbeatIdentity(cfg *config, response heartbeatResponse) (changed, remoteIDChanged bool) {
+	if cfg == nil {
+		return false, false
+	}
+	connectionCode := strings.TrimSpace(response.ConnectionCode)
+	if connectionCode != "" && connectionCode != cfg.ConnectionCode {
+		cfg.ConnectionCode = connectionCode
+		changed = true
+		remoteIDChanged = true
+	}
+	if response.DesktopSecret != "" && response.DesktopSecret != cfg.DesktopSecret {
+		cfg.DesktopSecret = response.DesktopSecret
+		changed = true
+	}
+	return changed, remoteIDChanged
 }
 
 func reportJobResultWithRetry(ctx context.Context, client *apiClient, cfg *config, jobID string, result remoteJobResult) error {

@@ -114,6 +114,21 @@ func TestAPIStatusError(t *testing.T) {
 	}
 }
 
+func TestHeartbeatRestoresLegacyRemoteIDWithoutExposingItElsewhere(t *testing.T) {
+	cfg := &config{DeviceID: "device", DeviceSecret: "secret", DesktopSecret: "old"}
+	changed, remoteIDChanged := applyHeartbeatIdentity(cfg, heartbeatResponse{
+		ConnectionCode: " 753764976 ",
+		DesktopSecret:  "new-desktop-secret",
+	})
+	if !changed || !remoteIDChanged || cfg.ConnectionCode != "753764976" || cfg.DesktopSecret != "new-desktop-secret" {
+		t.Fatalf("heartbeat identity was not restored: changed=%v idChanged=%v cfg=%#v", changed, remoteIDChanged, cfg)
+	}
+	changed, remoteIDChanged = applyHeartbeatIdentity(cfg, heartbeatResponse{ConnectionCode: "753764976", DesktopSecret: "new-desktop-secret"})
+	if changed || remoteIDChanged {
+		t.Fatal("identical heartbeat identity must not rewrite the protected configuration")
+	}
+}
+
 func TestRemoteFileListAndRead(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "folder"), 0o700); err != nil {

@@ -38,6 +38,10 @@ func agentExecutionMode() (string, bool) {
 	return "user", false
 }
 
+func forceAgentUpdateCheckPlatform() error {
+	return errors.New("ручная проверка обновлений из окна Agent доступна в Windows; Linux и macOS проверяют обновления каждым heartbeat")
+}
+
 func installPlatform() error {
 	if os.Geteuid() != 0 {
 		return errors.New("установку службы необходимо запустить с sudo")

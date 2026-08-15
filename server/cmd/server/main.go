@@ -40,6 +40,8 @@ type server struct {
 	loginMu                 sync.Mutex
 	loginFails              map[string]*loginAttempt
 	authSessions            sync.Map
+	csrfMu                  sync.Mutex
+	csrfTokens              sync.Map
 	desktopAgentCredentials sync.Map
 	desktopFrames           sync.Map
 	desktopFrameLanes       sync.Map
@@ -75,7 +77,19 @@ type cachedAuthState struct {
 	LastUsedTouchAt time.Time
 }
 
+// csrfTokens keeps the recoverable CSRF value for an authenticated session.
+// The database intentionally stores only the hash.  Without this small
+// process-local cache every GET /auth/me had to rotate the token; two tabs (or
+// two concurrent application boot requests) could then return tokens in the
+// opposite order and leave the client holding an already invalid value.
+// A server restart simply makes the first /auth/me request mint one new value.
+type cachedCSRFToken struct {
+	Token     string
+	ExpiresAt time.Time
+}
+
 func (s *server) invalidateAuthSession(sessionID string) {
+	s.csrfTokens.Delete(sessionID)
 	s.authSessions.Range(func(key, value any) bool {
 		if entry, ok := value.(cachedAuthState); !ok || entry.Auth.SessionID == sessionID {
 			s.authSessions.Delete(key)
@@ -87,6 +101,9 @@ func (s *server) invalidateAuthSession(sessionID string) {
 func (s *server) invalidateAuthUser(userID string) {
 	s.authSessions.Range(func(key, value any) bool {
 		if entry, ok := value.(cachedAuthState); !ok || entry.Auth.UserID == userID {
+			if ok {
+				s.csrfTokens.Delete(entry.Auth.SessionID)
+			}
 			s.authSessions.Delete(key)
 		}
 		return true
@@ -522,6 +539,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Не удалось создать сессию")
 		return
 	}
+	s.csrfTokens.Store(sessionID, cachedCSRFToken{Token: csrf, ExpiresAt: time.Now().UTC().Add(12 * time.Hour)})
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: s.cookieSecure, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 60 * 60})
 	_, _ = s.db.Exec(r.Context(), `UPDATE users SET last_login_at=now() WHERE id=$1`, user.UserID)
 	s.audit(r.Context(), &user, nil, "auth.login", "user", user.UserID, ip, map[string]any{})
@@ -584,11 +602,27 @@ func (s *server) requireCSRF(next http.Handler) http.Handler {
 
 func (s *server) me(w http.ResponseWriter, r *http.Request) {
 	a := currentAuth(r)
-	csrf := randomToken(32)
-	if _, err := s.db.Exec(r.Context(), `UPDATE sessions SET csrf_hash=$1,last_used_at=now() WHERE id=$2`, tokenHash(csrf), a.SessionID); err != nil {
-		writeError(w, http.StatusInternalServerError, "Не удалось обновить сессию")
-		return
+	// Serialise the cache miss so parallel boot requests receive the same token,
+	// not two different values where the last database update invalidates the
+	// response that happens to reach the browser last.
+	s.csrfMu.Lock()
+	cached, exists := s.csrfTokens.Load(a.SessionID)
+	csrf := ""
+	if entry, ok := cached.(cachedCSRFToken); exists && ok && entry.ExpiresAt.After(time.Now().UTC()) {
+		csrf = entry.Token
 	}
+	if csrf == "" {
+		csrf = randomToken(32)
+		if _, err := s.db.Exec(r.Context(), `UPDATE sessions SET csrf_hash=$1,last_used_at=now() WHERE id=$2`, tokenHash(csrf), a.SessionID); err != nil {
+			s.csrfMu.Unlock()
+			writeError(w, http.StatusInternalServerError, "Не удалось обновить сессию")
+			return
+		}
+		s.csrfTokens.Store(a.SessionID, cachedCSRFToken{Token: csrf, ExpiresAt: time.Now().UTC().Add(12 * time.Hour)})
+	}
+	s.csrfMu.Unlock()
+	// requireAuth may have populated its one-second hash cache just before a
+	// concurrent /auth/me rotated the database value. Always evict it here.
 	s.authSessions.Delete(a.cacheKey)
 	writeJSON(w, http.StatusOK, map[string]any{"user": userResponse(*a), "csrfToken": csrf})
 }
@@ -596,7 +630,7 @@ func (s *server) me(w http.ResponseWriter, r *http.Request) {
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	a := currentAuth(r)
 	_, _ = s.db.Exec(r.Context(), `DELETE FROM sessions WHERE id=$1`, a.SessionID)
-	s.authSessions.Delete(a.cacheKey)
+	s.invalidateAuthSession(a.SessionID)
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.cookieSecure, SameSite: http.SameSiteStrictMode})
 	s.audit(r.Context(), a, nil, "auth.logout", "user", a.UserID, clientIP(r), map[string]any{})
 	w.WriteHeader(http.StatusNoContent)
@@ -1301,9 +1335,9 @@ func (s *server) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Не указано название устройства")
 		return
 	}
-	var desiredName string
-	err := s.db.QueryRow(r.Context(), `UPDATE devices SET name=CASE WHEN desired_name<>'' THEN desired_name ELSE $1 END,desired_name=CASE WHEN desired_name<>'' AND desired_name=$1 THEN '' ELSE desired_name END,hostname=$2,os=$3,os_version=$4,arch=$5,agent_version=$6,public_ip=NULLIF($7,'')::inet,local_ips=$8,logged_in_user=$9,cpu_model=$10,cpu_load_percent=$11,memory_bytes=$12,memory_used_bytes=$13,disk_total_bytes=$14,disk_free_bytes=$15,uptime_seconds=$16,install_mode=$17,privileged=$18,last_seen=now(),updated_at=now() WHERE id=$19 RETURNING desired_name`,
-		truncate(in.Name, 64), truncate(in.Hostname, 255), truncate(in.OS, 50), truncate(in.OSVersion, 100), truncate(in.Arch, 30), truncate(in.AgentVersion, 30), clientIP(r), sanitizeIPs(in.LocalIPs), truncate(in.CurrentUser, 255), truncate(in.CPUModel, 255), clampFloat(in.CPULoadPercent, 0, 100), maxZero(in.MemoryBytes), maxZero(in.MemoryUsedBytes), maxZero(in.DiskTotalBytes), maxZero(in.DiskFreeBytes), maxZero(in.UptimeSeconds), sanitizeInstallMode(in.InstallMode), in.Privileged, deviceID).Scan(&desiredName)
+	var desiredName, connectionCode string
+	err := s.db.QueryRow(r.Context(), `UPDATE devices SET name=CASE WHEN desired_name<>'' THEN desired_name ELSE $1 END,desired_name=CASE WHEN desired_name<>'' AND desired_name=$1 THEN '' ELSE desired_name END,hostname=$2,os=$3,os_version=$4,arch=$5,agent_version=$6,public_ip=NULLIF($7,'')::inet,local_ips=$8,logged_in_user=$9,cpu_model=$10,cpu_load_percent=$11,memory_bytes=$12,memory_used_bytes=$13,disk_total_bytes=$14,disk_free_bytes=$15,uptime_seconds=$16,install_mode=$17,privileged=$18,last_seen=now(),updated_at=now() WHERE id=$19 RETURNING desired_name,connection_code`,
+		truncate(in.Name, 64), truncate(in.Hostname, 255), truncate(in.OS, 50), truncate(in.OSVersion, 100), truncate(in.Arch, 30), truncate(in.AgentVersion, 30), clientIP(r), sanitizeIPs(in.LocalIPs), truncate(in.CurrentUser, 255), truncate(in.CPUModel, 255), clampFloat(in.CPULoadPercent, 0, 100), maxZero(in.MemoryBytes), maxZero(in.MemoryUsedBytes), maxZero(in.DiskTotalBytes), maxZero(in.DiskFreeBytes), maxZero(in.UptimeSeconds), sanitizeInstallMode(in.InstallMode), in.Privileged, deviceID).Scan(&desiredName, &connectionCode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Не удалось обновить состояние")
 		return
@@ -1323,7 +1357,7 @@ func (s *server) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	// Fifteen seconds keeps public/local IP and online state responsive after a
 	// VPN route or network location changes without materially loading the API
 	// at the supported fleet size (up to 300 agents).
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nextHeartbeatSeconds": 15, "desiredName": desiredName, "desktopSecret": desktopSecret, "job": job, "agentUpdate": update})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nextHeartbeatSeconds": 15, "desiredName": desiredName, "connectionCode": connectionCode, "desktopSecret": desktopSecret, "job": job, "agentUpdate": update})
 }
 
 func (s *server) claimNextAgentJob(ctx context.Context, deviceID string) (*agentJobPayload, error) {

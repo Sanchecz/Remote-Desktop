@@ -386,6 +386,13 @@ func (s *server) pruneDesktopRuntimeState(cutoff time.Time) {
 		}
 		return true
 	})
+	s.csrfTokens.Range(func(key, value any) bool {
+		entry, ok := value.(cachedCSRFToken)
+		if !ok || entry.ExpiresAt.Before(now) {
+			s.csrfTokens.Delete(key)
+		}
+		return true
+	})
 }
 
 type desktopInputEvent struct {
