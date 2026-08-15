@@ -30,20 +30,22 @@ import (
 )
 
 const (
-	version       = "0.9.76"
+	version       = "0.9.77"
 	defaultServer = "https://supportgenesis.ru"
 )
 
 var requestedUserInstall bool
 
 type config struct {
-	ServerURL       string `json:"serverUrl"`
-	EnrollmentToken string `json:"enrollmentToken,omitempty"`
-	DeviceName      string `json:"deviceName"`
-	DeviceID        string `json:"deviceId,omitempty"`
-	DeviceSecret    string `json:"deviceSecret,omitempty"`
-	DesktopSecret   string `json:"desktopSecret,omitempty"`
-	ConnectionCode  string `json:"connectionCode,omitempty"`
+	ServerURL              string   `json:"serverUrl"`
+	EnrollmentToken        string   `json:"enrollmentToken,omitempty"`
+	DeviceName             string   `json:"deviceName"`
+	DeviceID               string   `json:"deviceId,omitempty"`
+	DeviceSecret           string   `json:"deviceSecret,omitempty"`
+	DesktopSecret          string   `json:"desktopSecret,omitempty"`
+	ConnectionCode         string   `json:"connectionCode,omitempty"`
+	ActionSigningPublicKey string   `json:"actionSigningPublicKey,omitempty"`
+	ActionNonces           []string `json:"actionNonces,omitempty"`
 }
 
 type inventory struct {
@@ -80,12 +82,13 @@ type remoteJob struct {
 }
 
 type heartbeatResponse struct {
-	DesiredName          string       `json:"desiredName"`
-	ConnectionCode       string       `json:"connectionCode"`
-	DesktopSecret        string       `json:"desktopSecret"`
-	NextHeartbeatSeconds int          `json:"nextHeartbeatSeconds"`
-	Job                  *remoteJob   `json:"job"`
-	AgentUpdate          *agentUpdate `json:"agentUpdate"`
+	DesiredName            string       `json:"desiredName"`
+	ConnectionCode         string       `json:"connectionCode"`
+	DesktopSecret          string       `json:"desktopSecret"`
+	NextHeartbeatSeconds   int          `json:"nextHeartbeatSeconds"`
+	Job                    *remoteJob   `json:"job"`
+	AgentUpdate            *agentUpdate `json:"agentUpdate"`
+	ActionSigningPublicKey string       `json:"actionSigningPublicKey"`
 }
 
 type remoteJobResult struct {
@@ -333,11 +336,16 @@ func runLoop(ctx context.Context) error {
 			}
 		}
 		identityChanged, remoteIDChanged := applyHeartbeatIdentity(cfg, response)
+		actionKeyChanged, actionKeyErr := applyActionSigningKey(cfg, response.ActionSigningPublicKey)
+		if actionKeyErr != nil {
+			log.Printf("проверка ключа Action Jobs отклонена: %v", actionKeyErr)
+			appendPublicAgentEvent("warning", "security", "Ключ подписанных действий отклонён", "Agent сохранил ранее доверенный ключ и не принимает неподписанные изменения")
+		}
 		if remoteIDChanged {
 			log.Printf("Remote ID восстановлен из подтверждённой регистрации")
 			appendPublicAgentEvent("success", "identity", "Remote ID синхронизирован", "Сервер подтвердил идентификатор этого устройства")
 		}
-		configurationChanged = configurationChanged || identityChanged
+		configurationChanged = configurationChanged || identityChanged || actionKeyChanged
 		if configurationChanged {
 			if err := saveConfig(cfg); err != nil {
 				log.Printf("не удалось сохранить обновлённую конфигурацию: %v", err)
@@ -531,7 +539,11 @@ func (buffer *cappedBuffer) String() string {
 
 func executeRemoteJob(parent context.Context, cfg *config, job *remoteJob) remoteJobResult {
 	timeout := job.TimeoutSeconds
-	if timeout < 5 || timeout > 60 {
+	maximumTimeout := 60
+	if job.Type == "action" {
+		maximumTimeout = 900
+	}
+	if timeout < 5 || timeout > maximumTimeout {
 		timeout = 30
 	}
 	ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Second)
@@ -552,6 +564,9 @@ func executeRemoteJob(parent context.Context, cfg *config, job *remoteJob) remot
 	}
 	if job.Type == "files_write" {
 		return executeFilesWriteJob(job)
+	}
+	if job.Type == "action" {
+		return executeSignedActionJob(ctx, cfg, job)
 	}
 	if job.Type != "shell" {
 		return remoteJobResult{Success: false, Error: "неподдерживаемый тип задания", ExitCode: -1}

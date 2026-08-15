@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"image/png"
 	"os"
 	"testing"
@@ -94,6 +96,43 @@ func TestDeviceMonitorIllustrationKeepsHighResolutionAlpha(t *testing.T) {
 		_, _, _, alpha := illustration.At(point[0], point[1]).RGBA()
 		if alpha != 0 {
 			t.Fatalf("device monitor corner %v must be transparent", point)
+		}
+	}
+}
+
+func TestWindowsExecutableIconUsesGreenBrandAtEverySize(t *testing.T) {
+	data, err := os.ReadFile("../../assets/genesisit.ico")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 6 || binary.LittleEndian.Uint16(data[0:2]) != 0 || binary.LittleEndian.Uint16(data[2:4]) != 1 {
+		t.Fatal("invalid Windows ICO header")
+	}
+	count := int(binary.LittleEndian.Uint16(data[4:6]))
+	if count < 5 || len(data) < 6+count*16 {
+		t.Fatalf("Windows ICO does not contain a complete multi-resolution icon set: count=%d", count)
+	}
+	for index := 0; index < count; index++ {
+		entry := data[6+index*16 : 6+(index+1)*16]
+		size := int(binary.LittleEndian.Uint32(entry[8:12]))
+		offset := int(binary.LittleEndian.Uint32(entry[12:16]))
+		if size <= 0 || offset < 0 || offset+size > len(data) {
+			t.Fatalf("invalid ICO entry %d: offset=%d size=%d", index, offset, size)
+		}
+		frame, err := png.Decode(bytes.NewReader(data[offset : offset+size]))
+		if err != nil {
+			t.Fatalf("ICO entry %d is not the expected lossless PNG frame: %v", index, err)
+		}
+		bounds := frame.Bounds()
+		r, g, b, a := frame.At(bounds.Min.X+bounds.Dx()/2, bounds.Min.Y+bounds.Dy()/2).RGBA()
+		if a == 0 || !(g > r && g > b) {
+			t.Fatalf("ICO entry %d center is not the green RemoteIt diamond: r=%d g=%d b=%d a=%d", index, r, g, b, a)
+		}
+		for _, point := range [][2]int{{bounds.Min.X, bounds.Min.Y}, {bounds.Max.X - 1, bounds.Min.Y}, {bounds.Min.X, bounds.Max.Y - 1}, {bounds.Max.X - 1, bounds.Max.Y - 1}} {
+			cr, cg, cb, ca := frame.At(point[0], point[1]).RGBA()
+			if ca > 0 && cr < 0x3000 && cg < 0x3000 && cb < 0x3000 {
+				t.Fatalf("ICO entry %d has a black opaque corner at %v", index, point)
+			}
 		}
 	}
 }

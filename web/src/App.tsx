@@ -173,11 +173,49 @@ type AuthSession = {
   current: boolean;
 };
 
+type IntegrationToken = {
+  id: string;
+  name: string;
+  scopes: string[];
+  expiresAt: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+};
+
+type ActionJob = {
+  id: string;
+  deviceId: string;
+  deviceName: string;
+  remoteId: string;
+  action: string;
+  parameters: Record<string, unknown>;
+  risk: "read" | "high" | "critical";
+  status: "awaiting_approval" | "queued" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
+  approvalRequired: boolean;
+  requestedVia: "web" | "mcp";
+  plan: {
+    title?: string;
+    description?: string;
+    steps?: string[];
+    rollback?: string;
+  };
+  output: string;
+  error: string;
+  exitCode: number | null;
+  requestHash: string;
+  createdAt: string;
+  expiresAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  approvedAt: string | null;
+};
+
 type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tokens" | "users" | "audit" | "settings";
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "0.9.76";
+const LATEST_AGENT_VERSION = "0.9.77";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -2104,6 +2142,136 @@ function AuditPage() {
   </>;
 }
 
+const actionNames: Record<string, string> = {
+  "diagnostic.system": "Диагностика системы",
+  "diagnostic.network": "Диагностика сети",
+  "diagnostic.services": "Диагностика служб",
+  "service.restart": "Перезапуск службы",
+  "process.terminate": "Завершение процесса",
+  "file.download": "Безопасное скачивание файла",
+  "package.install": "Установка пакета",
+  "local.group.add_member": "Добавление в локальную группу",
+  "windows.vpn.upsert": "Настройка VPN Windows",
+  "system.reboot": "Перезагрузка компьютера",
+  "script.execute": "Проверенный сценарий"
+};
+
+const actionStates: Record<ActionJob["status"], { label: string; tone: string }> = {
+  awaiting_approval: { label: "Ждёт подтверждения", tone: "warning" },
+  queued: { label: "В очереди", tone: "info" },
+  running: { label: "Выполняется", tone: "info" },
+  succeeded: { label: "Выполнено", tone: "success" },
+  failed: { label: "Ошибка", tone: "error" },
+  cancelled: { label: "Отменено", tone: "muted" },
+  expired: { label: "Истекло", tone: "muted" }
+};
+
+function CodexIntegrationPanel({ currentUser, csrf }: { currentUser: User; csrf: string }) {
+  const [tokens, setTokens] = useState<IntegrationToken[]>([]);
+  const [actions, setActions] = useState<ActionJob[]>([]);
+  const [tokenName, setTokenName] = useState("Codex на основном компьютере");
+  const [expiresDays, setExpiresDays] = useState(90);
+  const [newToken, setNewToken] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const canManageIntegrations = currentUser.role === "owner" || currentUser.role === "admin";
+  const canReviewActions = currentUser.role === "owner" || currentUser.role === "admin";
+
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
+    try {
+      const requests: Promise<unknown>[] = [];
+      if (canManageIntegrations) requests.push(api<{ tokens: IntegrationToken[] }>("/api/integration-tokens").then((result) => setTokens(result.tokens)));
+      if (canReviewActions) requests.push(api<{ actions: ActionJob[] }>("/api/action-jobs").then((result) => setActions(result.actions)));
+      await Promise.all(requests);
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось загрузить интеграцию Codex");
+    } finally {
+      if (!quiet) setLoading(false);
+    }
+  }, [canManageIntegrations, canReviewActions]);
+
+  useEffect(() => {
+    void load();
+    if (!canReviewActions) return;
+    const timer = window.setInterval(() => void load(true), 5000);
+    return () => window.clearInterval(timer);
+  }, [canReviewActions, load]);
+
+  async function createToken(event: FormEvent) {
+    event.preventDefault();
+    setWorking("create-token"); setError(""); setMessage(""); setNewToken("");
+    try {
+      const result = await api<{ token: string }>("/api/integration-tokens", { method: "POST", body: JSON.stringify({ name: tokenName, expiresDays }) }, csrf);
+      setNewToken(result.token);
+      setMessage("Токен создан. Он показывается только сейчас — сохраните его в настройке MCP на доверенном компьютере.");
+      await load(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось создать токен интеграции");
+    } finally { setWorking(""); }
+  }
+
+  async function revokeToken(id: string) {
+    if (!window.confirm("Отозвать эту интеграцию? Codex сразу потеряет доступ к RemoteIt.")) return;
+    setWorking(id); setError(""); setMessage("");
+    try {
+      await api(`/api/integration-tokens/${id}`, { method: "DELETE" }, csrf);
+      setMessage("Интеграция отозвана.");
+      await load(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось отозвать интеграцию");
+    } finally { setWorking(""); }
+  }
+
+  async function updateAction(id: string, operation: "approve" | "cancel") {
+    setWorking(id); setError(""); setMessage("");
+    try {
+      await api(`/api/action-jobs/${id}/${operation}`, { method: "POST" }, csrf);
+      setMessage(operation === "approve" ? "Действие подтверждено и поставлено в защищённую очередь." : "Действие отменено.");
+      await load(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось изменить действие");
+    } finally { setWorking(""); }
+  }
+
+  async function copyToken() {
+    if (!newToken) return;
+    try {
+      await navigator.clipboard.writeText(newToken);
+      setMessage("Токен скопирован. Не пересылайте его в чаты и не сохраняйте в репозитории.");
+    } catch { setError("Не удалось скопировать токен — выделите его вручную."); }
+  }
+
+  const pendingCount = actions.filter((item) => item.status === "awaiting_approval").length;
+  const setupCommand = newToken ? `codex mcp add remoteit --env REMOTEIT_URL="${window.location.origin}" --env REMOTEIT_INTEGRATION_TOKEN="${newToken}" -- "C:\\RemoteIt\\RemoteIt-MCP.exe"` : "";
+
+  if (!canManageIntegrations && !canReviewActions) return null;
+  return <section className="codex-integration-card">
+    <div className="codex-integration-head">
+      <span className="codex-mark"><Sparkles size={21} /></span>
+      <div><span className="eyebrow">УПРАВЛЯЕМЫЕ ДЕЙСТВИЯ</span><h2>Codex и RemoteIt</h2><p>Codex на доверенном компьютере владельца или администратора видит разрешённые устройства и создаёт подписанные задания. Изменяющие действия выполняются только после проверки в панели.</p></div>
+      <div className="codex-security-badge"><ShieldCheck size={17} /><span>Подпись Ed25519<strong>критические действия — только после подтверждения владельца</strong></span></div>
+    </div>
+    {(error || message) && <div className={error ? "panel-error codex-feedback" : "settings-success codex-feedback"}>{error || message}</div>}
+    <div className="codex-integration-grid">
+      {canManageIntegrations && <article className="codex-token-panel">
+        <div className="codex-section-head"><div><h3>Доверенные подключения</h3><p>Личный токен доступен только владельцу и администраторам, действует для MCP-инструментов RemoteIt и не заменяет вход в панель.</p></div><span>{tokens.filter((item) => !item.revokedAt && new Date(item.expiresAt).getTime() > Date.now()).length} активных</span></div>
+        <form className="codex-token-form" onSubmit={createToken}><label><span>Название</span><input value={tokenName} onChange={(event) => setTokenName(event.target.value)} maxLength={100} required /></label><label><span>Срок, дней</span><input type="number" min={1} max={365} value={expiresDays} onChange={(event) => setExpiresDays(Number(event.target.value))} required /></label><button className="primary-button" disabled={working === "create-token"}>{working === "create-token" ? <RefreshCw size={16} className="spin" /> : <Plus size={16} />} Создать подключение</button></form>
+        {newToken && <div className="codex-new-token"><div><span>ПОКАЗЫВАЕТСЯ ОДИН РАЗ</span><code>{newToken}</code></div><button className="secondary-button" onClick={() => void copyToken()}><Copy size={15} /> Копировать</button><details><summary>Команда подключения Codex</summary><code>{setupCommand}</code><p>Сначала скачайте RemoteIt MCP, поместите файл в <b>C:\RemoteIt</b>, затем выполните команду на компьютере с Codex.</p></details></div>}
+        <div className="codex-downloads"><a href="/downloads/RemoteIt-MCP.exe" download><Download size={16} /> RemoteIt MCP для Windows</a><a href="/downloads/remoteit-mcp-linux-amd64" download><Download size={16} /> RemoteIt MCP для Linux</a><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> Контрольные суммы</a></div>
+        <div className="integration-token-list">{loading && tokens.length === 0 ? <PanelLoader /> : tokens.map((item) => { const active = !item.revokedAt && new Date(item.expiresAt).getTime() > Date.now(); return <div className="integration-token-row" key={item.id}><span className={`integration-state ${active ? "active" : "revoked"}`}><Link2 size={15} /></span><div><strong>{item.name}</strong><small>до {new Date(item.expiresAt).toLocaleString("ru-RU")} · {item.lastUsedAt ? `использован ${formatRelative(item.lastUsedAt)}` : "ещё не использован"}</small></div><span className={`action-status ${active ? "success" : "muted"}`}>{active ? "Активен" : "Отозван"}</span>{active && <button className="danger-button compact-action" disabled={working === item.id} onClick={() => void revokeToken(item.id)}><Ban size={13} /> Отозвать</button>}</div>; })}</div>
+      </article>}
+      {canReviewActions && <article className="codex-actions-panel">
+        <div className="codex-section-head"><div><h3>Задания Codex</h3><p>Последние запросы, подтверждения и результаты на удалённых устройствах.</p></div><span className={pendingCount ? "needs-action" : ""}>{pendingCount ? `${pendingCount} ждут решения` : "нет ожидающих"}</span><button className="icon-button" onClick={() => void load()} aria-label="Обновить задания"><RefreshCw size={16} className={loading ? "spin" : ""} /></button></div>
+        <div className="action-job-list">{loading && actions.length === 0 ? <PanelLoader /> : actions.slice(0, 30).map((item) => { const state = actionStates[item.status]; const canCancel = item.status === "awaiting_approval" || item.status === "queued"; const canApprove = item.status === "awaiting_approval" && (item.risk !== "critical" || currentUser.role === "owner"); return <details className={`action-job action-${state.tone}`} key={item.id} open={item.status === "awaiting_approval"}><summary><span className={`action-risk risk-${item.risk}`}>{item.risk === "read" ? <Eye size={16} /> : <AlertTriangle size={16} />}</span><div><strong>{actionNames[item.action] || item.plan?.title || item.action}</strong><small>{item.deviceName} · ID {item.remoteId} · {item.requestedVia === "mcp" ? "запрос Codex" : "из панели"}</small></div><span className={`action-status ${state.tone}`}>{state.label}</span><ChevronDown size={16} /></summary><div className="action-job-body"><p>{item.plan?.description || "Описание задания недоступно."}</p>{item.plan?.steps?.length ? <ol>{item.plan.steps.map((step) => <li key={step}>{step}</li>)}</ol> : null}<div className="action-parameters"><strong>Точные параметры перед подтверждением</strong><pre>{JSON.stringify(item.parameters || {}, null, 2)}</pre></div>{item.plan?.rollback && <div className="action-rollback"><ShieldCheck size={14} /><span><strong>План отката</strong>{item.plan.rollback}</span></div>}<div className="action-job-meta"><span>Создано: {new Date(item.createdAt).toLocaleString("ru-RU")}</span><span>Хеш: <code>{item.requestHash.slice(0, 16)}…</code></span>{item.approvalRequired && <span>Требуется ручное подтверждение</span>}{item.risk === "critical" && currentUser.role !== "owner" && <span>Критическое действие подтверждает только владелец</span>}</div>{(item.output || item.error) && <pre className={item.error ? "action-output error" : "action-output"}>{item.error || item.output}</pre>}<div className="action-job-buttons">{canApprove && <button className="primary-button" disabled={working === item.id} onClick={() => void updateAction(item.id, "approve")}><ShieldCheck size={15} /> Проверил параметры — выполнить</button>}{canCancel && <button className="danger-button" disabled={working === item.id} onClick={() => void updateAction(item.id, "cancel")}><Ban size={15} /> Отменить</button>}</div></div></details>; })}{!loading && actions.length === 0 && <div className="codex-empty"><CheckCircle2 size={25} /><strong>Заданий пока нет</strong><span>Они появятся после запроса Codex через RemoteIt MCP.</span></div>}</div>
+      </article>}
+    </div>
+  </section>;
+}
+
 function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User; csrf: string; theme: Theme; onTheme: (theme: Theme) => void }) {
   const [sessions, setSessions] = useState<AuthSession[]>([]);
   const [currentPassword, setCurrentPassword] = useState("");
@@ -2161,12 +2329,13 @@ function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User
     <section className="page-heading"><div><span className="eyebrow">АККАУНТ И БЕЗОПАСНОСТЬ</span><h1>Настройки</h1><p>Пароль, оформление и активные входы аккаунта {currentUser.username}.</p></div></section>
 	<section className="settings-tabs" aria-label="Разделы настроек"><span className="active"><CircleUserRound size={15} /> Профиль</span><span><LockKeyhole size={15} /> Безопасность</span><span><Palette size={15} /> Внешний вид</span><span><Monitor size={15} /> Сессии</span></section>
     {(error || message) && <div className={error ? "panel-error settings-feedback" : "settings-success"}>{error || message}</div>}
+    <CodexIntegrationPanel currentUser={currentUser} csrf={csrf} />
     <section className="settings-grid">
       <article className="settings-card account-card"><div className="settings-card-head"><span className="stat-icon blue"><CircleUserRound size={20} /></span><div><h2>Профиль аккаунта</h2><p>Ваши текущие права в RemoteIt</p></div></div><div className="account-summary"><span className="avatar">{currentUser.username.slice(0, 1).toUpperCase()}</span><div><strong>{currentUser.username}</strong><small>{roleLabel}</small></div></div><div className="account-facts"><span><small>Права доступа</small><strong>{roleLabel}</strong></span><span><small>Имя входа</small><strong>@{currentUser.username}</strong></span><span><small>Защита</small><strong><ShieldCheck size={13} /> Включена</strong></span></div></article>
       <article className="settings-card"><div className="settings-card-head"><span className="stat-icon green"><KeyRound size={20} /></span><div><h2>Изменить пароль</h2><p>От 4 символов, без обязательных спецсимволов</p></div></div><form className="settings-form" onSubmit={changePassword}><label><span>Текущий пароль</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label><span>Новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label><label><span>Повторите новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label><button className="primary-button" disabled={loading}>{loading ? <RefreshCw size={17} className="spin" /> : <ShieldCheck size={17} />} Сохранить пароль</button></form></article>
       <article className="settings-card appearance-card"><div className="settings-card-head"><span className="stat-icon violet"><Palette size={20} /></span><div><h2>Внешний вид</h2><p>Белая тема используется по умолчанию</p></div></div><div className="theme-setting"><span>Оформление панели</span><ThemeSwitcher theme={theme} onChange={onTheme} /></div><small className="appearance-note">Выбор сохраняется только для этого браузера и не меняет тему у других администраторов.</small></article>
       <article className="settings-card sessions-card"><div className="settings-card-head"><span className="stat-icon violet"><Activity size={20} /></span><div><h2>Активные сессии</h2><p>{sessions.length} входов, срок каждой — 12 часов</p></div><button className="icon-button" onClick={() => void loadSessions()} aria-label="Обновить сессии"><RefreshCw size={17} className={sessionsLoading ? "spin" : ""} /></button></div><div className="sessions-list">{sessionsLoading && sessions.length === 0 ? <div className="session-placeholder">Загрузка…</div> : sessions.map((session) => <div className="session-row" key={session.id}><span className={`session-state ${session.current ? "current" : ""}`}><Monitor size={17} /></span><div><strong>{session.current ? "Текущая сессия" : session.userAgent || "Неизвестное устройство"}</strong><small>{session.ip || "IP неизвестен"} · активность {formatRelative(session.lastUsedAt)}</small></div>{session.current ? <span className="current-badge">эта сессия</span> : <button className="danger-button compact-action" onClick={() => void revokeSession(session.id)}><Ban size={14} /> Завершить</button>}</div>)}</div></article>
-      <article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android APK</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a></div></article>
+      <article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android APK</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a><a href="/downloads/RemoteIt-MCP.exe" download><Sparkles size={16} /> MCP для Codex</a><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a></div></article>
     </section>
   </>;
 }

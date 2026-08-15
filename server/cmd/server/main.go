@@ -37,6 +37,7 @@ type server struct {
 	transferRoot            string
 	publicURL               string
 	cookieSecure            bool
+	actionSigner            *actionSigner
 	loginMu                 sync.Mutex
 	loginFails              map[string]*loginAttempt
 	authSessions            sync.Map
@@ -226,8 +227,75 @@ var schemaStatements = []string{
     )`,
 	`CREATE INDEX IF NOT EXISTS agent_jobs_device_created_idx ON agent_jobs(device_id,created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS agent_jobs_queue_idx ON agent_jobs(device_id,status,created_at)`,
-	`ALTER TABLE agent_jobs DROP CONSTRAINT IF EXISTS agent_jobs_job_type_check`,
-	`ALTER TABLE agent_jobs ADD CONSTRAINT agent_jobs_job_type_check CHECK (job_type IN ('shell','inventory','uninstall','files_list','files_read','files_write'))`,
+	`DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid='agent_jobs'::regclass
+              AND conname='agent_jobs_job_type_check'
+              AND pg_get_constraintdef(oid) LIKE '%action%'
+        ) THEN
+            ALTER TABLE agent_jobs DROP CONSTRAINT IF EXISTS agent_jobs_job_type_check;
+            ALTER TABLE agent_jobs ADD CONSTRAINT agent_jobs_job_type_check CHECK (job_type IN ('shell','inventory','uninstall','files_list','files_read','files_write','action'));
+        END IF;
+    END $$`,
+	`DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid='agent_jobs'::regclass
+              AND conname='agent_jobs_timeout_seconds_check'
+              AND pg_get_constraintdef(oid) LIKE '%900%'
+        ) THEN
+            ALTER TABLE agent_jobs DROP CONSTRAINT IF EXISTS agent_jobs_timeout_seconds_check;
+            ALTER TABLE agent_jobs ADD CONSTRAINT agent_jobs_timeout_seconds_check CHECK (timeout_seconds BETWEEN 5 AND 900);
+        END IF;
+    END $$`,
+	`CREATE TABLE IF NOT EXISTS integration_tokens (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name text NOT NULL,
+        token_hash bytea NOT NULL UNIQUE,
+        scopes text[] NOT NULL DEFAULT '{}',
+        expires_at timestamptz NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        last_used_at timestamptz,
+        revoked_at timestamptz
+    )`,
+	`CREATE INDEX IF NOT EXISTS integration_tokens_user_idx ON integration_tokens(user_id,created_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS action_jobs (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        device_id uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+        requested_by uuid REFERENCES users(id) ON DELETE SET NULL,
+        requested_via text NOT NULL DEFAULT 'web' CHECK (requested_via IN ('web','mcp')),
+        action_type text NOT NULL,
+        parameters jsonb NOT NULL DEFAULT '{}'::jsonb,
+        risk_level text NOT NULL CHECK (risk_level IN ('read','high','critical')),
+        status text NOT NULL CHECK (status IN ('awaiting_approval','queued','running','succeeded','failed','cancelled','expired')),
+        approval_required boolean NOT NULL DEFAULT true,
+        approved_by uuid REFERENCES users(id) ON DELETE SET NULL,
+        approved_at timestamptz,
+        execution_job_id uuid UNIQUE REFERENCES agent_jobs(id) ON DELETE SET NULL,
+        plan jsonb NOT NULL DEFAULT '{}'::jsonb,
+        rollback_plan jsonb NOT NULL DEFAULT '{}'::jsonb,
+        idempotency_key text NOT NULL DEFAULT '',
+        request_hash text NOT NULL,
+        nonce text NOT NULL UNIQUE,
+        signature text NOT NULL DEFAULT '',
+        output text NOT NULL DEFAULT '',
+        error_text text NOT NULL DEFAULT '',
+        exit_code integer,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        expires_at timestamptz NOT NULL,
+        started_at timestamptz,
+        completed_at timestamptz,
+        updated_at timestamptz NOT NULL DEFAULT now()
+    )`,
+	`CREATE INDEX IF NOT EXISTS action_jobs_device_created_idx ON action_jobs(device_id,created_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS action_jobs_status_idx ON action_jobs(status,created_at DESC)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS action_jobs_idempotency_idx ON action_jobs(requested_by,idempotency_key) WHERE idempotency_key<>''`,
 	`CREATE TABLE IF NOT EXISTS audit_events (
         id bigserial PRIMARY KEY,
         actor_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
@@ -312,6 +380,10 @@ func main() {
 		cookieSecure: envOr("GENESIS_COOKIE_SECURE", "true") != "false",
 		loginFails:   make(map[string]*loginAttempt),
 	}
+	s.actionSigner, err = newActionSignerFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
 	if err := os.MkdirAll(s.transferRoot, 0o700); err != nil {
 		log.Fatal(err)
 	}
@@ -393,7 +465,25 @@ func main() {
 		r.With(s.requireCSRF).Patch("/enrollment-tokens/{id}", s.updateEnrollmentToken)
 		r.With(s.requireCSRF).Delete("/enrollment-tokens/{id}", s.deleteEnrollmentToken)
 		r.Get("/audit", s.listAudit)
+		r.Get("/integration-tokens", s.listIntegrationTokens)
+		r.With(s.requireCSRF).Post("/integration-tokens", s.createIntegrationToken)
+		r.With(s.requireCSRF).Delete("/integration-tokens/{id}", s.revokeIntegrationToken)
+		r.Get("/action-jobs", s.listActionJobs)
+		r.Get("/action-jobs/{id}", s.getActionJob)
+		r.With(s.requireCSRF).Post("/action-jobs/plan", s.planActionJob)
+		r.With(s.requireCSRF).Post("/action-jobs", s.createActionJobFromWeb)
+		r.With(s.requireCSRF).Post("/action-jobs/{id}/approve", s.approveActionJob)
+		r.With(s.requireCSRF).Post("/action-jobs/{id}/cancel", s.cancelActionJob)
 		r.With(s.requireCSRF).Post("/ai/analyze", s.aiAnalyze)
+	})
+	r.Route("/api/integration/v1", func(r chi.Router) {
+		r.Use(s.requireIntegrationToken)
+		r.Get("/devices", s.integrationListDevices)
+		r.Get("/devices/{id}", s.integrationGetDevice)
+		r.Post("/actions/plan", s.integrationPlanAction)
+		r.Post("/actions", s.integrationCreateAction)
+		r.Get("/actions/{id}", s.integrationGetAction)
+		r.Post("/actions/{id}/cancel", s.integrationCancelAction)
 	})
 	r.NotFound(s.serveSPA)
 
@@ -1357,7 +1447,7 @@ func (s *server) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	// Fifteen seconds keeps public/local IP and online state responsive after a
 	// VPN route or network location changes without materially loading the API
 	// at the supported fleet size (up to 300 agents).
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nextHeartbeatSeconds": 15, "desiredName": desiredName, "connectionCode": connectionCode, "desktopSecret": desktopSecret, "job": job, "agentUpdate": update})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nextHeartbeatSeconds": 15, "desiredName": desiredName, "connectionCode": connectionCode, "desktopSecret": desktopSecret, "actionSigningPublicKey": s.actionSigner.publicKey(), "job": job, "agentUpdate": update})
 }
 
 func (s *server) claimNextAgentJob(ctx context.Context, deviceID string) (*agentJobPayload, error) {
@@ -1373,6 +1463,9 @@ func (s *server) claimNextAgentJob(ctx context.Context, deviceID string) (*agent
 	}
 	if err := json.Unmarshal(payload, &job.Payload); err != nil {
 		return nil, err
+	}
+	if job.Type == "action" {
+		_, _ = s.db.Exec(ctx, `UPDATE action_jobs SET status='running',started_at=COALESCE(started_at,now()),updated_at=now() WHERE execution_job_id=$1 AND status='queued'`, job.ID)
 	}
 	return &job, nil
 }
@@ -1619,6 +1712,9 @@ func (s *server) agentJobResult(w http.ResponseWriter, r *http.Request) {
 		} else {
 			_, err = tx.Exec(r.Context(), `UPDATE devices SET pending_removal=false,updated_at=now() WHERE id=$1`, deviceID)
 		}
+	}
+	if err == nil && jobType == "action" {
+		_, err = tx.Exec(r.Context(), `UPDATE action_jobs SET status=$1,output=$2,error_text=$3,exit_code=$4,started_at=COALESCE(started_at,now()),completed_at=now(),updated_at=now() WHERE execution_job_id=$5 AND device_id=$6`, status, truncate(in.Output, 900000), truncate(in.Error, 4096), in.ExitCode, jobID, deviceID)
 	}
 	if err != nil || tx.Commit(r.Context()) != nil {
 		writeError(w, http.StatusInternalServerError, "Не удалось завершить задание")
