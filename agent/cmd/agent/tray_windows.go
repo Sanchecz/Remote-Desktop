@@ -97,9 +97,10 @@ func (scale agentUIScale) unit(pixels int) int {
 }
 
 func (scale agentUIScale) font(points float64) int {
-	// NewFont accepts points and Windows applies the monitor DPI.  The reference
-	// uses deliberately generous typography; compensate for DPI exactly once and
-	// retain that visual size through the calibrated type factor.
+	// The native dashboard is painted against a physical-pixel reference while
+	// Walk creates fonts in DPI-aware points. Compensate once here, matching the
+	// reference typography without overflowing the fixed 1536:1024 composition
+	// at the common Windows 125/150/200% scales.
 	return max(1, int(points*scale.fontPointFactor*scale.zoom*96/float64(scale.dpi)+0.5))
 }
 
@@ -2300,6 +2301,14 @@ func showAgentLogDialog(owner walk.Form) {
 }
 
 func readableAgentLogPath() (string, error) {
+	// Prefer the secret-free structured journal explicitly published for the
+	// interactive tray. The private service log may contain diagnostic details
+	// and intentionally remains restricted to LocalSystem/administrators.
+	if path := publicEventsPath(); path != "" {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
 	path := filepath.Join(filepath.Dir(defaultConfigPath()), "agent.log")
 	if _, err := os.Stat(path); err == nil {
 		return path, nil

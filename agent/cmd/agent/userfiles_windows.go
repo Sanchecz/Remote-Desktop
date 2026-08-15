@@ -17,7 +17,19 @@ import (
 )
 
 var runtimeStatusACLOnce sync.Once
+var publicEventsACLOnce sync.Once
+var publicEventsMu sync.Mutex
 var replaceFileWindows = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
+
+const maxPublicAgentEvents = 80
+
+type publicAgentEvent struct {
+	At     time.Time `json:"at"`
+	Level  string    `json:"level"`
+	Kind   string    `json:"kind"`
+	Title  string    `json:"title"`
+	Detail string    `json:"detail"`
+}
 
 type publicAgentInfo struct {
 	ServerURL      string    `json:"serverUrl"`
@@ -91,6 +103,84 @@ func publicInfoPath() string {
 
 func desktopAccessPath() string {
 	return filepath.Join(agentDataDir(), "desktop-access.json")
+}
+
+func publicEventsPath() string {
+	return filepath.Join(agentDataDir(), "public-events.json")
+}
+
+// appendPublicAgentEvent writes a deliberately small, secret-free activity
+// journal for the interactive tray. The private service log and protected
+// configuration remain accessible only to LocalSystem/administrators.
+func appendPublicAgentEvent(level, kind, title, detail string) {
+	level = strings.ToLower(strings.TrimSpace(level))
+	switch level {
+	case "success", "info", "warning", "error":
+	default:
+		level = "info"
+	}
+	kind = truncateText(strings.ReplaceAll(strings.ReplaceAll(kind, "\r", " "), "\n", " "), 32)
+	title = truncateText(strings.ReplaceAll(strings.ReplaceAll(title, "\r", " "), "\n", " "), 120)
+	detail = truncateText(strings.ReplaceAll(strings.ReplaceAll(detail, "\r", " "), "\n", " "), 240)
+	if title == "" {
+		return
+	}
+
+	publicEventsMu.Lock()
+	defer publicEventsMu.Unlock()
+
+	events, _ := loadPublicAgentEventsUnlocked()
+	now := time.Now().UTC()
+	if len(events) > 0 {
+		last := &events[len(events)-1]
+		if last.Level == level && last.Kind == kind && last.Title == title && last.Detail == detail && now.Sub(last.At) < 2*time.Minute {
+			last.At = now
+		} else {
+			events = append(events, publicAgentEvent{At: now, Level: level, Kind: kind, Title: title, Detail: detail})
+		}
+	} else {
+		events = append(events, publicAgentEvent{At: now, Level: level, Kind: kind, Title: title, Detail: detail})
+	}
+	if len(events) > maxPublicAgentEvents {
+		events = append([]publicAgentEvent(nil), events[len(events)-maxPublicAgentEvents:]...)
+	}
+	data, err := json.MarshalIndent(events, "", "  ")
+	if err != nil {
+		return
+	}
+	path := publicEventsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o644); err != nil {
+		return
+	}
+	if err := replaceAgentStatusFile(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return
+	}
+	publicEventsACLOnce.Do(func() {
+		_ = windowsHiddenCommand("icacls", path, "/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "*S-1-5-32-545:R").Run()
+	})
+}
+
+func loadPublicAgentEvents() ([]publicAgentEvent, error) {
+	publicEventsMu.Lock()
+	defer publicEventsMu.Unlock()
+	return loadPublicAgentEventsUnlocked()
+}
+
+func loadPublicAgentEventsUnlocked() ([]publicAgentEvent, error) {
+	data, err := os.ReadFile(publicEventsPath())
+	if err != nil {
+		return nil, err
+	}
+	var events []publicAgentEvent
+	if err := json.Unmarshal(data, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 func effectiveDeviceName(cfg *config) string {

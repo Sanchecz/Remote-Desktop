@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	version       = "0.9.75"
+	version       = "0.9.76"
 	defaultServer = "https://supportgenesis.ru"
 )
 
@@ -273,11 +273,15 @@ func runLoop(ctx context.Context) error {
 	}
 
 	log.Printf("агент запущен, Remote ID %s", cfg.ConnectionCode)
+	appendPublicAgentEvent("success", "service", "Служба Agent запущена", "Фоновая служба готова к защищённому подключению")
+	defer appendPublicAgentEvent("info", "service", "Служба Agent остановлена", "Agent корректно завершил текущий рабочий цикл")
 	go runInteractiveCompanionBroker(ctx)
 	go runFileTransferLoop(ctx, cfg)
 	backoff := 5 * time.Second
 	lastUpdateVersion := ""
 	lastUpdateAttempt := time.Time{}
+	connectionKnown := false
+	connectionOnline := false
 	for {
 		networkBeforeHeartbeat := networkSignature()
 		deviceName := effectiveDeviceName(cfg)
@@ -285,6 +289,11 @@ func runLoop(ctx context.Context) error {
 		response, err := client.heartbeat(ctx, cfg, inv)
 		if err != nil {
 			log.Printf("нет связи с сервером: %v", err)
+			if !connectionKnown || connectionOnline {
+				appendPublicAgentEvent("warning", "link", "Соединение с сервером потеряно", "Agent автоматически повторяет подключение; вмешательство пользователя не требуется")
+			}
+			connectionKnown = true
+			connectionOnline = false
 			writeRuntimeStatus(false, err, true)
 			client.closeIdleConnections()
 			keepRunning, networkChanged := waitForNetworkChange(ctx, backoff, networkBeforeHeartbeat)
@@ -293,6 +302,7 @@ func runLoop(ctx context.Context) error {
 			}
 			if networkChanged {
 				log.Printf("обнаружено изменение сети, повторное подключение выполняется сразу")
+				appendPublicAgentEvent("info", "network", "Изменение сети обнаружено", "IP, VPN или активный маршрут изменились; подключение выполняется заново")
 				backoff = 5 * time.Second
 				continue
 			}
@@ -304,6 +314,11 @@ func runLoop(ctx context.Context) error {
 			}
 			continue
 		}
+		if !connectionKnown || !connectionOnline {
+			appendPublicAgentEvent("success", "link", "Соединение с сервером установлено", "Защищённый канал supportgenesis.ru работает")
+		}
+		connectionKnown = true
+		connectionOnline = true
 		writeRuntimeStatus(true, nil, true)
 		backoff = 5 * time.Second
 		configurationChanged := false
@@ -314,11 +329,13 @@ func runLoop(ctx context.Context) error {
 				cfg.DeviceName = response.DesiredName
 				configurationChanged = true
 				log.Printf("название устройства изменено на %q", response.DesiredName)
+				appendPublicAgentEvent("info", "settings", "Название устройства обновлено", truncateText(response.DesiredName, 64))
 			}
 		}
 		identityChanged, remoteIDChanged := applyHeartbeatIdentity(cfg, response)
 		if remoteIDChanged {
 			log.Printf("Remote ID восстановлен из подтверждённой регистрации")
+			appendPublicAgentEvent("success", "identity", "Remote ID синхронизирован", "Сервер подтвердил идентификатор этого устройства")
 		}
 		configurationChanged = configurationChanged || identityChanged
 		if configurationChanged {
@@ -355,10 +372,13 @@ func runLoop(ctx context.Context) error {
 			lastUpdateVersion = response.AgentUpdate.Version
 			lastUpdateAttempt = time.Now()
 			log.Printf("доступно обновление RemoteIt Agent %s", response.AgentUpdate.Version)
+			appendPublicAgentEvent("info", "update", "Обнаружено обновление Agent", "Проверяется версия "+truncateText(response.AgentUpdate.Version, 32))
 			if err := downloadAndScheduleAgentUpdate(ctx, cfg, *response.AgentUpdate); err != nil {
 				log.Printf("автоматическое обновление не выполнено: %v", err)
+				appendPublicAgentEvent("warning", "update", "Обновление временно не применено", "Agent повторит безопасную проверку автоматически")
 			} else {
 				log.Printf("обновление %s проверено и запланировано", response.AgentUpdate.Version)
+				appendPublicAgentEvent("success", "update", "Обновление проверено и запланировано", "Новая версия будет применена служебным механизмом")
 				return nil
 			}
 		}
@@ -374,6 +394,7 @@ func runLoop(ctx context.Context) error {
 		if networkChanged {
 			client.closeIdleConnections()
 			log.Printf("сетевые параметры изменились, обновляем IP и маршрут подключения")
+			appendPublicAgentEvent("info", "network", "Сетевые параметры обновлены", "Agent перечитывает IP и маршрут после смены сети или VPN")
 		}
 	}
 }

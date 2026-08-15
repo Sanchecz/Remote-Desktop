@@ -52,8 +52,9 @@ func TestAgentUIScaleAppliesSingleDPIConversion(t *testing.T) {
 		if got := scale.unit(100); got != test.want {
 			t.Fatalf("dpi %d: logical reference unit=%d, want %d", test.dpi, got, test.want)
 		}
-		// One point size is preserved in physical terms after Windows applies DPI;
-		// individual dashboard roles define their own deliberate hierarchy.
+		// The fixed canvas is specified in physical reference pixels; Walk later
+		// applies Windows DPI to the requested point size. The resulting physical
+		// role stays inside the reference band instead of overflowing its card.
 		physical := float64(scale.font(10)) * float64(test.dpi) / 96
 		if physical < 9 || physical > 11 {
 			t.Fatalf("dpi %d: physical type scale %.1f is outside the reference band", test.dpi, physical)

@@ -33,6 +33,8 @@ func makeRuntimeStatusReadable(path string) {
 
 func publishPublicRuntimeStatus(_ runtimeStatus) {}
 
+func appendPublicAgentEvent(_, _, _, _ string) {}
+
 func replaceAgentStatusFile(temporary, target string) error {
 	return os.Rename(temporary, target)
 }

@@ -3,7 +3,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -107,7 +106,7 @@ func newAgentDashboardV3(parent walk.Container, scale agentUIScale, brandIcon, o
 	var hitTargets []agentDashboardAction
 	activeScreen := 0
 	hoveredTarget := -1
-	logCache := []string{}
+	logCache := []publicAgentEvent{}
 	var logCacheAt time.Time
 	widget, err = walk.NewCustomWidgetPixels(parent, 0, func(canvas *walk.Canvas, _ walk.Rectangle) error {
 		bounds := widget.ClientBoundsPixels()
@@ -418,11 +417,16 @@ func newAgentDashboardV3(parent walk.Container, scale agentUIScale, brandIcon, o
 				fill(softBrush, iconFrame, 12)
 				drawIcon(icon, walk.Rectangle{X: iconFrame.X + max(9, int(12*renderScale)), Y: iconFrame.Y + max(9, int(12*renderScale)), Width: iconFrame.Width - max(18, int(24*renderScale)), Height: iconFrame.Height - max(18, int(24*renderScale))}, green, false)
 				contentX := iconFrame.X + iconFrame.Width + max(12, int(16*renderScale))
-				titleWidth := box.Width - (contentX - box.X) - max(165, int(205*renderScale))
+				// At laptop DPI the old fixed 165px status reservation consumed almost
+				// half of the card and forced useful titles into an ellipsis. Keep the
+				// status compact and let the title use the remaining measured width.
+				stateWidth := min(max(76, int(112*renderScale)), max(76, box.Width/3))
+				stateGap := max(10, int(14*renderScale))
+				titleWidth := max(96, box.Width-(contentX-box.X)-stateWidth-stateGap-max(12, int(18*renderScale)))
 				text(title, bodyBoldFont, ink, walk.Rectangle{X: contentX, Y: box.Y + max(10, int(14*renderScale)), Width: titleWidth, Height: max(25, int(32*renderScale))}, walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
 				text(description, metaFont, muted, walk.Rectangle{X: contentX, Y: box.Y + max(37, int(47*renderScale)), Width: box.Width - (contentX - box.X) - max(18, int(24*renderScale)), Height: max(38, int(48*renderScale))}, walk.TextLeft|walk.TextTop|walk.TextWordbreak|walk.TextEndEllipsis)
 				if state != "" {
-					text(state, metaBoldFont, greenDark, walk.Rectangle{X: box.X + box.Width - max(146, int(184*renderScale)), Y: box.Y + max(10, int(14*renderScale)), Width: max(126, int(160*renderScale)), Height: max(25, int(32*renderScale))}, walk.TextRight|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+					text(state, metaBoldFont, greenDark, walk.Rectangle{X: box.X + box.Width - stateWidth - max(12, int(18*renderScale)), Y: box.Y + max(10, int(14*renderScale)), Width: stateWidth, Height: max(25, int(32*renderScale))}, walk.TextRight|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
 				}
 			}
 
@@ -462,59 +466,47 @@ func newAgentDashboardV3(parent walk.Container, scale agentUIScale, brandIcon, o
 				drawField("monitor", "Устройство", status.Name, r(371, 446, 333, 106))
 				drawField("id", "Remote ID", status.ConnectionID, r(722, 446, 333, 106))
 				drawField("link", "Сервер", strings.TrimPrefix(status.Server, "https://"), r(1073, 446, 333, 106))
-				drawButton(210, r(371, 711, 238, 66), "link", "Проверить соединение", false, runAction(1))
-				drawButton(211, r(627, 711, 238, 66), "copy", "Скопировать Remote ID", false, runAction(2))
+				drawButton(210, r(371, 711, 238, 66), "link", "Проверить связь", false, runAction(1))
+				drawButton(211, r(627, 711, 238, 66), "copy", "Копировать ID", false, runAction(2))
 				drawButton(212, r(883, 711, 523, 66), "panel", "Открыть полную веб-панель", true, runAction(0))
 			case 2:
 				panel := r(343, 181, 1139, 651)
 				surface(panel, cardBrush, linePen, 15)
 				drawIcon("log", r(371, 208, 34, 34), green, false)
 				text("События фоновой службы", cardTitleFont, ink, r(420, 201, 430, 48), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-				logPath, logErr := readableAgentLogPath()
+				logPath := publicEventsPath()
 				pathLabel := logPath
-				if logErr != nil {
-					pathLabel = "Журнал будет создан после следующего события службы"
-				}
 				text(pathLabel, metaFont, muted, r(371, 250, 1000, 28), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
 				if time.Since(logCacheAt) > 2*time.Second {
 					logCacheAt = time.Now()
-					logCache = []string{}
-					if logErr == nil {
-						if data, readErr := os.ReadFile(logPath); readErr == nil {
-							lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-							for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-								lines = lines[:len(lines)-1]
-							}
-							if len(lines) > 14 {
-								lines = lines[len(lines)-14:]
-							}
-							logCache = lines
-						}
+					logCache = []publicAgentEvent{}
+					if events, readErr := loadPublicAgentEvents(); readErr == nil {
+						logCache = events
 					}
 				}
 				type journalEntry struct {
 					icon, title, detail, at string
-					healthy                 bool
+					severity                agentConnectionSeverity
 				}
 				journal := make([]journalEntry, 0, 5)
 				for index := len(logCache) - 1; index >= 0 && len(journal) < 5; index-- {
-					raw := strings.TrimSpace(logCache[index])
-					if raw == "" {
-						continue
+					event := logCache[index]
+					entry := journalEntry{icon: "log", title: event.Title, detail: event.Detail, at: event.At.Local().Format("02.01 15:04"), severity: agentStatusHealthy}
+					switch event.Kind {
+					case "link", "network":
+						entry.icon = "link"
+					case "update":
+						entry.icon = "update"
+					case "service":
+						entry.icon = "service"
+					case "settings", "identity":
+						entry.icon = "settings"
 					}
-					lower := strings.ToLower(raw)
-					entry := journalEntry{icon: "log", title: "Событие фоновой службы", detail: raw, at: "Журнал", healthy: true}
-					switch {
-					case strings.Contains(lower, "нет связи") || strings.Contains(lower, "ошиб"):
-						entry.icon, entry.title, entry.healthy = "link", "Соединение требует внимания", false
-					case strings.Contains(lower, "сетев") || strings.Contains(lower, "vpn"):
-						entry.icon, entry.title = "update", "Изменение сети обнаружено"
-					case strings.Contains(lower, "обновлен"):
-						entry.icon, entry.title = "update", "Проверка обновления Agent"
-					case strings.Contains(lower, "агент запущен"):
-						entry.icon, entry.title = "service", "Служба Agent запущена"
-					case strings.Contains(lower, "название устройства"):
-						entry.icon, entry.title = "settings", "Конфигурация устройства обновлена"
+					switch event.Level {
+					case "warning":
+						entry.severity = agentStatusReconnecting
+					case "error":
+						entry.severity = agentStatusCritical
 					}
 					journal = append(journal, entry)
 				}
@@ -525,17 +517,29 @@ func newAgentDashboardV3(parent walk.Container, scale agentUIScale, brandIcon, o
 								return "Защищённое соединение с supportgenesis.ru установлено"
 							}
 							return "Agent автоматически повторяет подключение"
-						}(), at: heartbeat, healthy: status.Connected},
-						{icon: "service", title: "Фоновая служба", detail: status.Service, at: "Работает", healthy: status.Service == "Агент работает"},
-						{icon: "update", title: "Автоматическое переподключение", detail: "Смена сети, IP или VPN отслеживается каждую секунду", at: "Включено", healthy: true},
-						{icon: "shield", title: "Проверка подписанных обновлений", detail: "Новая версия применяется только после проверки подписи и SHA-256", at: "Включено", healthy: true},
+						}(), at: heartbeat, severity: func() agentConnectionSeverity {
+							if status.Connected {
+								return agentStatusHealthy
+							}
+							return agentStatusReconnecting
+						}()},
+						{icon: "service", title: "Фоновая служба", detail: status.Service, at: "Работает", severity: func() agentConnectionSeverity {
+							if status.Service == "Агент работает" {
+								return agentStatusHealthy
+							}
+							return agentStatusCritical
+						}()},
+						{icon: "update", title: "Автоматическое переподключение", detail: "Смена сети, IP или VPN отслеживается каждую секунду", at: "Включено", severity: agentStatusHealthy},
+						{icon: "shield", title: "Проверка подписанных обновлений", detail: "Новая версия применяется только после проверки подписи и SHA-256", at: "Включено", severity: agentStatusHealthy},
 					}
 				}
 				for index, entry := range journal {
 					y := 292 + index*77
 					box := r(371, y, 1035, 65)
 					rowBrush, rowPen, iconColor := softBrush2, linePen, green
-					if !entry.healthy {
+					if entry.severity == agentStatusReconnecting {
+						rowBrush, rowPen, iconColor = orangeSoftBrush, orangePen, orange
+					} else if entry.severity == agentStatusCritical {
 						rowBrush, rowPen, iconColor = redSoftBrush, redPen, red
 					}
 					fill(rowBrush, box, 11)
@@ -545,10 +549,14 @@ func newAgentDashboardV3(parent walk.Container, scale agentUIScale, brandIcon, o
 					text(entry.title, bodyBoldFont, ink, r(456, y+5, 340, 29), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
 					text(entry.detail, metaFont, muted, r(456, y+32, 770, 24), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
 					text(entry.at, metaBoldFont, func() walk.Color {
-						if entry.healthy {
+						switch entry.severity {
+						case agentStatusReconnecting:
+							return orange
+						case agentStatusCritical:
+							return red
+						default:
 							return greenDark
 						}
-						return red
 					}(), r(1237, y+5, 145, 50), walk.TextRight|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
 				}
 				drawButton(220, r(371, 711, 258, 66), "log", "Обновить журнал", false, func() { logCacheAt = time.Time{}; _ = widget.Invalidate() })
@@ -602,8 +610,8 @@ func newAgentDashboardV3(parent walk.Container, scale agentUIScale, brandIcon, o
 				drawFeature("clock", "Автоматические обновления", "Новая проверенная версия устанавливается через служебный механизм.", "Включено", r(371, 446, 498, 112))
 				drawFeature("info", "Уведомления о доступе", "Предпросмотр бесшумен; уведомление появляется при управлении.", "По политике", r(888, 446, 518, 112))
 				text("Эти параметры защищены политикой администратора и не могут быть отключены на удалённом компьютере.", metaFont, muted, r(371, 584, 1035, 30), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
-				drawButton(240, r(371, 711, 238, 66), "link", "Проверить соединение", false, runAction(1))
-				drawButton(241, r(627, 711, 260, 66), "update", "Проверить обновление", false, runAction(7))
+				drawButton(240, r(371, 711, 238, 66), "link", "Проверить связь", false, runAction(1))
+				drawButton(241, r(627, 711, 260, 66), "update", "Проверить версию", false, runAction(7))
 				drawButton(242, r(905, 711, 501, 66), "panel", "Открыть защищённые настройки", true, runAction(0))
 			case 5:
 				panel := r(343, 181, 1139, 651)
