@@ -1441,6 +1441,12 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 @media (max-width: 460px) {
   .login-card { padding: 25px 20px; border-radius: 18px; }
   .login-copy { margin-top: 34px; }
+  /* Keep text inputs at 16px on touch devices so mobile browsers do not
+     zoom the whole RemoteIt login/install form when an input receives focus. */
+  .login-card .input-wrap input { font-size: 16px; }
+  /* Compact theme controls are icon-only, but must still provide a reliable
+     finger-sized hit target on the public mobile entry screen. */
+  .login-card .theme-switcher-compact button { width: 44px; height: 44px; }
   .stats-grid { grid-template-columns: 1fr; }
   .modal { max-height: calc(100vh - 24px); overflow-y: auto; }
   .token-box { align-items: stretch; flex-direction: column; }

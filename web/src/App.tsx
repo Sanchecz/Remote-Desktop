@@ -58,6 +58,7 @@ import {
 	Power,
   X
 } from "lucide-react";
+import { chunkRemoteText, planRemoteKeyboardInput } from "./remoteKeyboard";
 
 type User = {
   id: string;
@@ -215,7 +216,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "0.9.77";
+const LATEST_AGENT_VERSION = "1.0.0";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1182,13 +1183,6 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
   return <section className="remote-preview-card"><header><div><span className="eyebrow">УДАЛЁННЫЙ ДОСТУП</span><strong><ScreenShare size={18} /> Живой экран</strong><small>{supported ? frameURL ? "Предпросмотр онлайн · управление выключено" : connected ? "Agent подключён · ожидаем первый кадр" : "Подключаем защищённый предпросмотр…" : unavailableReason}</small></div><span className={`preview-live ${connected && !!frameURL ? "active" : ""}`}><span />{connected && frameURL ? "LIVE" : "WAIT"}</span></header><button type="button" className="remote-preview-screen" disabled={!supported || !sessionId || !frameURL} onClick={() => { handedOff.current = true; onConnect(sessionId); }}>{frameURL ? <img ref={previewImageRef} src={frameURL} draggable={false} onError={() => { setFrameURL(""); setError("Получен повреждённый кадр — ожидаем следующий"); }} /> : <span><Monitor size={38} /><strong>{error || (supported ? "Ожидаем изображение от Agent" : unavailableReason)}</strong><small>{desktopCompatible ? "Диагностика обновляется автоматически" : "Скачайте новый агент из раздела токенов"}</small></span>}<b><MousePointer2 size={17} /> Открыть подключение</b></button><footer><ShieldCheck size={14} /> Пассивный предпросмотр журналируется, но не показывает всплывающее уведомление. Оно появится при первом управляющем действии.</footer></section>;
 }
 
-function browserCodeToVirtualKey(code: string): number {
-  if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3);
-  if (/^Digit[0-9]$/.test(code)) return code.charCodeAt(5);
-  if (/^F([1-9]|1[0-2])$/.test(code)) return 111 + Number(code.slice(1));
-  return ({ Backspace: 8, Tab: 9, Enter: 13, ShiftLeft: 16, ShiftRight: 16, ControlLeft: 17, ControlRight: 17, AltLeft: 18, AltRight: 18, Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46, MetaLeft: 91, MetaRight: 92 } as Record<string, number>)[code] || 0;
-}
-
 function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embedded = false, onOpenFiles }: { device: Device; csrf: string; initialSessionId?: string; onClose: () => void; embedded?: boolean; onOpenFiles?: () => void }) {
   const [sessionId, setSessionId] = useState("");
   const [status, setStatus] = useState<DesktopSession | null>(null);
@@ -1230,6 +1224,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const inputInFlight = useRef(false);
 	const inputAbortController = useRef<AbortController | null>(null);
 	const flushInputQueueRef = useRef<() => void>(() => undefined);
+	const textKeyboardKeys = useRef(new Set<string>());
 	const frameImageRef = useRef<HTMLImageElement>(null);
 	const frameSocketRef = useRef<WebSocket | null>(null);
 	const mobileTrackpadMode = coarsePointerClient && pointerMode === "trackpad";
@@ -1542,6 +1537,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
   }, [sessionId, csrf]);
 
 	const releaseRemoteModifiers = useCallback(() => {
+		textKeyboardKeys.current.clear();
 		for (const keyCode of [16, 17, 18, 91, 92]) sendInput({ type: "key", action: "up", keyCode }, false);
 	}, [sendInput]);
 
@@ -1766,13 +1762,16 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
   }
 
   function keyboard(event: ReactKeyboardEvent<HTMLDivElement>, action: "down" | "up") {
-    if (event.repeat) return;
-    const keyCode = browserCodeToVirtualKey(event.code);
-    if (!keyCode) return;
+		const plan = planRemoteKeyboardInput(event, action, textKeyboardKeys.current);
+		if (!plan.handled) return;
     event.preventDefault();
     event.stopPropagation();
-    sendInput({ type: "key", action, keyCode });
+		if (plan.input) sendInput(plan.input);
   }
+
+	function sendRemoteText(text: string) {
+		for (const chunk of chunkRemoteText(text)) sendInput({ type: "text", text: chunk });
+	}
 
 	function sendVirtualKeyTap(keyCode: number) {
 		sendInput({ type: "key", action: "down", keyCode });
@@ -1809,7 +1808,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	function submitMobileText(event: FormEvent) {
 		event.preventDefault();
 		if (!mobileText) return;
-		sendInput({ type: "text", text: mobileText });
+		sendRemoteText(mobileText);
 		setMobileText("");
 		mobileKeyboardRef.current?.focus();
 	}
@@ -1818,7 +1817,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		try {
 			const text = await navigator.clipboard.readText();
 			if (!text) { setError("Буфер обмена пуст"); return; }
-			if (window.confirm(`Передать текст из буфера на «${device.name}»?`)) sendInput({ type: "text", text });
+			if (window.confirm(`Передать текст из буфера на «${device.name}»?`)) sendRemoteText(text);
 		} catch {
 			setError("Браузер не разрешил прочитать буфер обмена");
 		}

@@ -13,7 +13,7 @@ func TestValidDesktopInput(t *testing.T) {
 		{Type: "pointer", Action: "up", Button: "right", X: 1, Y: 2},
 		{Type: "wheel", Delta: -120},
 		{Type: "key", Action: "down", KeyCode: 65},
-		{Type: "text", Text: "RemoteIt: Привет 👋"},
+		{Type: "text", Text: "RemoteIt: Привет, Shift: ? : \" + _ ( ) ! 👋"},
 	}
 	for _, event := range valid {
 		if !validDesktopInput(event) {
@@ -54,16 +54,17 @@ func TestDesktopInputQueuePreservesActionsAndCoalescesPointerMoves(t *testing.T)
 	queue.enqueue([]desktopInputEvent{
 		{Type: "pointer", Action: "move", X: 10, Y: 20},
 		{Type: "key", Action: "down", KeyCode: 65},
+		{Type: "text", Text: "?:Я+"},
 		{Type: "pointer", Action: "move", X: 30, Y: 40},
 		{Type: "pointer", Action: "down", Button: "left", X: 30, Y: 40},
 		{Type: "pointer", Action: "up", Button: "left", X: 30, Y: 40},
 	})
 
 	items := queue.drain(64)
-	if len(items) != 4 {
+	if len(items) != 5 {
 		t.Fatalf("expected the stale pointer move to be coalesced, got %d events", len(items))
 	}
-	if items[0].Event.Type != "key" || items[1].Event.Action != "move" || items[1].Event.X != 30 || items[2].Event.Action != "down" || items[3].Event.Action != "up" {
+	if items[0].Event.Type != "key" || items[1].Event.Type != "text" || items[1].Event.Text != "?:Я+" || items[2].Event.Action != "move" || items[2].Event.X != 30 || items[3].Event.Action != "down" || items[4].Event.Action != "up" {
 		t.Fatalf("unexpected input order after coalescing: %#v", items)
 	}
 	for index := 1; index < len(items); index++ {

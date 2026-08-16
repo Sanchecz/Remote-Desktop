@@ -5,11 +5,11 @@ package main
 import "testing"
 
 func TestDecodeDesktopInputStreamMessage(t *testing.T) {
-	events, err := decodeDesktopInputStreamMessage([]byte(`{"events":[{"id":7,"event":{"type":"pointer","action":"move","x":123,"y":456}},{"id":8,"event":{"type":"key","action":"down","keyCode":13}}]}`))
+	events, err := decodeDesktopInputStreamMessage([]byte(`{"events":[{"id":7,"event":{"type":"pointer","action":"move","x":123,"y":456}},{"id":8,"event":{"type":"key","action":"down","keyCode":13}},{"id":9,"event":{"type":"text","text":"?:Я+👋"}}]}`))
 	if err != nil {
 		t.Fatalf("decode stream message: %v", err)
 	}
-	if len(events) != 2 || events[0].Type != "pointer" || events[0].X != 123 || events[0].Y != 456 || events[1].Type != "key" || events[1].KeyCode != 13 {
+	if len(events) != 3 || events[0].Type != "pointer" || events[0].X != 123 || events[0].Y != 456 || events[1].Type != "key" || events[1].KeyCode != 13 || events[2].Type != "text" || events[2].Text != "?:Я+👋" {
 		t.Fatalf("unexpected decoded events: %#v", events)
 	}
 }
@@ -26,14 +26,15 @@ func TestCoalesceDesktopInputRetainsActionsAndNewestMove(t *testing.T) {
 	events := coalesceDesktopInput([]desktopInput{
 		{Type: "pointer", Action: "move", X: 10, Y: 20},
 		{Type: "key", Action: "down", KeyCode: 65},
+		{Type: "text", Text: "?:Я+"},
 		{Type: "pointer", Action: "down", Button: "left", X: 10, Y: 20},
 		{Type: "pointer", Action: "move", X: 30, Y: 40},
 		{Type: "pointer", Action: "up", Button: "left", X: 30, Y: 40},
 	})
-	if len(events) != 4 {
+	if len(events) != 5 {
 		t.Fatalf("expected one stale move to be removed, got %#v", events)
 	}
-	if events[0].Type != "key" || events[1].Action != "down" || events[2].Action != "move" || events[2].X != 30 || events[3].Action != "up" {
+	if events[0].Type != "key" || events[1].Type != "text" || events[1].Text != "?:Я+" || events[2].Action != "down" || events[3].Action != "move" || events[3].X != 30 || events[4].Action != "up" {
 		t.Fatalf("input actions changed while coalescing: %#v", events)
 	}
 }

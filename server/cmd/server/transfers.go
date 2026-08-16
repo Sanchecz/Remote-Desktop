@@ -189,16 +189,22 @@ func appendTransferChunk(w http.ResponseWriter, r *http.Request, path string, ex
 	if _, err = file.Seek(expectedOffset, io.SeekStart); err != nil {
 		return expectedOffset, err
 	}
+	rollback := func(cause error) (int64, error) {
+		if truncateErr := file.Truncate(expectedOffset); truncateErr != nil {
+			return expectedOffset, fmt.Errorf("%v; не удалось откатить неполную часть: %w", cause, truncateErr)
+		}
+		return expectedOffset, cause
+	}
 	limited := io.LimitReader(r.Body, transferChunkSize+1)
 	written, err := io.Copy(file, limited)
 	if err != nil {
-		return expectedOffset, err
+		return rollback(err)
 	}
 	if written > transferChunkSize || expectedOffset+written > total {
-		return expectedOffset, errors.New("часть файла слишком большая")
+		return rollback(errors.New("часть файла слишком большая"))
 	}
 	if err = file.Sync(); err != nil {
-		return expectedOffset, err
+		return rollback(err)
 	}
 	return expectedOffset + written, nil
 }

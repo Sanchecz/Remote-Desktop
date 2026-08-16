@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	version       = "0.9.77"
+	version       = "1.0.0"
 	defaultServer = "https://supportgenesis.ru"
 )
 

@@ -13,6 +13,7 @@ func TestDesktopInputEventsFromJSON(t *testing.T) {
 	}{
 		{name: "single", payload: `{"type":"pointer","action":"move","x":10,"y":20}`, count: 1},
 		{name: "batch", payload: `{"events":[{"type":"pointer","action":"down","button":"left","x":10,"y":20},{"type":"pointer","action":"up","button":"left","x":10,"y":20}]}`, count: 2},
+		{name: "shift symbols and unicode", payload: `{"events":[{"type":"key","action":"down","keyCode":16},{"type":"text","text":"?:Я+👋"},{"type":"key","action":"up","keyCode":16}]}`, count: 3},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
