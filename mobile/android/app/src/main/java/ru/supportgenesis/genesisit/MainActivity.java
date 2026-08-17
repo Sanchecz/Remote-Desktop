@@ -21,6 +21,8 @@ import android.view.ViewGroup;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
 import android.webkit.SslErrorHandler;
@@ -57,12 +59,14 @@ public final class MainActivity extends Activity {
         getWindow().setStatusBarColor(Color.WHITE);
         getWindow().setNavigationBarColor(Color.WHITE);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
 
         webView = new WebView(this);
         webView.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         webView.setBackgroundColor(Color.rgb(10, 13, 18));
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         setContentView(webView);
+        applySystemBars();
 
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -80,7 +84,7 @@ public final class MainActivity extends Activity {
         settings.setTextZoom(100);
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " RemoteIt-Android/1.0.1");
+        settings.setUserAgentString(settings.getUserAgentString() + " RemoteIt-Android/1.0.2");
 		webView.addJavascriptInterface(new RemoteItAndroidBridge(), "RemoteItAndroid");
 
         CookieManager cookies = CookieManager.getInstance();
@@ -156,6 +160,16 @@ public final class MainActivity extends Activity {
 				applySystemBars();
 			});
 		}
+
+		@JavascriptInterface
+		public void hideKeyboard() {
+			runOnUiThread(() -> {
+				InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+				if (keyboard != null && webView != null) {
+					keyboard.hideSoftInputFromWindow(webView.getWindowToken(), 0);
+				}
+			});
+		}
 	}
 
 	private void applySystemBars() {
@@ -169,7 +183,10 @@ public final class MainActivity extends Activity {
 					controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
 				} else {
 					controller.show(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
-					controller.setSystemBarsAppearance(WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS, WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS);
+					controller.setSystemBarsAppearance(
+						WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+						WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+					);
 				}
 			}
 		} else {

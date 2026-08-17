@@ -1,4 +1,4 @@
-import { DragEvent as ReactDragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, DragEvent as ReactDragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -59,6 +59,7 @@ import {
   X
 } from "lucide-react";
 import { chunkRemoteText, planRemoteKeyboardInput } from "./remoteKeyboard";
+import { cameraKeepingPointUnderFingers, clampRemoteCamera, pointUnderScreenCoordinate } from "./remoteCamera";
 
 type User = {
   id: string;
@@ -216,7 +217,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.1";
+const LATEST_AGENT_VERSION = "1.0.2";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1191,15 +1192,17 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
   const [starting, setStarting] = useState(true);
 	const [latencyMs, setLatencyMs] = useState(0);
 	const [frameFPS, setFrameFPS] = useState(0);
-	const [keyboardOpen, setKeyboardOpen] = useState(false);
-	const [mobileText, setMobileText] = useState("");
-	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
 	// The primary pointer, rather than the mere presence of a touchscreen,
 	// distinguishes a phone/tablet from a Windows laptop with touch support.
 	// Hybrid PCs must retain the normal local mouse cursor and absolute input.
 	const [coarsePointerClient] = useState(() => typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches && !window.matchMedia("(any-pointer: fine)").matches);
+	const [keyboardOpen, setKeyboardOpen] = useState(false);
+	const [mobileText, setMobileText] = useState("");
+	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
 	const [dragLock, setDragLock] = useState(false);
-	const [controlsCollapsed, setControlsCollapsed] = useState(false);
+	// Phones start with an unobstructed full-screen canvas and a small floating
+	// handle. The complete control surface opens only when the user asks for it.
+	const [controlsCollapsed, setControlsCollapsed] = useState(coarsePointerClient);
 	const [screenScale, setScreenScale] = useState<"fit" | "50" | "75" | "100" | "125" | "150">("fit");
 	// Auto is the default on every client. The Agent starts Auto at 30 FPS,
 	// raises it to 60 on a consistently fast channel and falls back to 15 when
@@ -1208,17 +1211,21 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [renderedFrameSize, setRenderedFrameSize] = useState({ width: 0, height: 0 });
 	const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
 	const [camera, setCamera] = useState({ zoom: 1, panX: 0, panY: 0 });
-  const viewportRef = useRef<HTMLDivElement>(null);
+	const cameraRef = useRef(camera);
+	const pendingCameraRef = useRef(camera);
+	const cameraAnimationFrame = useRef(0);
+	const viewportRef = useRef<HTMLDivElement>(null);
 	const mobileKeyboardRef = useRef<HTMLInputElement>(null);
+	const localCursorRef = useRef<HTMLSpanElement>(null);
   const lastPointerSent = useRef(0);
   const trackpadCursor = useRef({ x: 0, y: 0, ready: false });
-	const trackpadGesture = useRef({ pointerId: -1, lastX: 0, lastY: 0, distance: 0 });
+	const trackpadGesture = useRef({ pointerId: -1, lastX: 0, lastY: 0, distance: 0, longPress: false, timer: 0 });
 	const directGesture = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number; moved: boolean; leftDown: boolean; longPress: boolean; timer: number }>({ pointerId: -1, startX: 0, startY: 0, x: 0, y: 0, moved: false, leftDown: false, longPress: false, timer: 0 });
 	const controlEnabledRef = useRef(false);
 	const controlActivationRef = useRef<Promise<void> | null>(null);
 	const frameArrivalTimes = useRef<number[]>([]);
 	const activeTouches = useRef(new Map<number, { x: number; y: number }>());
-	const pinchGesture = useRef({ active: false, suppress: false, startDistance: 1, startMidX: 0, startMidY: 0, startZoom: 1, startPanX: 0, startPanY: 0 });
+	const pinchGesture = useRef({ active: false, suppress: false, zooming: false, startDistance: 1, lastDistance: 1, anchorX: 0, anchorY: 0, lastMidY: 0, wheelDistance: 0, startZoom: 1 });
 	const inputQueue = useRef<Record<string, unknown>[]>([]);
 	const inputFlushTimer = useRef(0);
 	const inputInFlight = useRef(false);
@@ -1228,11 +1235,29 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const frameImageRef = useRef<HTMLImageElement>(null);
 	const frameSocketRef = useRef<WebSocket | null>(null);
 	const mobileTrackpadMode = coarsePointerClient && pointerMode === "trackpad";
-	const remoteCursorVisible = mobileTrackpadMode;
+	const localCursorVisible = mobileTrackpadMode;
+	// Remote cursor pixels are disabled for every viewer. Desktop already has a
+	// native cursor and mobile trackpad mode draws an immediate local overlay;
+	// encoding a second cursor in JPEG created the duplicate/lagging pointer.
+	const encodedRemoteCursorVisible = false;
 	// Pointer input has its own WebSocket and must not be tied to the video FPS.
 	// 8 ms keeps a desktop mouse close to its native 125 Hz report cadence; touch
 	// stays at 60 Hz to avoid radio/battery churn while remaining immediate.
 	const pointerSendInterval = coarsePointerClient ? 16 : 8;
+
+	useEffect(() => { cameraRef.current = camera; pendingCameraRef.current = camera; }, [camera]);
+
+	useEffect(() => () => window.cancelAnimationFrame(cameraAnimationFrame.current), []);
+
+	function scheduleCamera(next: { zoom: number; panX: number; panY: number }) {
+		pendingCameraRef.current = clampCamera(next);
+		if (cameraAnimationFrame.current) return;
+		cameraAnimationFrame.current = window.requestAnimationFrame(() => {
+			cameraAnimationFrame.current = 0;
+			cameraRef.current = pendingCameraRef.current;
+			setCamera(pendingCameraRef.current);
+		});
+	}
 
 	useEffect(() => {
 		const viewport = viewportRef.current;
@@ -1266,7 +1291,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}, []);
 
 	useEffect(() => {
-		setCamera({ zoom: 1, panX: 0, panY: 0 });
+		cameraRef.current = { zoom: 1, panX: 0, panY: 0 };
+		pendingCameraRef.current = cameraRef.current;
+		setCamera(cameraRef.current);
 		activeTouches.current.clear();
 		pinchGesture.current.active = false;
 	}, [screenScale, viewportSize.width > viewportSize.height]);
@@ -1274,6 +1301,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	useEffect(() => {
 		if (!status?.frameWidth || !status?.frameHeight || trackpadCursor.current.ready) return;
 		trackpadCursor.current = { x: Math.round(status.frameWidth / 2), y: Math.round(status.frameHeight / 2), ready: true };
+		if (localCursorRef.current) {
+			localCursorRef.current.style.left = "50%";
+			localCursorRef.current.style.top = "50%";
+		}
 	}, [status?.frameWidth, status?.frameHeight]);
 
 	useEffect(() => {
@@ -1286,8 +1317,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		controlActivationRef.current = null;
 		const initialTargetFPS = targetFPS === "auto" ? 0 : Number(targetFPS);
     const request = initialSessionId
-			? api<{ id: string }>(`/api/desktop-sessions/${initialSessionId}`, { method: "PATCH", body: JSON.stringify({ targetFps: initialTargetFPS, cursorVisible: remoteCursorVisible }) }, csrf)
-			: api<{ id: string }>(`/api/devices/${device.id}/desktop-sessions`, { method: "POST", body: JSON.stringify({ controlEnabled: false, targetFps: initialTargetFPS, cursorVisible: remoteCursorVisible }) }, csrf);
+			? api<{ id: string }>(`/api/desktop-sessions/${initialSessionId}`, { method: "PATCH", body: JSON.stringify({ targetFps: initialTargetFPS, cursorVisible: encodedRemoteCursorVisible }) }, csrf)
+			: api<{ id: string }>(`/api/devices/${device.id}/desktop-sessions`, { method: "POST", body: JSON.stringify({ controlEnabled: false, targetFps: initialTargetFPS, cursorVisible: encodedRemoteCursorVisible }) }, csrf);
     void request
       .then((created) => { if (!disposed) setSessionId(created.id); })
       .catch((reason) => { if (!disposed) setError(reason instanceof Error ? reason.message : "Не удалось создать сеанс"); })
@@ -1300,8 +1331,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		// The encoded remote pointer is useful only for a coarse-pointer mobile
 		// client acting as a trackpad. Desktop already has its local low-latency
 		// cursor, while direct touch intentionally targets the point under a finger.
-		void fetch(`/api/desktop-sessions/${sessionId}`, { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ cursorVisible: remoteCursorVisible }) });
-	}, [csrf, remoteCursorVisible, sessionId]);
+		void fetch(`/api/desktop-sessions/${sessionId}`, { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ cursorVisible: encodedRemoteCursorVisible }) });
+	}, [csrf, sessionId]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -1571,12 +1602,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	function clampCamera(next: { zoom: number; panX: number; panY: number }) {
-		const zoom = Math.max(1, Math.min(4, next.zoom));
-		const baseWidth = Math.max(1, fittedFrame.width);
-		const baseHeight = Math.max(1, fittedFrame.height);
-		const maxPanX = Math.max(0, (baseWidth * zoom - viewportSize.width) / 2) + 32;
-		const maxPanY = Math.max(0, (baseHeight * zoom - viewportSize.height) / 2) + 32;
-		return { zoom, panX: Math.max(-maxPanX, Math.min(maxPanX, next.panX)), panY: Math.max(-maxPanY, Math.min(maxPanY, next.panY)) };
+		return clampRemoteCamera(next, { x: fittedFrame.width, y: fittedFrame.height }, { x: viewportSize.width, y: viewportSize.height });
 	}
 
 	function frameSize(element: HTMLImageElement) {
@@ -1593,8 +1619,16 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const size = frameSize(element);
 		if (!trackpadCursor.current.ready) {
 			trackpadCursor.current = { x: Math.round(size.width / 2), y: Math.round(size.height / 2), ready: true };
+			positionLocalCursor(trackpadCursor.current, size);
 		}
 		return size;
+	}
+
+	function positionLocalCursor(position: { x: number; y: number }, size: { width: number; height: number }) {
+		const cursor = localCursorRef.current;
+		if (!cursor) return;
+		cursor.style.left = `${Math.max(0, Math.min(100, position.x * 100 / Math.max(1, size.width)))}%`;
+		cursor.style.top = `${Math.max(0, Math.min(100, position.y * 100 / Math.max(1, size.height)))}%`;
 	}
 
   function pointerPosition(event: ReactPointerEvent<HTMLImageElement>) {
@@ -1603,8 +1637,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const position = {
       x: Math.max(0, Math.min(frameWidth - 1, Math.round((event.clientX - rect.left) * frameWidth / rect.width))),
       y: Math.max(0, Math.min(frameHeight - 1, Math.round((event.clientY - rect.top) * frameHeight / rect.height))),
-    };
+		};
 		trackpadCursor.current = { ...position, ready: true };
+		positionLocalCursor(position, { width: frameWidth, height: frameHeight });
 		return position;
   }
 
@@ -1613,9 +1648,25 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		if (activeTouches.current.size < 2) return false;
 		const points = [...activeTouches.current.values()].slice(0, 2);
 		const midpoint = touchMidpoint(points);
-		pinchGesture.current = { active: true, suppress: true, startDistance: Math.max(1, touchDistance(points)), startMidX: midpoint.x, startMidY: midpoint.y, startZoom: camera.zoom, startPanX: camera.panX, startPanY: camera.panY };
+		const viewport = viewportRef.current?.getBoundingClientRect();
+		const centerX = viewport ? viewport.left + viewport.width / 2 : 0;
+		const centerY = viewport ? viewport.top + viewport.height / 2 : 0;
+		const distance = Math.max(1, touchDistance(points));
+		pinchGesture.current = {
+			active: true,
+			suppress: true,
+			zooming: false,
+			startDistance: distance,
+			lastDistance: distance,
+			anchorX: pointUnderScreenCoordinate(midpoint, { x: centerX, y: centerY }, cameraRef.current).x,
+			anchorY: pointUnderScreenCoordinate(midpoint, { x: centerX, y: centerY }, cameraRef.current).y,
+			lastMidY: midpoint.y,
+			wheelDistance: 0,
+			startZoom: cameraRef.current.zoom,
+		};
 		if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
 		if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", x: directGesture.current.x, y: directGesture.current.y });
+		if (trackpadGesture.current.timer) { window.clearTimeout(trackpadGesture.current.timer); trackpadGesture.current.timer = 0; }
 		directGesture.current.pointerId = -1;
 		return true;
 	}
@@ -1627,8 +1678,26 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const points = [...activeTouches.current.values()].slice(0, 2);
 		const midpoint = touchMidpoint(points);
 		const gesture = pinchGesture.current;
-		const nextZoom = gesture.startZoom * touchDistance(points) / gesture.startDistance;
-		setCamera(clampCamera({ zoom: nextZoom, panX: gesture.startPanX + midpoint.x - gesture.startMidX, panY: gesture.startPanY + midpoint.y - gesture.startMidY }));
+		const distance = touchDistance(points);
+		const scaleChange = distance / gesture.startDistance;
+		if (Math.abs(scaleChange - 1) > 0.035) gesture.zooming = true;
+		if (gesture.zooming || !mobileTrackpadMode) {
+			const viewport = viewportRef.current?.getBoundingClientRect();
+			const centerX = viewport ? viewport.left + viewport.width / 2 : 0;
+			const centerY = viewport ? viewport.top + viewport.height / 2 : 0;
+			const nextZoom = Math.max(1, Math.min(4, gesture.startZoom * scaleChange));
+			// Keep the remote pixel under the pinch midpoint fixed. This removes the
+			// old recentering jump caused by a permanent center transform origin.
+			scheduleCamera(cameraKeepingPointUnderFingers({ x: gesture.anchorX, y: gesture.anchorY }, midpoint, { x: centerX, y: centerY }, nextZoom));
+		} else {
+			gesture.wheelDistance += midpoint.y - gesture.lastMidY;
+			if (Math.abs(gesture.wheelDistance) >= 12) {
+				sendInput({ type: "wheel", delta: gesture.wheelDistance > 0 ? -120 : 120 });
+				gesture.wheelDistance = 0;
+			}
+		}
+		gesture.lastMidY = midpoint.y;
+		gesture.lastDistance = distance;
 		return true;
 	}
 
@@ -1652,11 +1721,16 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			trackpadGesture.current.lastX = event.clientX;
 			trackpadGesture.current.lastY = event.clientY;
 			trackpadGesture.current.distance += Math.abs(deltaX) + Math.abs(deltaY);
+			if (trackpadGesture.current.distance > 10 && trackpadGesture.current.timer) {
+				window.clearTimeout(trackpadGesture.current.timer);
+				trackpadGesture.current.timer = 0;
+			}
 			const next = {
 				x: Math.max(0, Math.min(size.width - 1, Math.round(trackpadCursor.current.x + deltaX * size.width / Math.max(1, rect.width)))),
 				y: Math.max(0, Math.min(size.height - 1, Math.round(trackpadCursor.current.y + deltaY * size.height / Math.max(1, rect.height)))),
 			};
 			trackpadCursor.current = { ...next, ready: true };
+			positionLocalCursor(next, size);
 			const now = performance.now();
 			if (now - lastPointerSent.current >= pointerSendInterval) {
 				lastPointerSent.current = now;
@@ -1698,20 +1772,29 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			}
 		}
 		if (mobileTrackpadMode) {
-			ensureTrackpadCursor(event.currentTarget);
+			const size = ensureTrackpadCursor(event.currentTarget);
 			if (action === "down") {
 				event.currentTarget.setPointerCapture(event.pointerId);
-				trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, distance: 0 };
+				const timer = window.setTimeout(() => {
+					const gesture = trackpadGesture.current;
+					if (gesture.pointerId !== event.pointerId || gesture.distance > 10 || pinchGesture.current.active) return;
+					gesture.longPress = true;
+					sendPointerTap("right");
+				}, 650);
+				trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, distance: 0, longPress: false, timer };
+				positionLocalCursor(trackpadCursor.current, size);
 				return;
 			}
+			if (trackpadGesture.current.timer) window.clearTimeout(trackpadGesture.current.timer);
 			if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-			if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.distance < 10 && !dragLock) {
+			if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.distance < 10 && !trackpadGesture.current.longPress && !dragLock) {
 				const position = trackpadCursor.current;
 				sendInput({ type: "pointer", action: "move", x: position.x, y: position.y });
 				sendInput({ type: "pointer", action: "down", button: "left", x: position.x, y: position.y });
 				sendInput({ type: "pointer", action: "up", button: "left", x: position.x, y: position.y });
 			}
 			trackpadGesture.current.pointerId = -1;
+			trackpadGesture.current.timer = 0;
 			if (event.pointerType !== "mouse") endTouchGesture(event.pointerId);
 			return;
 		}
@@ -1754,6 +1837,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			sendInput({ type: "pointer", action: "up", button: "left", ...pointerPosition(event) });
 		}
 		trackpadGesture.current.pointerId = -1;
+		if (trackpadGesture.current.timer) window.clearTimeout(trackpadGesture.current.timer);
+		trackpadGesture.current.timer = 0;
 	}
 
   function wheel(event: ReactWheelEvent<HTMLImageElement>) {
@@ -1805,12 +1890,29 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		onClose();
 	}
 
-	function submitMobileText(event: FormEvent) {
-		event.preventDefault();
-		if (!mobileText) return;
-		sendRemoteText(mobileText);
+	function setMobileKeyboardVisibility(open: boolean) {
+		setKeyboardOpen(open);
+		if (open) {
+			setControlsCollapsed(false);
+			window.requestAnimationFrame(() => window.setTimeout(() => mobileKeyboardRef.current?.focus({ preventScroll: true }), 30));
+			return;
+		}
+		mobileKeyboardRef.current?.blur();
+		const bridge = (window as unknown as { RemoteItAndroid?: { hideKeyboard?: () => void } }).RemoteItAndroid;
+		bridge?.hideKeyboard?.();
+	}
+
+	function commitMobileText(appendEnter: boolean) {
+		if (mobileText) sendRemoteText(mobileText);
+		if (appendEnter) sendVirtualKeyTap(13);
 		setMobileText("");
-		mobileKeyboardRef.current?.focus();
+		if (keyboardOpen) window.requestAnimationFrame(() => mobileKeyboardRef.current?.focus({ preventScroll: true }));
+	}
+
+	function toggleControls() {
+		const next = !controlsCollapsed;
+		if (next && keyboardOpen) setMobileKeyboardVisibility(false);
+		setControlsCollapsed(next);
 	}
 
   async function pasteClipboard() {
@@ -1831,34 +1933,67 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		width: Math.max(1, Math.round(sourceWidth * (scalePercent > 0 ? scalePercent / 100 : fitRatio))),
 		height: Math.max(1, Math.round(sourceHeight * (scalePercent > 0 ? scalePercent / 100 : fitRatio))),
 	};
-	const remoteImageStyle = sourceWidth > 0 && sourceHeight > 0 ? {
+	const remoteImageLayerStyle = sourceWidth > 0 && sourceHeight > 0 ? {
 		width: `${fittedFrame.width}px`,
 		height: `${fittedFrame.height}px`,
-		maxWidth: "none",
-		maxHeight: "none",
 		transform: `translate3d(${camera.panX}px,${camera.panY}px,0) scale(${camera.zoom})`,
 		transformOrigin: "center center",
-	} : undefined;
+		"--remote-camera-zoom": camera.zoom,
+	} as CSSProperties : undefined;
 
-  const workspace = <section className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""}`}><header><div><span className="eyebrow">ЗАЩИЩЁННЫЙ СЕАНС</span><h2>{device.name}</h2><small><span className={`desktop-live-dot ${status?.agentConnected ? "active" : ""}`} />{status?.agentConnected ? `Экран ${status.frameWidth || "—"}×${status.frameHeight || "—"} · ${status.controlEnabled ? "управление активно" : "предпросмотр — нажмите на экран для управления"}` : "Ожидание настольного Agent…"}</small></div><div className="desktop-actions"><span className="remote-mode-badge">{pointerMode === "direct" ? "Касание" : "Курсор"}</span><label className="remote-scale-control" title="Частота кадров"><span>FPS</span><select value={targetFPS} onChange={(event) => updateTargetFPS(event.target.value as typeof targetFPS)}><option value="auto">Авто · 30</option><option value="15">15</option><option value="30">30</option><option value="60">60 · Плавность</option></select></label><label className="remote-scale-control" title="Масштаб изображения удалённого экрана"><span>Масштаб</span><select value={screenScale} onChange={(event) => setScreenScale(event.target.value as typeof screenScale)}><option value="fit">По размеру</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option><option value="125">125%</option><option value="150">150%</option></select></label><button className="remote-header-tool" onClick={() => viewportRef.current?.requestFullscreen()} title="На весь экран"><Maximize2 size={17} /><span>Полный экран</span></button><button className="remote-header-tool" onClick={sendCtrlAltDelete} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button><button className="remote-header-tool" onClick={() => void pasteClipboard()} title="Вставить текст из локального буфера"><Clipboard size={17} /><span>Буфер</span></button><button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => { setKeyboardOpen((open) => !open); window.setTimeout(() => mobileKeyboardRef.current?.focus(), 50); }} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>{onOpenFiles && <button className="remote-header-tool" onClick={onOpenFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>}<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button></div></header><div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale === "fit" ? "fit" : "fixed"}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")}>
-    {frameURL ? <><div className="remote-screen-canvas"><img ref={frameImageRef} className="remote-screen-image" style={remoteImageStyle} src={frameURL} draggable={false} onLoad={(event) => { const width = event.currentTarget.naturalWidth; const height = event.currentTarget.naturalHeight; setRenderedFrameSize((current) => current.width === width && current.height === height ? current : { width, height }); }} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onDoubleClick={() => setCamera({ zoom: 1, panX: 0, panY: 0 })} onWheel={wheel} onContextMenu={(event) => event.preventDefault()} /></div><span className="remote-stream-stats" title={status?.captureDiagnostics ? `${status.captureDiagnostics.captureBackend}: захват ${status.captureDiagnostics.captureMillis} мс, копирование ${status.captureDiagnostics.copyMillis} мс, масштаб ${status.captureDiagnostics.scaleMillis} мс, JPEG ${status.captureDiagnostics.encodeMillis} мс` : ""}><b>HD</b><span>{latencyMs || "—"} мс</span><em>{frameFPS || "—"} FPS</em><em>{camera.zoom > 1 ? `${Math.round(camera.zoom * 100)}%` : screenScale === "fit" ? "ПО РАЗМЕРУ" : `${screenScale}%`}</em></span></> : <div className="remote-screen-wait"><ScreenShare size={42} /><strong>{starting ? "Создаём сеанс…" : "Ожидаем первый кадр"}</strong><span>На удалённом компьютере должен быть запущен RemoteIt Agent 0.9.26 или новее.</span></div>}
-  </div><footer className="remote-session-footer"><div className="remote-session-tools">
-    <span><MousePointer2 size={15} /> {pointerMode === "direct" ? "Касание — левый клик · удержание — правый" : "Ведите пальцем — перемещайте курсор; короткое касание — клик"}</span>
-    <div className="remote-pointer-modes">
-      <button type="button" className={`remote-tool-button ${pointerMode === "trackpad" ? "active" : ""}`} aria-pressed={pointerMode === "trackpad"} onClick={() => setPointerMode("trackpad")}><MousePointer2 size={14} /> Курсор</button>
-      <button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => { if (dragLock) toggleDragLock(); setPointerMode("direct"); }}><MousePointer2 size={14} /> Касание</button>
-    </div>
-    <button type="button" className="remote-tool-button" onClick={() => sendPointerTap("right")}><MousePointer2 size={14} /> ПКМ</button>
-    <button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => { setKeyboardOpen((open) => !open); window.setTimeout(() => mobileKeyboardRef.current?.focus(), 50); }}><Keyboard size={14} /> Клавиатура</button>
-    <button type="button" className="remote-tool-button" onClick={() => sendVirtualKeyTap(13)}>Enter</button>
-    <button type="button" className="remote-tool-button" onClick={() => sendVirtualKeyTap(8)}>⌫</button>
-    {!controlsCollapsed && <>
-      <button type="button" className={`remote-tool-button ${dragLock ? "active" : ""}`} aria-pressed={dragLock} onClick={toggleDragLock}>Зажать</button>
-      {onOpenFiles && <button type="button" className="remote-tool-button" onClick={onOpenFiles}><Folder size={14} /> Файлы</button>}
-      <button type="button" className="remote-tool-button" onClick={() => void pasteClipboard()}><Clipboard size={14} /> Буфер</button>
-    </>}
-    <button type="button" className="remote-tool-button remote-collapse-tool" onClick={() => setControlsCollapsed((value) => !value)} title={controlsCollapsed ? "Развернуть панель" : "Свернуть панель"}><ChevronDown size={15} className={controlsCollapsed ? "rotate" : ""} />{controlsCollapsed ? "Ещё" : "Свернуть"}</button>
-  </div>{keyboardOpen && <form className="remote-mobile-keyboard" onSubmit={submitMobileText}><input ref={mobileKeyboardRef} value={mobileText} onChange={(event) => setMobileText(event.target.value)} placeholder="Введите текст для удалённого компьютера" autoCapitalize="none" autoCorrect="off" spellCheck={false} /><button disabled={!mobileText}>Отправить</button></form>}<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button></footer>{error && <div className="desktop-error">{error}</div>}</section>;
+	const resetCamera = () => scheduleCamera({ zoom: 1, panX: 0, panY: 0 });
+
+	const workspace = <section className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""}`}>
+		<header>
+			<div><span className="eyebrow">ЗАЩИЩЁННЫЙ СЕАНС</span><h2>{device.name}</h2><small><span className={`desktop-live-dot ${status?.agentConnected ? "active" : ""}`} />{status?.agentConnected ? `Экран ${status.frameWidth || "—"}×${status.frameHeight || "—"} · ${status.controlEnabled ? "управление активно" : "предпросмотр — нажмите на экран для управления"}` : "Ожидание настольного Agent…"}</small></div>
+			<div className="desktop-actions">
+				<span className="remote-mode-badge">{pointerMode === "direct" ? "Касание" : "Курсор"}</span>
+				<label className="remote-scale-control" title="Частота кадров"><span>FPS</span><select value={targetFPS} onChange={(event) => updateTargetFPS(event.target.value as typeof targetFPS)}><option value="auto">Авто · 30</option><option value="15">15</option><option value="30">30</option><option value="60">60 · Плавность</option></select></label>
+				<label className="remote-scale-control" title="Масштаб изображения удалённого экрана"><span>Масштаб</span><select value={screenScale} onChange={(event) => setScreenScale(event.target.value as typeof screenScale)}><option value="fit">По размеру</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option><option value="125">125%</option><option value="150">150%</option></select></label>
+				<button className="remote-header-tool" onClick={() => viewportRef.current?.requestFullscreen()} title="На весь экран"><Maximize2 size={17} /><span>Полный экран</span></button>
+				<button className="remote-header-tool" onClick={sendCtrlAltDelete} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>
+				<button className="remote-header-tool" onClick={() => void pasteClipboard()} title="Вставить текст из локального буфера"><Clipboard size={17} /><span>Буфер</span></button>
+				<button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>
+				{onOpenFiles && <button className="remote-header-tool" onClick={onOpenFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>}
+				<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button>
+			</div>
+		</header>
+		<div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale === "fit" ? "fit" : "fixed"}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")}>
+			{frameURL ? <>
+				<div className="remote-screen-canvas">
+					<div className="remote-screen-image-layer" style={remoteImageLayerStyle}>
+						<img ref={frameImageRef} className="remote-screen-image" src={frameURL} draggable={false} onLoad={(event) => { const width = event.currentTarget.naturalWidth; const height = event.currentTarget.naturalHeight; setRenderedFrameSize((current) => current.width === width && current.height === height ? current : { width, height }); }} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onDoubleClick={resetCamera} onWheel={wheel} onContextMenu={(event) => event.preventDefault()} />
+						{localCursorVisible && <span ref={localCursorRef} className="remote-local-cursor" aria-hidden="true"><MousePointer2 size={22} strokeWidth={2.4} /></span>}
+					</div>
+				</div>
+				<span className="remote-stream-stats" title={status?.captureDiagnostics ? `${status.captureDiagnostics.captureBackend}: захват ${status.captureDiagnostics.captureMillis} мс, копирование ${status.captureDiagnostics.copyMillis} мс, масштаб ${status.captureDiagnostics.scaleMillis} мс, JPEG ${status.captureDiagnostics.encodeMillis} мс` : ""}><b>HD</b><span>{latencyMs || "—"} мс</span><em>{frameFPS || "—"} FPS</em><em>{camera.zoom > 1 ? `${Math.round(camera.zoom * 100)}%` : screenScale === "fit" ? "ПО РАЗМЕРУ" : `${screenScale}%`}</em></span>
+			</> : <div className="remote-screen-wait"><ScreenShare size={42} /><strong>{starting ? "Создаём сеанс…" : "Ожидаем первый кадр"}</strong><span>На удалённом компьютере должен быть запущен RemoteIt Agent 0.9.26 или новее.</span></div>}
+		</div>
+		{coarsePointerClient && !controlsCollapsed && <button type="button" className="remote-controls-scrim" aria-label="Скрыть панель управления" onClick={toggleControls} />}
+		<footer className="remote-session-footer">
+			<div className="remote-session-tools">
+				<span><MousePointer2 size={15} /> {pointerMode === "direct" ? "Касание — левый клик · удержание — правый" : "Ведите пальцем — перемещайте курсор; короткое касание — клик"}</span>
+				<div className="remote-pointer-modes">
+					<button type="button" className={`remote-tool-button ${pointerMode === "trackpad" ? "active" : ""}`} aria-pressed={pointerMode === "trackpad"} onClick={() => setPointerMode("trackpad")}><MousePointer2 size={16} /> Курсор</button>
+					<button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => { if (dragLock) toggleDragLock(); setPointerMode("direct"); }}><MousePointer2 size={16} /> Касание</button>
+				</div>
+				<button type="button" className="remote-tool-button" onClick={() => sendPointerTap("right")}><MousePointer2 size={15} /> ПКМ</button>
+				<button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)}><Keyboard size={15} /> Клавиатура</button>
+				<button type="button" className={`remote-tool-button ${dragLock ? "active" : ""}`} aria-pressed={dragLock} onClick={toggleDragLock}>Зажать</button>
+				{onOpenFiles && <button type="button" className="remote-tool-button" onClick={onOpenFiles}><Folder size={15} /> Файлы</button>}
+				<button type="button" className="remote-tool-button" onClick={() => void pasteClipboard()}><Clipboard size={15} /> Буфер</button>
+				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
+			</div>
+			{keyboardOpen && <div className="remote-mobile-keyboard">
+				<input ref={mobileKeyboardRef} value={mobileText} onChange={(event) => setMobileText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitMobileText(true); } }} placeholder="Текст для удалённого компьютера" enterKeyHint="enter" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+				<button type="button" disabled={!mobileText} onClick={() => commitMobileText(false)}>Ввести</button>
+				<button type="button" onClick={() => commitMobileText(true)}>Enter</button>
+				<button type="button" className="remote-keyboard-close" onClick={() => setMobileKeyboardVisibility(false)} aria-label="Закрыть клавиатуру"><X size={17} /></button>
+			</div>}
+			<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button>
+		</footer>
+		{error && <div className="desktop-error">{error}</div>}
+	</section>;
 	return embedded ? workspace : <div className="remote-desktop-backdrop" onMouseDown={(event) => event.target === event.currentTarget && finishRemoteSession()}>{workspace}</div>;
 }
 

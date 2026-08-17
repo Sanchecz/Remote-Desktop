@@ -1,13 +1,14 @@
 {
   "name": "remoteit-web",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
-    "test": "pnpm run test:keyboard",
+    "test": "pnpm run test:keyboard && pnpm run test:camera",
     "test:keyboard": "node --experimental-strip-types --test tests/remoteKeyboard.test.ts",
+    "test:camera": "node --experimental-strip-types --test tests/remoteCamera.test.ts",
     "check": "pnpm run test && pnpm run build"
   },
   "dependencies": {
