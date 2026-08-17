@@ -162,12 +162,22 @@ func scheduleAgentUpdate(updatePath, expectedVersion string) error {
 	if !allowedUnixAgentTarget(target) || os.Geteuid() != 0 {
 		return errors.New("автообновление разрешено только для системной установки RemoteIt Agent")
 	}
-	command := exec.Command(updatePath, "update-helper", "--target", target, "--wait-pid", fmt.Sprint(os.Getpid()), "--expected-version", expectedVersion)
-	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := command.Start(); err != nil {
-		return fmt.Errorf("не удалось запустить модуль обновления: %w", err)
+	// Unix permits replacing an executable while the old process is still
+	// running. Installing the already verified binary before returning avoids
+	// a systemd/launchd race where a detached helper is killed together with
+	// the service cgroup before it can replace the old file.
+	output, err := exec.Command(updatePath, "version").Output()
+	if err != nil {
+		return fmt.Errorf("не удалось проверить версию обновления: %w", err)
 	}
-	return command.Process.Release()
+	if strings.TrimSpace(string(output)) != strings.TrimSpace(expectedVersion) {
+		return errors.New("версия загруженного обновления не совпала с ожидаемой")
+	}
+	if err := copyUnixFile(updatePath, target); err != nil {
+		return fmt.Errorf("не удалось атомарно установить обновление: %w", err)
+	}
+	_ = os.Remove(updatePath)
+	return nil
 }
 
 func updatePlatformCommand() error {
@@ -236,6 +246,11 @@ func copyUnixFile(source, target string) error {
 		_ = os.Remove(temporary)
 		return err
 	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		_ = os.Remove(temporary)
+		return err
+	}
 	if err := out.Close(); err != nil {
 		_ = os.Remove(temporary)
 		return err
@@ -244,5 +259,13 @@ func copyUnixFile(source, target string) error {
 		_ = os.Remove(temporary)
 		return err
 	}
-	return os.Rename(temporary, target)
+	if err := os.Rename(temporary, target); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(target))
+	if err != nil {
+		return nil
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
