@@ -1395,7 +1395,8 @@ func (s *server) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	secret := strings.TrimPrefix(authz, "Device ")
 	var stored, desktopStored []byte
-	if err := s.db.QueryRow(r.Context(), `SELECT secret_hash,desktop_secret_hash FROM devices WHERE id=$1`, deviceID).Scan(&stored, &desktopStored); err != nil || subtle.ConstantTimeCompare(tokenHash(secret), stored) != 1 {
+	var previousAgentVersion string
+	if err := s.db.QueryRow(r.Context(), `SELECT secret_hash,desktop_secret_hash,agent_version FROM devices WHERE id=$1`, deviceID).Scan(&stored, &desktopStored, &previousAgentVersion); err != nil || subtle.ConstantTimeCompare(tokenHash(secret), stored) != 1 {
 		writeError(w, http.StatusUnauthorized, "Недействительные данные устройства")
 		return
 	}
@@ -1431,6 +1432,16 @@ func (s *server) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Не удалось обновить состояние")
 		return
+	}
+	if strings.TrimSpace(previousAgentVersion) != strings.TrimSpace(in.AgentVersion) {
+		// A desktop worker is replaced together with the Agent. End any viewer
+		// session and erase its last JPEG so a frame captured by an older worker
+		// (including the pre-1.0.6 multi-user VDI race) can never remain visible
+		// after the privacy boundary changes. The administrator starts a fresh
+		// session once the new, SID-bound worker is ready.
+		if _, clearErr := s.db.Exec(r.Context(), `UPDATE remote_desktop_sessions SET status='ended',frame=NULL,ended_at=now(),agent_error='Agent updated; start a new remote session' WHERE device_id=$1 AND status='active'`, deviceID); clearErr != nil {
+			log.Printf("clear stale desktop frame after Agent update for %s: %v", deviceID, clearErr)
+		}
 	}
 	desktopSecret := ""
 	if len(desktopStored) == 0 {

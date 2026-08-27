@@ -25,16 +25,18 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 const (
-	version       = "1.0.5"
+	version       = "1.0.6"
 	defaultServer = "https://supportgenesis.ru"
 )
 
 var requestedUserInstall bool
+var configFileMu sync.Mutex
 
 type config struct {
 	ServerURL              string   `json:"serverUrl"`
@@ -46,6 +48,8 @@ type config struct {
 	ConnectionCode         string   `json:"connectionCode,omitempty"`
 	ActionSigningPublicKey string   `json:"actionSigningPublicKey,omitempty"`
 	ActionNonces           []string `json:"actionNonces,omitempty"`
+	WindowsSessionUserSID  string   `json:"windowsSessionUserSid,omitempty"`
+	WindowsSessionUserName string   `json:"windowsSessionUserName,omitempty"`
 }
 
 type inventory struct {
@@ -162,6 +166,8 @@ func installCommand() (resultErr error) {
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return err
 	}
+	windowsSessionUserSID := ""
+	windowsSessionUserName := ""
 	if strings.TrimSpace(*setupFile) != "" {
 		payload, err := loadSetupInstallPayload(*setupFile)
 		if err != nil {
@@ -175,8 +181,13 @@ func installCommand() (resultErr error) {
 		*name = payload.Name
 		*server = payload.ServerURL
 		*userMode = payload.UserMode
+		windowsSessionUserSID = payload.WindowsSessionUserSID
+		windowsSessionUserName = payload.WindowsSessionUserName
 	}
 	requestedUserInstall = *userMode
+	if runtime.GOOS == "windows" && strings.TrimSpace(windowsSessionUserSID) == "" {
+		windowsSessionUserSID, windowsSessionUserName, _ = currentInstallSessionOwner()
+	}
 	if strings.TrimSpace(*token) == "" {
 		return errors.New("не указан обязательный параметр --token")
 	}
@@ -196,7 +207,13 @@ func installCommand() (resultErr error) {
 	if err != nil {
 		return err
 	}
-	cfg := &config{ServerURL: serverURL, EnrollmentToken: *token, DeviceName: strings.TrimSpace(*name)}
+	cfg := &config{
+		ServerURL:              serverURL,
+		EnrollmentToken:        *token,
+		DeviceName:             strings.TrimSpace(*name),
+		WindowsSessionUserSID:  normalizeWindowsUserSID(windowsSessionUserSID),
+		WindowsSessionUserName: strings.TrimSpace(windowsSessionUserName),
+	}
 	reusedEnrollment := false
 	if existing, loadErr := loadConfig(); loadErr == nil && existing.DeviceID != "" && existing.DeviceSecret != "" && strings.EqualFold(existing.ServerURL, serverURL) {
 		// A normal upgrade keeps the Remote ID and the admin-controlled name. If
@@ -209,6 +226,14 @@ func installCommand() (resultErr error) {
 		if verifyErr == nil {
 			cfg = existing
 			cfg.ServerURL = serverURL
+			// A graphical reinstall is also the explicit way to rebind an
+			// existing machine-wide Agent to the Windows user who launched the
+			// installer. Preserve the Remote ID, but replace the VDI owner only
+			// when the non-elevated setup process supplied a verified SID.
+			if sid := normalizeWindowsUserSID(windowsSessionUserSID); sid != "" {
+				cfg.WindowsSessionUserSID = sid
+				cfg.WindowsSessionUserName = strings.TrimSpace(windowsSessionUserName)
+			}
 			reusedEnrollment = true
 		} else {
 			var statusError *apiStatusError
@@ -265,6 +290,16 @@ func runLoop(ctx context.Context) error {
 		if err := saveConfig(cfg); err != nil {
 			return err
 		}
+	}
+	if changed, bindErr := prepareWindowsSessionBinding(cfg); bindErr != nil {
+		log.Printf("безопасная привязка Windows-сеанса пока не выполнена: %v", bindErr)
+		appendPublicAgentEvent("warning", "session", "Windows-сеанс не закреплён", "Экран другого пользователя не будет опубликован; повторно запустите установщик из нужного Windows-сеанса")
+	} else if changed {
+		if err := saveConfig(cfg); err != nil {
+			return fmt.Errorf("не удалось сохранить привязку Windows-сеанса: %w", err)
+		}
+		log.Printf("удалённый экран закреплён за Windows-пользователем %s (%s)", windowsSessionDisplayName(cfg), cfg.WindowsSessionUserSID)
+		appendPublicAgentEvent("success", "session", "Windows-сеанс закреплён", "Удалённый экран привязан к "+windowsSessionDisplayName(cfg))
 	}
 	// Upgrades replace the service binary without re-running enrollment. Always
 	// republish the secret-free user-facing files so the tray immediately shows
@@ -1103,9 +1138,24 @@ func normalizeServerURL(raw string) (string, error) {
 }
 
 func saveConfig(cfg *config) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
 	path := defaultConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("не удалось создать каталог конфигурации: %w", err)
+	}
+	// The service heartbeat and the Windows session broker keep independent
+	// in-memory config snapshots. Once a legacy endpoint has been safely bound
+	// to a Windows SID, an older heartbeat snapshot must never erase that privacy
+	// boundary. A non-empty value (for example, an explicit reinstall by another
+	// administrator) still replaces the previous binding.
+	if runtime.GOOS == "windows" && normalizeWindowsUserSID(cfg.WindowsSessionUserSID) == "" {
+		if existingData, readErr := os.ReadFile(path); readErr == nil {
+			var existing config
+			if json.Unmarshal(existingData, &existing) == nil {
+				mergeWindowsSessionBinding(cfg, &existing)
+			}
+		}
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

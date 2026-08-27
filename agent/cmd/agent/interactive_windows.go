@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -18,8 +19,10 @@ import (
 
 const interactiveCompanionInterval = 8 * time.Second
 
+var windowsSessionBindingMu sync.Mutex
+
 // runInteractiveCompanionBroker keeps the visible tray and desktop-capture
-// companion in every active interactive Windows session. Windows services run
+// companion in exactly one SID-bound interactive Windows session. Windows services run
 // in session 0, where screen capture and tray icons are not available. The
 // broker therefore launches the same signed Agent executable in the logged-in
 // user's session, including immediately after an automatic Agent upgrade.
@@ -72,6 +75,13 @@ func runInteractiveCompanionBroker(ctx context.Context) {
 func ensureInteractiveCompanions(target string) ([]uint32, error) {
 	sessions, err := activeWindowsSessions()
 	if err != nil {
+		// Fail closed on a legacy multi-user VDI. Old versions may have left one
+		// tray process in every logged-on session; keeping those processes alive
+		// would preserve the very cross-user race the SID binding prevents.
+		cleanupErr := terminateWindowsAgentSessionsExcept(target, nil)
+		return nil, errors.Join(err, cleanupErr)
+	}
+	if err := terminateWindowsAgentSessionsExcept(target, sessions); err != nil {
 		return nil, err
 	}
 	running, err := windowsAgentSessions(target)
@@ -97,6 +107,37 @@ func ensureInteractiveCompanions(target string) ([]uint32, error) {
 }
 
 func activeWindowsSessions() ([]uint32, error) {
+	windowsSessionBindingMu.Lock()
+	defer windowsSessionBindingMu.Unlock()
+	candidates, err := windowsSessionCandidates()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("привязка сеанса Windows: %w", err)
+	}
+	selection := selectWindowsSession(candidates, cfg.WindowsSessionUserSID)
+	if selection.AutoBound && selection.UserSID != "" {
+		cfg.WindowsSessionUserSID = selection.UserSID
+		cfg.WindowsSessionUserName = selection.UserName
+		if err := saveConfig(cfg); err != nil {
+			return nil, fmt.Errorf("сохранение безопасной привязки Windows: %w", err)
+		}
+		_ = setupAgentUserFiles(cfg)
+		appendPublicAgentEvent("success", "session", "Windows-сеанс закреплён", "Удалённый экран привязан к "+windowsSessionDisplayName(cfg))
+		log.Printf("RemoteIt закрепил удалённый экран за Windows-пользователем %s (%s)", windowsSessionDisplayName(cfg), selection.UserSID)
+	}
+	if selection.SessionID == 0 {
+		if selection.Ambiguous {
+			return nil, errors.New("обнаружено несколько пользователей VDI: безопасная привязка не задана; повторно запустите установщик из нужного Windows-сеанса")
+		}
+		return nil, nil
+	}
+	return []uint32{selection.SessionID}, nil
+}
+
+func windowsSessionCandidates() ([]windowsSessionCandidate, error) {
 	var first *windows.WTS_SESSION_INFO
 	var count uint32
 	if err := windows.WTSEnumerateSessions(0, 0, 1, &first, &count); err != nil {
@@ -107,16 +148,38 @@ func activeWindowsSessions() ([]uint32, error) {
 	}
 	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(first)))
 	items := unsafe.Slice(first, int(count))
-	sessions := make([]uint32, 0, len(items))
+	sessions := make([]windowsSessionCandidate, 0, len(items))
 	for _, item := range items {
-		// A console session at the Windows lock/sign-in screen is reported as
-		// WTSConnected rather than WTSActive. Unattended access must keep its
-		// LocalSystem desktop companion there as well; otherwise an automatic
-		// upgrade (or a locked workstation) leaves the panel waiting forever for
-		// the first frame until somebody signs in locally.
-		if (item.State == windows.WTSActive || item.State == windows.WTSConnected) && item.SessionID != 0 {
-			sessions = append(sessions, item.SessionID)
+		if item.SessionID == 0 || (item.State != windows.WTSActive && item.State != windows.WTSConnected && item.State != windows.WTSDisconnected) {
+			continue
 		}
+		var token windows.Token
+		if err := windows.WTSQueryUserToken(item.SessionID, &token); err != nil {
+			// The generic sign-in WinStation has no logged-on user token. It must
+			// never become a fallback capture source for a user-bound device.
+			continue
+		}
+		tokenUser, userErr := token.GetTokenUser()
+		token.Close()
+		if userErr != nil || tokenUser == nil || tokenUser.User.Sid == nil {
+			continue
+		}
+		sid := normalizeWindowsUserSID(tokenUser.User.Sid.String())
+		if sid == "" {
+			continue
+		}
+		account, domain, _, lookupErr := tokenUser.User.Sid.LookupAccount("")
+		name := strings.TrimSpace(account)
+		if lookupErr == nil && strings.TrimSpace(domain) != "" && name != "" {
+			name = strings.TrimSpace(domain) + `\` + name
+		}
+		state := windowsSessionStateConnected
+		if item.State == windows.WTSActive {
+			state = windowsSessionStateActive
+		} else if item.State == windows.WTSDisconnected {
+			state = windowsSessionStateDisconnected
+		}
+		sessions = append(sessions, windowsSessionCandidate{ID: item.SessionID, UserSID: sid, UserName: name, State: state})
 	}
 	return sessions, nil
 }
@@ -150,6 +213,55 @@ func windowsAgentSessions(target string) (map[uint32]bool, error) {
 		return nil, fmt.Errorf("перебор процессов Windows: %w", err)
 	}
 	return running, nil
+}
+
+func terminateWindowsAgentSessionsExcept(target string, keepSessions []uint32) error {
+	keep := make(map[uint32]bool, len(keepSessions))
+	for _, sessionID := range keepSessions {
+		keep[sessionID] = true
+	}
+	target = filepath.Clean(target)
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return fmt.Errorf("список процессов Windows: %w", err)
+	}
+	defer windows.CloseHandle(snapshot)
+	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	var failures []string
+	for err = windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
+		process, openErr := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, entry.ProcessID)
+		if openErr != nil {
+			continue
+		}
+		buffer := make([]uint16, 32768)
+		size := uint32(len(buffer))
+		queryErr := windows.QueryFullProcessImageName(process, 0, &buffer[0], &size)
+		windows.CloseHandle(process)
+		if queryErr != nil || !strings.EqualFold(filepath.Clean(windows.UTF16ToString(buffer[:size])), target) {
+			continue
+		}
+		var sessionID uint32
+		if windows.ProcessIdToSessionId(entry.ProcessID, &sessionID) != nil || sessionID == 0 || keep[sessionID] {
+			continue
+		}
+		process, openErr = windows.OpenProcess(windows.PROCESS_TERMINATE, false, entry.ProcessID)
+		if openErr != nil {
+			failures = append(failures, fmt.Sprintf("PID %d: %v", entry.ProcessID, openErr))
+			continue
+		}
+		terminateErr := windows.TerminateProcess(process, 0)
+		windows.CloseHandle(process)
+		if terminateErr != nil {
+			failures = append(failures, fmt.Sprintf("PID %d: %v", entry.ProcessID, terminateErr))
+		}
+	}
+	if err != nil && !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+		failures = append(failures, err.Error())
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func terminateInteractiveCompanions(target string) error {
@@ -252,7 +364,11 @@ func desktopWorkerVersionPath(target string) string {
 func ensureInteractiveDesktopCompanions(target string) ([]uint32, error) {
 	sessions, err := activeWindowsSessions()
 	if err != nil {
-		return nil, err
+		// The capture worker is privacy-sensitive. If the target SID is still
+		// ambiguous, terminate every stale interactive worker rather than publish
+		// a frame from whichever VDI user happened to become active last.
+		cleanupErr := terminateWindowsAgentSessionsExcept(desktopWorkerPath(target), nil)
+		return nil, errors.Join(err, cleanupErr)
 	}
 	worker := desktopWorkerPath(target)
 	workerVersion, versionErr := os.ReadFile(desktopWorkerVersionPath(target))
@@ -283,6 +399,9 @@ func ensureInteractiveDesktopCompanions(target string) ([]uint32, error) {
 		if err := os.WriteFile(desktopWorkerVersionPath(target), []byte(version+"\n"), 0o644); err != nil {
 			return nil, fmt.Errorf("write the RemoteIt desktop worker version marker: %w", err)
 		}
+	}
+	if err := terminateWindowsAgentSessionsExcept(worker, sessions); err != nil {
+		return nil, err
 	}
 	running, err := windowsAgentSessions(worker)
 	if err != nil {

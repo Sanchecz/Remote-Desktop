@@ -29,11 +29,13 @@ type boundInstallerPayload struct {
 }
 
 type setupInstallPayload struct {
-	Token      string `json:"token"`
-	Name       string `json:"name"`
-	ServerURL  string `json:"serverUrl"`
-	UserMode   bool   `json:"userMode"`
-	ResultFile string `json:"resultFile,omitempty"`
+	Token                  string `json:"token"`
+	Name                   string `json:"name"`
+	ServerURL              string `json:"serverUrl"`
+	UserMode               bool   `json:"userMode"`
+	ResultFile             string `json:"resultFile,omitempty"`
+	WindowsSessionUserSID  string `json:"windowsSessionUserSid,omitempty"`
+	WindowsSessionUserName string `json:"windowsSessionUserName,omitempty"`
 }
 
 type shellExecuteInfo struct {
@@ -78,6 +80,7 @@ func setupCommand() error {
 	if strings.TrimSpace(*prefilledName) == "" {
 		*prefilledName, _ = os.Hostname()
 	}
+	ownerSID, ownerName, _ := currentInstallSessionOwner()
 	if *quiet {
 		token := strings.TrimSpace(*prefilledToken)
 		name := strings.TrimSpace(*prefilledName)
@@ -91,7 +94,7 @@ func setupCommand() error {
 		if normalizeErr != nil {
 			return normalizeErr
 		}
-		return runGraphicalInstall(setupInstallPayload{Token: token, Name: name, ServerURL: server, UserMode: *userMode})
+		return runGraphicalInstall(setupInstallPayload{Token: token, Name: name, ServerURL: server, UserMode: *userMode, WindowsSessionUserSID: ownerSID, WindowsSessionUserName: ownerName})
 	}
 
 	window, err := walk.NewMainWindow()
@@ -212,6 +215,7 @@ func setupCommand() error {
 		go func() {
 			installErr := runGraphicalInstall(setupInstallPayload{
 				Token: token, Name: name, ServerURL: server, UserMode: !installSystemWide,
+				WindowsSessionUserSID: ownerSID, WindowsSessionUserName: ownerName,
 			})
 			window.Synchronize(func() {
 				if installErr != nil {

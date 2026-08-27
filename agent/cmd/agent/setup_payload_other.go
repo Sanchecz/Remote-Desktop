@@ -5,11 +5,13 @@ package main
 import "errors"
 
 type setupInstallPayload struct {
-	Token      string
-	Name       string
-	ServerURL  string
-	UserMode   bool
-	ResultFile string
+	Token                  string
+	Name                   string
+	ServerURL              string
+	UserMode               bool
+	ResultFile             string
+	WindowsSessionUserSID  string
+	WindowsSessionUserName string
 }
 
 func loadSetupInstallPayload(string) (setupInstallPayload, error) {
