@@ -780,6 +780,11 @@ func validDesktopInput(event desktopInputEvent) bool {
 		return (event.Action == "down" || event.Action == "up") && event.KeyCode >= 1 && event.KeyCode <= 255
 	case "text":
 		return event.Text != "" && len([]rune(event.Text)) <= 128 && !strings.ContainsRune(event.Text, '\x00')
+	case "sas":
+		// Secure Attention Sequence is deliberately a separate privileged event;
+		// accepting modifiers or coordinates here would make the wire contract
+		// ambiguous and could accidentally replay stale input data.
+		return event.Action == "" && event.Button == "" && event.Text == "" && event.X == 0 && event.Y == 0 && event.Delta == 0 && event.KeyCode == 0
 	default:
 		return false
 	}

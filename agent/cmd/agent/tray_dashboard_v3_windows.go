@@ -622,11 +622,20 @@ func newAgentDashboardV3(parent walk.Container, scale agentUIScale, brandIcon, o
 				text("RemoteIt Agent", titleFont, ink, r(616, 238, 520, 52), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
 				text("Защищённый агент удалённого доступа для Windows.", bodyFont, muted, r(616, 294, 620, 34), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
 				drawStatusBadge(r(616, 347, 220, 42), "Версия "+status.Version, agentStatusHealthy)
-				aboutRows := [][2]string{{"Сервер", status.Server}, {"Установка", status.InstallMode}, {"Фоновая служба", status.Service}, {"Шифрование", "TLS · защищённый канал"}}
+				aboutRows := [][2]string{{"Сервер", status.Server}, {"Установка", status.InstallMode}, {"Фоновая служба", status.Service}, {"Шифрование", "TLS · защищённый канал"}, {"Создатель", "@Sanchcz"}}
 				for index, item := range aboutRows {
-					y := 464 + index*54
+					y := 446 + index*48
 					text(item[0], bodyFont, muted, r(391, y, 210, 34), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
-					text(item[1], bodyBoldFont, ink, r(616, y, 720, 34), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
+					valueColor := ink
+					if item[0] == "Создатель" {
+						valueColor = greenDark
+						creatorLink := r(603, y-2, 190, 38)
+						if hoveredTarget == 251 {
+							fill(softBrush, creatorLink, 9)
+						}
+						addTarget(251, creatorLink, runAction(8))
+					}
+					text(item[1], bodyBoldFont, valueColor, r(616, y, 720, 34), walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
 				}
 				drawButton(250, r(371, 722, 1035, 66), "panel", "Открыть панель RemoteIt", true, runAction(0))
 			}

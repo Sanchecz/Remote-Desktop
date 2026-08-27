@@ -4,6 +4,7 @@ web/dist/
 web/*.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts
+agent/agent
 work/pydeps/
 work/keys/
 work/

@@ -54,6 +54,7 @@ var (
 	gdi32Desktop               = windows.NewLazySystemDLL("gdi32.dll")
 	winmmDesktop               = windows.NewLazySystemDLL("winmm.dll")
 	kernel32Desktop            = windows.NewLazySystemDLL("kernel32.dll")
+	sasDesktop                 = windows.NewLazySystemDLL("sas.dll")
 	procGetDC                  = user32Desktop.NewProc("GetDC")
 	procReleaseDC              = user32Desktop.NewProc("ReleaseDC")
 	procGetSystemMetrics       = user32Desktop.NewProc("GetSystemMetrics")
@@ -83,6 +84,7 @@ var (
 	procSetWaitableTimerEx     = kernel32Desktop.NewProc("SetWaitableTimerEx")
 	procWaitForSingleObject    = kernel32Desktop.NewProc("WaitForSingleObject")
 	procCloseHandle            = kernel32Desktop.NewProc("CloseHandle")
+	procSendSAS                = sasDesktop.NewProc("SendSAS")
 )
 
 type desktopSessionOffer struct {
@@ -1697,7 +1699,23 @@ func executeDesktopInput(event desktopInput, capture desktopCapture) error {
 				return err
 			}
 		}
+	case "sas":
+		return sendDesktopSecureAttentionSequence()
 	}
+	return nil
+}
+
+func sendDesktopSecureAttentionSequence() error {
+	// The interactive desktop worker inherits LocalSystem from the installed
+	// service and is attached to the user's session. SendSAS(FALSE) therefore
+	// targets that session without pretending Ctrl+Alt+Delete is ordinary input.
+	if err := sasDesktop.Load(); err != nil {
+		return fmt.Errorf("Windows Secure Attention Sequence недоступна: %w", err)
+	}
+	if err := procSendSAS.Find(); err != nil {
+		return fmt.Errorf("Windows SendSAS не найдена: %w", err)
+	}
+	procSendSAS.Call(0)
 	return nil
 }
 

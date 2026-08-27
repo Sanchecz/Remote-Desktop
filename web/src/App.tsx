@@ -20,6 +20,7 @@ import {
   Folder,
   FolderOpen,
 	HardDrive,
+	Hand,
   KeyRound,
 	Link2,
   ListFilter,
@@ -59,7 +60,7 @@ import {
   X
 } from "lucide-react";
 import { chunkRemoteText, planRemoteKeyboardInput } from "./remoteKeyboard";
-import { cameraKeepingPointUnderFingers, clampRemoteCamera, pointUnderScreenCoordinate } from "./remoteCamera";
+import { advanceRemotePinch, clampRemoteCamera } from "./remoteCamera";
 
 type User = {
   id: string;
@@ -217,7 +218,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.2";
+const LATEST_AGENT_VERSION = "1.0.3";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1203,6 +1204,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	// Phones start with an unobstructed full-screen canvas and a small floating
 	// handle. The complete control surface opens only when the user asks for it.
 	const [controlsCollapsed, setControlsCollapsed] = useState(coarsePointerClient);
+	const [mobileDockHidden, setMobileDockHidden] = useState(false);
 	const [screenScale, setScreenScale] = useState<"fit" | "50" | "75" | "100" | "125" | "150">("fit");
 	// Auto is the default on every client. The Agent starts Auto at 30 FPS,
 	// raises it to 60 on a consistently fast channel and falls back to 15 when
@@ -1216,6 +1218,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const cameraAnimationFrame = useRef(0);
 	const viewportRef = useRef<HTMLDivElement>(null);
 	const mobileKeyboardRef = useRef<HTMLInputElement>(null);
+	const keyboardOpenRef = useRef(false);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
   const lastPointerSent = useRef(0);
   const trackpadCursor = useRef({ x: 0, y: 0, ready: false });
@@ -1225,7 +1228,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const controlActivationRef = useRef<Promise<void> | null>(null);
 	const frameArrivalTimes = useRef<number[]>([]);
 	const activeTouches = useRef(new Map<number, { x: number; y: number }>());
-	const pinchGesture = useRef({ active: false, suppress: false, zooming: false, startDistance: 1, lastDistance: 1, anchorX: 0, anchorY: 0, lastMidY: 0, wheelDistance: 0, startZoom: 1 });
+	const pinchGesture = useRef({ active: false, suppress: false, zooming: false, startDistance: 1, lastDistance: 1, lastMidX: 0, lastMidY: 0, wheelDistance: 0 });
 	const inputQueue = useRef<Record<string, unknown>[]>([]);
 	const inputFlushTimer = useRef(0);
 	const inputInFlight = useRef(false);
@@ -1246,6 +1249,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const pointerSendInterval = coarsePointerClient ? 16 : 8;
 
 	useEffect(() => { cameraRef.current = camera; pendingCameraRef.current = camera; }, [camera]);
+	useEffect(() => { keyboardOpenRef.current = keyboardOpen; }, [keyboardOpen]);
 
 	useEffect(() => () => window.cancelAnimationFrame(cameraAnimationFrame.current), []);
 
@@ -1262,7 +1266,16 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	useEffect(() => {
 		const viewport = viewportRef.current;
 		if (!viewport) return;
-		const update = () => setViewportSize({ width: viewport.clientWidth, height: viewport.clientHeight });
+		const update = () => {
+			const next = { width: viewport.clientWidth, height: viewport.clientHeight };
+			setViewportSize((current) => {
+				// Android resizes the WebView while its IME is visible. Keep the
+				// remote canvas geometry stable during that temporary resize so opening
+				// the keyboard never zooms or recentres the remote desktop.
+				if (keyboardOpenRef.current && current.width > 0 && Math.abs(next.width-current.width) < 28 && next.height < current.height) return current;
+				return current.width === next.width && current.height === next.height ? current : next;
+			});
+		};
 		update();
 		const observer = new ResizeObserver(update);
 		observer.observe(viewport);
@@ -1648,9 +1661,6 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		if (activeTouches.current.size < 2) return false;
 		const points = [...activeTouches.current.values()].slice(0, 2);
 		const midpoint = touchMidpoint(points);
-		const viewport = viewportRef.current?.getBoundingClientRect();
-		const centerX = viewport ? viewport.left + viewport.width / 2 : 0;
-		const centerY = viewport ? viewport.top + viewport.height / 2 : 0;
 		const distance = Math.max(1, touchDistance(points));
 		pinchGesture.current = {
 			active: true,
@@ -1658,11 +1668,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			zooming: false,
 			startDistance: distance,
 			lastDistance: distance,
-			anchorX: pointUnderScreenCoordinate(midpoint, { x: centerX, y: centerY }, cameraRef.current).x,
-			anchorY: pointUnderScreenCoordinate(midpoint, { x: centerX, y: centerY }, cameraRef.current).y,
+			lastMidX: midpoint.x,
 			lastMidY: midpoint.y,
 			wheelDistance: 0,
-			startZoom: cameraRef.current.zoom,
 		};
 		if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
 		if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", x: directGesture.current.x, y: directGesture.current.y });
@@ -1679,16 +1687,23 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const midpoint = touchMidpoint(points);
 		const gesture = pinchGesture.current;
 		const distance = touchDistance(points);
-		const scaleChange = distance / gesture.startDistance;
+		const scaleChange = distance / Math.max(1, gesture.startDistance);
 		if (Math.abs(scaleChange - 1) > 0.035) gesture.zooming = true;
 		if (gesture.zooming || !mobileTrackpadMode) {
 			const viewport = viewportRef.current?.getBoundingClientRect();
 			const centerX = viewport ? viewport.left + viewport.width / 2 : 0;
 			const centerY = viewport ? viewport.top + viewport.height / 2 : 0;
-			const nextZoom = Math.max(1, Math.min(4, gesture.startZoom * scaleChange));
-			// Keep the remote pixel under the pinch midpoint fixed. This removes the
-			// old recentering jump caused by a permanent center transform origin.
-			scheduleCamera(cameraKeepingPointUnderFingers({ x: gesture.anchorX, y: gesture.anchorY }, midpoint, { x: centerX, y: centerY }, nextZoom));
+			// Accumulate each native pointer sample. Using the gesture's original
+			// anchor for every move made the content tug back towards its starting
+			// point, especially while the two fingers also translated across screen.
+			scheduleCamera(advanceRemotePinch(
+				pendingCameraRef.current,
+				{ x: gesture.lastMidX, y: gesture.lastMidY },
+				midpoint,
+				{ x: centerX, y: centerY },
+				gesture.lastDistance,
+				distance,
+			));
 		} else {
 			gesture.wheelDistance += midpoint.y - gesture.lastMidY;
 			if (Math.abs(gesture.wheelDistance) >= 12) {
@@ -1696,6 +1711,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				gesture.wheelDistance = 0;
 			}
 		}
+		gesture.lastMidX = midpoint.x;
 		gesture.lastMidY = midpoint.y;
 		gesture.lastDistance = distance;
 		return true;
@@ -1864,8 +1880,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	function sendCtrlAltDelete() {
-		for (const keyCode of [17, 18, 46]) sendInput({ type: "key", action: "down", keyCode });
-		for (const keyCode of [46, 18, 17]) sendInput({ type: "key", action: "up", keyCode });
+		// Ctrl+Alt+Delete is a Windows Secure Attention Sequence. It cannot be
+		// synthesized with ordinary key packets, so the privileged desktop worker
+		// handles this dedicated event through the Windows SAS interface.
+		sendInput({ type: "sas" });
 	}
 
 	function sendPointerTap(button: "left" | "right") {
@@ -1891,8 +1909,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	function setMobileKeyboardVisibility(open: boolean) {
+		keyboardOpenRef.current = open;
 		setKeyboardOpen(open);
 		if (open) {
+			setMobileDockHidden(false);
 			setControlsCollapsed(false);
 			window.requestAnimationFrame(() => window.setTimeout(() => mobileKeyboardRef.current?.focus({ preventScroll: true }), 30));
 			return;
@@ -1900,6 +1920,13 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		mobileKeyboardRef.current?.blur();
 		const bridge = (window as unknown as { RemoteItAndroid?: { hideKeyboard?: () => void } }).RemoteItAndroid;
 		bridge?.hideKeyboard?.();
+		// Android reports its full viewport a moment after the IME closes. Refresh
+		// only then; while it is open the ResizeObserver intentionally freezes the
+		// remote camera geometry.
+		window.setTimeout(() => {
+			const viewport = viewportRef.current;
+			if (viewport && !keyboardOpenRef.current) setViewportSize({ width: viewport.clientWidth, height: viewport.clientHeight });
+		}, 180);
 	}
 
 	function commitMobileText(appendEnter: boolean) {
@@ -1912,6 +1939,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	function toggleControls() {
 		const next = !controlsCollapsed;
 		if (next && keyboardOpen) setMobileKeyboardVisibility(false);
+		if (!next) setMobileDockHidden(false);
 		setControlsCollapsed(next);
 	}
 
@@ -1933,17 +1961,22 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		width: Math.max(1, Math.round(sourceWidth * (scalePercent > 0 ? scalePercent / 100 : fitRatio))),
 		height: Math.max(1, Math.round(sourceHeight * (scalePercent > 0 ? scalePercent / 100 : fitRatio))),
 	};
+	const baseFrameScale = sourceWidth > 0 ? fittedFrame.width / sourceWidth : 1;
+	const totalFrameScale = Math.max(0.0001, baseFrameScale * camera.zoom);
 	const remoteImageLayerStyle = sourceWidth > 0 && sourceHeight > 0 ? {
-		width: `${fittedFrame.width}px`,
-		height: `${fittedFrame.height}px`,
-		transform: `translate3d(${camera.panX}px,${camera.panY}px,0) scale(${camera.zoom})`,
+		// Keep the DOM image at its natural remote resolution and scale the layer
+		// once. Scaling an image that had first been laid out at phone width caused
+		// the browser to magnify a low-resolution compositor surface during pinch.
+		width: `${sourceWidth}px`,
+		height: `${sourceHeight}px`,
+		transform: `translate3d(${camera.panX}px,${camera.panY}px,0) scale(${totalFrameScale})`,
 		transformOrigin: "center center",
-		"--remote-camera-zoom": camera.zoom,
+		"--remote-camera-zoom": totalFrameScale,
 	} as CSSProperties : undefined;
 
 	const resetCamera = () => scheduleCamera({ zoom: 1, panX: 0, panY: 0 });
 
-	const workspace = <section className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""}`}>
+	const workspace = <section className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""} ${mobileDockHidden ? "remote-mobile-dock-hidden" : ""}`}>
 		<header>
 			<div><span className="eyebrow">ЗАЩИЩЁННЫЙ СЕАНС</span><h2>{device.name}</h2><small><span className={`desktop-live-dot ${status?.agentConnected ? "active" : ""}`} />{status?.agentConnected ? `Экран ${status.frameWidth || "—"}×${status.frameHeight || "—"} · ${status.controlEnabled ? "управление активно" : "предпросмотр — нажмите на экран для управления"}` : "Ожидание настольного Agent…"}</small></div>
 			<div className="desktop-actions">
@@ -1969,23 +2002,32 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<span className="remote-stream-stats" title={status?.captureDiagnostics ? `${status.captureDiagnostics.captureBackend}: захват ${status.captureDiagnostics.captureMillis} мс, копирование ${status.captureDiagnostics.copyMillis} мс, масштаб ${status.captureDiagnostics.scaleMillis} мс, JPEG ${status.captureDiagnostics.encodeMillis} мс` : ""}><b>HD</b><span>{latencyMs || "—"} мс</span><em>{frameFPS || "—"} FPS</em><em>{camera.zoom > 1 ? `${Math.round(camera.zoom * 100)}%` : screenScale === "fit" ? "ПО РАЗМЕРУ" : `${screenScale}%`}</em></span>
 			</> : <div className="remote-screen-wait"><ScreenShare size={42} /><strong>{starting ? "Создаём сеанс…" : "Ожидаем первый кадр"}</strong><span>На удалённом компьютере должен быть запущен RemoteIt Agent 0.9.26 или новее.</span></div>}
 		</div>
+		{coarsePointerClient && controlsCollapsed && !mobileDockHidden && <nav className="remote-mobile-dock" aria-label="Быстрое управление удалённым компьютером">
+			<button type="button" className={pointerMode === "trackpad" ? "active" : ""} aria-pressed={pointerMode === "trackpad"} onClick={() => setPointerMode("trackpad")}><MousePointer2 size={18} /><span>Курсор</span></button>
+			<button type="button" className={pointerMode === "direct" ? "active" : ""} aria-pressed={pointerMode === "direct"} onClick={() => { if (dragLock) toggleDragLock(); setPointerMode("direct"); }}><Hand size={18} /><span>Касание</span></button>
+			<button type="button" onClick={() => setMobileKeyboardVisibility(true)}><Keyboard size={18} /><span>Клавиатура</span></button>
+			<button type="button" onClick={() => { setMobileDockHidden(false); setControlsCollapsed(false); }}><SlidersHorizontal size={18} /><span>Ещё</span></button>
+			<button type="button" className="dock-hide" onClick={() => setMobileDockHidden(true)} aria-label="Скрыть все элементы управления"><X size={17} /></button>
+		</nav>}
+		{coarsePointerClient && controlsCollapsed && mobileDockHidden && <button type="button" className="remote-mobile-dock-reveal" onClick={() => setMobileDockHidden(false)} aria-label="Показать управление"><SlidersHorizontal size={18} /></button>}
 		{coarsePointerClient && !controlsCollapsed && <button type="button" className="remote-controls-scrim" aria-label="Скрыть панель управления" onClick={toggleControls} />}
 		<footer className="remote-session-footer">
 			<div className="remote-session-tools">
 				<span><MousePointer2 size={15} /> {pointerMode === "direct" ? "Касание — левый клик · удержание — правый" : "Ведите пальцем — перемещайте курсор; короткое касание — клик"}</span>
 				<div className="remote-pointer-modes">
 					<button type="button" className={`remote-tool-button ${pointerMode === "trackpad" ? "active" : ""}`} aria-pressed={pointerMode === "trackpad"} onClick={() => setPointerMode("trackpad")}><MousePointer2 size={16} /> Курсор</button>
-					<button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => { if (dragLock) toggleDragLock(); setPointerMode("direct"); }}><MousePointer2 size={16} /> Касание</button>
+					<button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => { if (dragLock) toggleDragLock(); setPointerMode("direct"); }}><Hand size={16} /> Касание</button>
 				</div>
 				<button type="button" className="remote-tool-button" onClick={() => sendPointerTap("right")}><MousePointer2 size={15} /> ПКМ</button>
 				<button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)}><Keyboard size={15} /> Клавиатура</button>
+				<button type="button" className="remote-tool-button" onClick={sendCtrlAltDelete}><Keyboard size={15} /> Ctrl+Alt+Del</button>
 				<button type="button" className={`remote-tool-button ${dragLock ? "active" : ""}`} aria-pressed={dragLock} onClick={toggleDragLock}>Зажать</button>
 				{onOpenFiles && <button type="button" className="remote-tool-button" onClick={onOpenFiles}><Folder size={15} /> Файлы</button>}
 				<button type="button" className="remote-tool-button" onClick={() => void pasteClipboard()}><Clipboard size={15} /> Буфер</button>
 				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
 			</div>
 			{keyboardOpen && <div className="remote-mobile-keyboard">
-				<input ref={mobileKeyboardRef} value={mobileText} onChange={(event) => setMobileText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitMobileText(true); } }} placeholder="Текст для удалённого компьютера" enterKeyHint="enter" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+				<input ref={mobileKeyboardRef} value={mobileText} onChange={(event) => setMobileText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} placeholder="Текст для удалённого компьютера" enterKeyHint="done" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
 				<button type="button" disabled={!mobileText} onClick={() => commitMobileText(false)}>Ввести</button>
 				<button type="button" onClick={() => commitMobileText(true)}>Enter</button>
 				<button type="button" className="remote-keyboard-close" onClick={() => setMobileKeyboardVisibility(false)} aria-label="Закрыть клавиатуру"><X size={17} /></button>
@@ -2470,6 +2512,7 @@ function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User
       <article className="settings-card appearance-card"><div className="settings-card-head"><span className="stat-icon violet"><Palette size={20} /></span><div><h2>Внешний вид</h2><p>Белая тема используется по умолчанию</p></div></div><div className="theme-setting"><span>Оформление панели</span><ThemeSwitcher theme={theme} onChange={onTheme} /></div><small className="appearance-note">Выбор сохраняется только для этого браузера и не меняет тему у других администраторов.</small></article>
       <article className="settings-card sessions-card"><div className="settings-card-head"><span className="stat-icon violet"><Activity size={20} /></span><div><h2>Активные сессии</h2><p>{sessions.length} входов, срок каждой — 12 часов</p></div><button className="icon-button" onClick={() => void loadSessions()} aria-label="Обновить сессии"><RefreshCw size={17} className={sessionsLoading ? "spin" : ""} /></button></div><div className="sessions-list">{sessionsLoading && sessions.length === 0 ? <div className="session-placeholder">Загрузка…</div> : sessions.map((session) => <div className="session-row" key={session.id}><span className={`session-state ${session.current ? "current" : ""}`}><Monitor size={17} /></span><div><strong>{session.current ? "Текущая сессия" : session.userAgent || "Неизвестное устройство"}</strong><small>{session.ip || "IP неизвестен"} · активность {formatRelative(session.lastUsedAt)}</small></div>{session.current ? <span className="current-badge">эта сессия</span> : <button className="danger-button compact-action" onClick={() => void revokeSession(session.id)}><Ban size={14} /> Завершить</button>}</div>)}</div></article>
       <article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android APK</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a><a href="/downloads/RemoteIt-MCP.exe" download><Sparkles size={16} /> MCP для Codex</a><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a></div></article>
+	  <article className="settings-card creator-card"><div className="settings-card-head"><span className="stat-icon green"><Send size={20} /></span><div><h2>О RemoteIt</h2><p>Частная платформа удалённого администрирования</p></div></div><a className="creator-link" href="https://t.me/Sanchcz" target="_blank" rel="noreferrer"><span><small>Создатель</small><strong>@Sanchcz</strong></span><span>Telegram</span></a></article>
     </section>
   </>;
 }

@@ -1563,8 +1563,9 @@ func trayCommand() error {
 	}
 	openAbout := func() {
 		status := loadAgentDashboardSnapshot()
-		_ = walk.MsgBox(window, "О RemoteIt Agent", "RemoteIt Agent "+status.Version+"\n\nЗащищённый агент удалённого доступа.\nСервер: supportgenesis.ru", walk.MsgBoxIconInformation)
+		_ = walk.MsgBox(window, "О RemoteIt Agent", "RemoteIt Agent "+status.Version+"\n\nЗащищённый агент удалённого доступа.\nСервер: supportgenesis.ru\nСоздатель: @Sanchcz", walk.MsgBoxIconInformation)
 	}
+	openCreator := func() { _ = openURL("https://t.me/Sanchcz") }
 	checkUpdate := func() {
 		target, targetErr := installedAgentPath()
 		if targetErr != nil || (!allowedWindowsAgentTarget(target, false) && !allowedWindowsAgentTarget(target, true)) {
@@ -1592,7 +1593,7 @@ func trayCommand() error {
 			})
 		}()
 	}
-	actions := []func(){openPanelURL, checkConnection, copyRemoteID, openLogs, openFolder, openSettings, openAbout, checkUpdate}
+	actions := []func(){openPanelURL, checkConnection, copyRemoteID, openLogs, openFolder, openSettings, openAbout, checkUpdate, openCreator}
 	dashboard, err = newAgentDashboardV3(window, scale, onlineIcon, offlineIcon, loadAgentDashboardSnapshot, actions)
 	if err != nil {
 		return err
