@@ -27,6 +27,10 @@ func runInteractiveCompanionBroker(ctx context.Context) {
 	if useUserConfig() {
 		return
 	}
+	// SendSAS must run inside the actual SCM service. The interactive capture
+	// worker requests it over a session-scoped kernel event and receives an
+	// explicit success/failure acknowledgement.
+	go runWindowsSASBroker(ctx)
 	target, err := os.Executable()
 	if err != nil {
 		log.Printf("не удалось определить файл интерактивного RemoteIt Agent: %v", err)

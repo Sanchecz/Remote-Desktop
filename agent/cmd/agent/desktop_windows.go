@@ -1706,17 +1706,10 @@ func executeDesktopInput(event desktopInput, capture desktopCapture) error {
 }
 
 func sendDesktopSecureAttentionSequence() error {
-	// The interactive desktop worker inherits LocalSystem from the installed
-	// service and is attached to the user's session. SendSAS(FALSE) therefore
-	// targets that session without pretending Ctrl+Alt+Delete is ordinary input.
-	if err := sasDesktop.Load(); err != nil {
-		return fmt.Errorf("Windows Secure Attention Sequence недоступна: %w", err)
-	}
-	if err := procSendSAS.Find(); err != nil {
-		return fmt.Errorf("Windows SendSAS не найдена: %w", err)
-	}
-	procSendSAS.Call(0)
-	return nil
+	// A LocalSystem child in the interactive session is still not the NT service
+	// authorized by Windows software-SAS policy. Ask the real SCM service to call
+	// SendSAS while impersonating this session and wait for its acknowledgement.
+	return requestWindowsServiceSAS()
 }
 
 func resetDesktopInputState() {
