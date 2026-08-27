@@ -67,6 +67,14 @@ func desktopViewerLaneMatches(frame desktopFrameState, lane int) bool {
 	return int(frame.ProducerSequence%desktopVideoLaneCount) == lane
 }
 
+func desktopViewerLaneCarriesFrames(lane int) bool {
+	// The dedicated input socket must never inspect or advance video sequence
+	// state. At 30/60 FPS a continuously changing frame otherwise keeps the
+	// stream loop in its fast video branch and can starve pointer and keyboard
+	// packets indefinitely even though the socket itself remains connected.
+	return lane != -2
+}
+
 func desktopViewerPayload(frame desktopFrameState, lane int) []byte {
 	if lane < 0 {
 		return frame.Frame
@@ -1150,24 +1158,26 @@ func (s *server) desktopSessionStream(w http.ResponseWriter, r *http.Request) {
 	defer viewerTicker.Stop()
 	var afterSequence uint64
 	for {
-		live, ok := s.loadDesktopFrame(sessionID)
-		if lane >= 0 {
-			live, ok = s.loadDesktopFrameLane(sessionID, lane)
-		}
-		if ok && live.Sequence > afterSequence && time.Since(live.At) <= 15*time.Second {
-			if !desktopViewerLaneMatches(live, lane) {
+		if desktopViewerLaneCarriesFrames(lane) {
+			live, ok := s.loadDesktopFrame(sessionID)
+			if lane >= 0 {
+				live, ok = s.loadDesktopFrameLane(sessionID, lane)
+			}
+			if ok && live.Sequence > afterSequence && time.Since(live.At) <= 15*time.Second {
+				if !desktopViewerLaneMatches(live, lane) {
+					afterSequence = live.Sequence
+					continue
+				}
+				payload := desktopViewerPayload(live, lane)
+				writeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				writeErr := connection.Write(writeCtx, websocket.MessageBinary, payload)
+				cancel()
+				if writeErr != nil {
+					return
+				}
 				afterSequence = live.Sequence
 				continue
 			}
-			payload := desktopViewerPayload(live, lane)
-			writeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			writeErr := connection.Write(writeCtx, websocket.MessageBinary, payload)
-			cancel()
-			if writeErr != nil {
-				return
-			}
-			afterSequence = live.Sequence
-			continue
 		}
 		select {
 		case <-ctx.Done():

@@ -51,6 +51,17 @@ func TestValidDesktopTargetFPS(t *testing.T) {
 	}
 }
 
+func TestDesktopViewerInputLaneNeverCarriesFrames(t *testing.T) {
+	if desktopViewerLaneCarriesFrames(-2) {
+		t.Fatal("the dedicated input lane must not inspect video frames")
+	}
+	for _, lane := range []int{-1, 0, 1, desktopVideoLaneCount - 1} {
+		if !desktopViewerLaneCarriesFrames(lane) {
+			t.Fatalf("viewer lane %d must continue carrying frames", lane)
+		}
+	}
+}
+
 func TestDesktopInputQueuePreservesActionsAndCoalescesPointerMoves(t *testing.T) {
 	queue := newDesktopInputQueue()
 	queue.enqueue([]desktopInputEvent{
