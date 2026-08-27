@@ -484,12 +484,12 @@ td code { color: #8becc2; font-size: 11px; padding: 4px 7px; border-radius: 5px;
 .remote-pointer-modes { display: contents; }
 .remote-controls-scrim { display: none; }
 .remote-mobile-dock,.remote-mobile-dock-reveal { display: none; }
-.remote-mobile-keyboard { order: 4; width: 100%; display: flex; gap: 7px; }
-.remote-mobile-keyboard input { min-width: 0; flex: 1; height: 38px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; outline: 0; color: var(--text); background: var(--input-bg); }
+.remote-mobile-keyboard { position: absolute; z-index: 12; right: 12px; bottom: 12px; left: 12px; display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 7px; padding: 7px; border: 1px solid color-mix(in srgb,var(--line) 86%,transparent); border-radius: 13px; background: color-mix(in srgb,var(--panel) 94%,transparent); -webkit-backdrop-filter: blur(18px) saturate(1.12); backdrop-filter: blur(18px) saturate(1.12); box-shadow: 0 12px 34px rgba(0,0,0,.28); animation: remoteSheetIn .18s ease-out both; }
+.remote-mobile-keyboard input { min-width: 0; width: 100%; height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; outline: 0; color: var(--text); background: var(--input-bg); font-size: 16px; }
 .remote-mobile-keyboard input:focus { border-color: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb,var(--green) 8%,transparent); }
-.remote-mobile-keyboard button { min-height: 38px; padding: 0 13px; border: 0; border-radius: 8px; color: #07140f; background: #39e79b; font-weight: 700; cursor: pointer; }
+.remote-mobile-keyboard button { min-height: 40px; padding: 0 14px; border: 0; border-radius: 9px; color: #07140f; background: #39e79b; font-weight: 800; cursor: pointer; }
 .remote-mobile-keyboard button:disabled { opacity: .4; cursor: not-allowed; }
-.remote-mobile-keyboard .remote-keyboard-close { width: 38px; padding: 0; display: grid; place-items: center; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); }
+.remote-mobile-keyboard .remote-keyboard-close { width: 40px; padding: 0; display: grid; place-items: center; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); }
 @keyframes remoteSheetIn { from { opacity: 0; transform: translateY(18px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes remoteHandleIn { from { opacity: 0; transform: translateY(8px) scale(.94); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes remoteScrimIn { from { opacity: 0; } to { opacity: 1; } }
@@ -1332,9 +1332,11 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.remote-mobile-dock-reveal { position: absolute; z-index: 9; right: max(8px,env(safe-area-inset-right)); bottom: max(9px,env(safe-area-inset-bottom)); width: 40px; height: 40px; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.22); border-radius: 50%; color: #fff; background: rgba(8,17,25,.76); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); box-shadow: 0 8px 25px rgba(0,0,0,.28); }
 	.remote-mobile-dock-hidden .remote-mobile-dock-reveal { display: grid; }
 	.remote-session-footer > .danger-button,.remote-desktop-embedded .remote-footer-end { min-height: 44px; display: flex; flex: 1 1 100%; color: #ec4545; border: 1px solid #ff7878; background: transparent; }
-	.remote-mobile-keyboard { order: 5; position: sticky; bottom: 0; display: grid; grid-template-columns: minmax(0,1fr) auto auto auto; }
-	.remote-mobile-keyboard input { width: 100%; height: 44px; color: #15202b; background: #fff; border-color: #dce3e9; font-size: 16px; }
+	.remote-mobile-keyboard { position: absolute; z-index: 12; right: max(8px,env(safe-area-inset-right)); bottom: max(7px,env(safe-area-inset-bottom)); left: max(8px,env(safe-area-inset-left)); display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 6px; padding: 6px; border-color: rgba(255,255,255,.22); border-radius: 14px; background: rgba(8,17,25,.9); -webkit-backdrop-filter: blur(20px) saturate(1.15); backdrop-filter: blur(20px) saturate(1.15); }
+	.remote-mobile-keyboard input { width: 100%; height: 42px; color: #15202b; background: #fff; border-color: #dce3e9; font-size: 16px; }
 	.remote-mobile-keyboard button { min-height: 42px; }
+	.remote-keyboard-open .remote-mobile-dock-reveal { display: none !important; }
+	.remote-keyboard-open .remote-stream-stats { opacity: .72; }
 	.desktop-error { bottom: 76px; width: calc(100% - 24px); text-align: center; }
   .device-drawer > header, .drawer-scroll { padding-left: 16px; padding-right: 16px; }
   .settings-grid { grid-template-columns: 1fr; }
@@ -1433,7 +1435,7 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.remote-mobile-dock button { min-height: 40px; }
 	.remote-mobile-dock-reveal { right: max(8px,env(safe-area-inset-right)); bottom: max(8px,env(safe-area-inset-bottom)); }
 	.remote-mobile-dock-hidden .remote-mobile-dock-reveal { display: grid; }
-	.remote-mobile-keyboard { position: static; display: grid; grid-template-columns: 1fr; }
+	.remote-mobile-keyboard { position: absolute; right: max(8px,env(safe-area-inset-right)); bottom: max(7px,env(safe-area-inset-bottom)); left: max(8px,env(safe-area-inset-left)); width: auto; display: grid; grid-template-columns: minmax(0,1fr) auto auto; }
 	.remote-mobile-keyboard input { width: 100%; }
 }
 

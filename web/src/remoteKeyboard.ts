@@ -15,6 +15,11 @@ export type RemoteKeyboardPlan = {
 	input?: RemoteKeyboardInput;
 };
 
+export type RemoteTextReconciliation = {
+	backspaces: number;
+	text: string;
+};
+
 // Browser `code` names describe physical keys, whereas Windows SendInput uses
 // virtual-key values. Keep this mapping for shortcuts, navigation and other
 // stateful keys. Printable input follows the Unicode path below so Shift
@@ -108,4 +113,23 @@ export function chunkRemoteText(text: string, maxRunes = 128): string[] {
 	const chunks: string[] = [];
 	for (let index = 0; index < runes.length; index += maxRunes) chunks.push(runes.slice(index, index + maxRunes).join(""));
 	return chunks;
+}
+
+// Android IMEs frequently replace the composing suffix instead of emitting a
+// reliable key event for every character. Reconcile the visible input value
+// against the last value already delivered to the remote machine. Work in
+// Unicode code points so emoji and supplementary characters are never split.
+export function planRemoteTextReconciliation(previous: string, next: string): RemoteTextReconciliation {
+	const previousCodePoints = Array.from(previous);
+	const nextCodePoints = Array.from(next);
+	let sharedPrefix = 0;
+	while (
+		sharedPrefix < previousCodePoints.length
+		&& sharedPrefix < nextCodePoints.length
+		&& previousCodePoints[sharedPrefix] === nextCodePoints[sharedPrefix]
+	) sharedPrefix += 1;
+	return {
+		backspaces: previousCodePoints.length - sharedPrefix,
+		text: nextCodePoints.slice(sharedPrefix).join(""),
+	};
 }

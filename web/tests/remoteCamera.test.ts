@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advanceRemotePinch, cameraKeepingPointUnderFingers, clampRemoteCamera, pointUnderScreenCoordinate } from "../src/remoteCamera.ts";
+import { advanceRemotePinch, cameraKeepingPointUnderFingers, clampRemoteCamera, classifyRemoteTouchGesture, isRemoteTwoFingerTap, pointUnderScreenCoordinate } from "../src/remoteCamera.ts";
 
 test("pinch zoom preserves the remote point below the moving finger midpoint", () => {
 	const center = { x: 540, y: 360 };
@@ -48,4 +48,31 @@ test("successive pinch samples preserve their moving midpoint without recenterin
 	assert.ok(Math.abs(pointAfterSecondSample.y - secondAnchor.y) < 1e-9);
 	assert.notEqual(second.panX, 0);
 	assert.notEqual(second.panY, 0);
+});
+
+test("portrait letterboxing does not force an off-centre pinch back to the middle", () => {
+	// 390x219 is a 16:9 desktop fitted into a 390x760 portrait viewport.
+	const content = { x: 390, y: 219 };
+	const viewport = { x: 390, y: 760 };
+	const center = { x: viewport.x / 2, y: viewport.y / 2 };
+	const firstMidpoint = { x: 116, y: 315 };
+	const anchor = pointUnderScreenCoordinate(firstMidpoint, center, { zoom: 1, panX: 0, panY: 0 });
+	const zoomed = advanceRemotePinch({ zoom: 1, panX: 0, panY: 0 }, firstMidpoint, firstMidpoint, center, 100, 180);
+	const clamped = clampRemoteCamera(zoomed, content, viewport);
+	const pointAfterClamp = pointUnderScreenCoordinate(firstMidpoint, center, clamped);
+
+	assert.ok(Math.abs(pointAfterClamp.x - anchor.x) < 1e-9);
+	assert.ok(Math.abs(pointAfterClamp.y - anchor.y) < 1e-9);
+});
+
+test("mobile trackpad distinguishes zoom, scroll and two-finger right click", () => {
+	assert.equal(classifyRemoteTouchGesture("pending", true, 1.08, 2), "zoom");
+	assert.equal(classifyRemoteTouchGesture("pending", true, 1.01, 12), "scroll");
+	assert.equal(classifyRemoteTouchGesture("scroll", true, 1.08, 22), "scroll");
+	assert.equal(classifyRemoteTouchGesture("zoom", true, 1, 40), "zoom");
+	assert.equal(classifyRemoteTouchGesture("pending", false, 1, 0), "zoom");
+	assert.equal(isRemoteTwoFingerTap("pending", true, false, 180, 3), true);
+	assert.equal(isRemoteTwoFingerTap("zoom", true, false, 180, 3), false);
+	assert.equal(isRemoteTwoFingerTap("pending", true, true, 180, 3), false);
+	assert.equal(isRemoteTwoFingerTap("pending", true, false, 600, 3), false);
 });

@@ -1,5 +1,21 @@
 export type RemoteCamera = { zoom: number; panX: number; panY: number };
 export type Point = { x: number; y: number };
+export type RemoteTouchGestureMode = "pending" | "zoom" | "scroll";
+
+export function classifyRemoteTouchGesture(mode: RemoteTouchGestureMode, trackpad: boolean, scaleChange: number, midpointTravel: number): RemoteTouchGestureMode {
+	if (!trackpad) return "zoom";
+	// Lock the decision for the rest of the gesture. Finger spacing naturally
+	// changes a little while performing a two-finger scroll; allowing a decided
+	// scroll to turn into a pinch later caused the remote desktop to jump.
+	if (mode !== "pending") return mode;
+	if (Math.abs(scaleChange - 1) > 0.035) return "zoom";
+	if (midpointTravel > 8) return "scroll";
+	return mode;
+}
+
+export function isRemoteTwoFingerTap(mode: RemoteTouchGestureMode, trackpad: boolean, cancelled: boolean, elapsedMillis: number, midpointTravel: number): boolean {
+	return trackpad && !cancelled && mode === "pending" && elapsedMillis < 420 && midpointTravel < 12;
+}
 
 export function pointUnderScreenCoordinate(screen: Point, viewportCenter: Point, camera: RemoteCamera): Point {
 	return {
@@ -28,8 +44,14 @@ export function advanceRemotePinch(camera: RemoteCamera, previousMidpoint: Point
 
 export function clampRemoteCamera(camera: RemoteCamera, content: Point, viewport: Point, overscan = 32): RemoteCamera {
 	const zoom = Math.max(1, Math.min(4, camera.zoom));
-	const maxPanX = Math.max(0, (Math.max(1, content.x) * zoom - Math.max(1, viewport.x)) / 2) + overscan;
-	const maxPanY = Math.max(0, (Math.max(1, content.y) * zoom - Math.max(1, viewport.y)) / 2) + overscan;
+	// A fitted desktop is commonly letterboxed on a portrait phone. The old
+	// bounds collapsed that empty axis to `overscan`, so an otherwise correct
+	// off-centre pinch was immediately pulled back towards the viewport centre.
+	// The absolute half-difference lets the fitted frame travel through its
+	// letterbox as it grows, while retaining the same finite boundary once the
+	// zoomed frame becomes larger than the viewport.
+	const maxPanX = Math.abs(Math.max(1, content.x) * zoom - Math.max(1, viewport.x)) / 2 + overscan;
+	const maxPanY = Math.abs(Math.max(1, content.y) * zoom - Math.max(1, viewport.y)) / 2 + overscan;
 	return {
 		zoom,
 		panX: Math.max(-maxPanX, Math.min(maxPanX, camera.panX)),

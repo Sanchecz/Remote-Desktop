@@ -59,8 +59,8 @@ import {
 	Power,
   X
 } from "lucide-react";
-import { chunkRemoteText, planRemoteKeyboardInput } from "./remoteKeyboard";
-import { advanceRemotePinch, clampRemoteCamera } from "./remoteCamera";
+import { chunkRemoteText, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
+import { advanceRemotePinch, clampRemoteCamera, classifyRemoteTouchGesture, isRemoteTwoFingerTap } from "./remoteCamera";
 
 type User = {
   id: string;
@@ -218,7 +218,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.3";
+const LATEST_AGENT_VERSION = "1.0.4";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1218,17 +1218,20 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const cameraAnimationFrame = useRef(0);
 	const viewportRef = useRef<HTMLDivElement>(null);
 	const mobileKeyboardRef = useRef<HTMLInputElement>(null);
+	const mobileTextSyncedRef = useRef("");
+	const mobileCompositionRef = useRef(false);
 	const keyboardOpenRef = useRef(false);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
   const lastPointerSent = useRef(0);
   const trackpadCursor = useRef({ x: 0, y: 0, ready: false });
-	const trackpadGesture = useRef({ pointerId: -1, lastX: 0, lastY: 0, distance: 0, longPress: false, timer: 0 });
+	const trackpadGesture = useRef({ pointerId: -1, lastX: 0, lastY: 0, distance: 0, longPress: false, dragging: false, secondTap: false, timer: 0 });
+	const lastTrackpadTap = useRef({ at: 0, clientX: 0, clientY: 0 });
 	const directGesture = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number; moved: boolean; leftDown: boolean; longPress: boolean; timer: number }>({ pointerId: -1, startX: 0, startY: 0, x: 0, y: 0, moved: false, leftDown: false, longPress: false, timer: 0 });
 	const controlEnabledRef = useRef(false);
 	const controlActivationRef = useRef<Promise<void> | null>(null);
 	const frameArrivalTimes = useRef<number[]>([]);
 	const activeTouches = useRef(new Map<number, { x: number; y: number }>());
-	const pinchGesture = useRef({ active: false, suppress: false, zooming: false, startDistance: 1, lastDistance: 1, lastMidX: 0, lastMidY: 0, wheelDistance: 0 });
+	const pinchGesture = useRef({ active: false, suppress: false, mode: "pending" as "pending" | "zoom" | "scroll", startDistance: 1, lastDistance: 1, lastMidX: 0, lastMidY: 0, wheelDistance: 0, midpointTravel: 0, startedAt: 0, rightClickSent: false });
 	const inputQueue = useRef<Record<string, unknown>[]>([]);
 	const inputFlushTimer = useRef(0);
 	const inputInFlight = useRef(false);
@@ -1665,16 +1668,22 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		pinchGesture.current = {
 			active: true,
 			suppress: true,
-			zooming: false,
+			mode: mobileTrackpadMode ? "pending" : "zoom",
 			startDistance: distance,
 			lastDistance: distance,
 			lastMidX: midpoint.x,
 			lastMidY: midpoint.y,
 			wheelDistance: 0,
+			midpointTravel: 0,
+			startedAt: performance.now(),
+			rightClickSent: false,
 		};
 		if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
 		if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", x: directGesture.current.x, y: directGesture.current.y });
 		if (trackpadGesture.current.timer) { window.clearTimeout(trackpadGesture.current.timer); trackpadGesture.current.timer = 0; }
+		if (trackpadGesture.current.dragging) sendInput({ type: "pointer", action: "up", button: "left", x: trackpadCursor.current.x, y: trackpadCursor.current.y });
+		trackpadGesture.current.pointerId = -1;
+		trackpadGesture.current.dragging = false;
 		directGesture.current.pointerId = -1;
 		return true;
 	}
@@ -1688,23 +1697,30 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const gesture = pinchGesture.current;
 		const distance = touchDistance(points);
 		const scaleChange = distance / Math.max(1, gesture.startDistance);
-		if (Math.abs(scaleChange - 1) > 0.035) gesture.zooming = true;
-		if (gesture.zooming || !mobileTrackpadMode) {
+		const midpointDelta = Math.hypot(midpoint.x - gesture.lastMidX, midpoint.y - gesture.lastMidY);
+		gesture.midpointTravel += midpointDelta;
+		gesture.mode = classifyRemoteTouchGesture(gesture.mode, mobileTrackpadMode, scaleChange, gesture.midpointTravel);
+		if (gesture.mode === "zoom") {
 			const viewport = viewportRef.current?.getBoundingClientRect();
-			const centerX = viewport ? viewport.left + viewport.width / 2 : 0;
-			const centerY = viewport ? viewport.top + viewport.height / 2 : 0;
+			// Work in viewport-local coordinates. Android changes WebView insets while
+			// rotating or showing the IME; absolute page coordinates made those inset
+			// changes look like a camera jump even when the fingers had not moved.
+			const left = viewport?.left || 0;
+			const top = viewport?.top || 0;
+			const centerX = (viewport?.width || viewportSize.width) / 2;
+			const centerY = (viewport?.height || viewportSize.height) / 2;
 			// Accumulate each native pointer sample. Using the gesture's original
 			// anchor for every move made the content tug back towards its starting
 			// point, especially while the two fingers also translated across screen.
 			scheduleCamera(advanceRemotePinch(
 				pendingCameraRef.current,
-				{ x: gesture.lastMidX, y: gesture.lastMidY },
-				midpoint,
+				{ x: gesture.lastMidX - left, y: gesture.lastMidY - top },
+				{ x: midpoint.x - left, y: midpoint.y - top },
 				{ x: centerX, y: centerY },
 				gesture.lastDistance,
 				distance,
 			));
-		} else {
+		} else if (gesture.mode === "scroll") {
 			gesture.wheelDistance += midpoint.y - gesture.lastMidY;
 			if (Math.abs(gesture.wheelDistance) >= 12) {
 				sendInput({ type: "wheel", delta: gesture.wheelDistance > 0 ? -120 : 120 });
@@ -1717,8 +1733,16 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		return true;
 	}
 
-	function endTouchGesture(pointerId: number) {
+	function endTouchGesture(pointerId: number, cancelled = false) {
 		const wasPinching = pinchGesture.current.active || pinchGesture.current.suppress;
+		const gesture = pinchGesture.current;
+		// Microsoft-style mouse mode: a quick two-finger tap is a right click.
+		// Pinch and two-finger scrolling are classified first, so releasing those
+		// gestures can never accidentally open a context menu.
+		if (gesture.active && !gesture.rightClickSent && isRemoteTwoFingerTap(gesture.mode, mobileTrackpadMode, cancelled, performance.now() - gesture.startedAt, gesture.midpointTravel)) {
+			gesture.rightClickSent = true;
+			sendPointerTap("right");
+		}
 		activeTouches.current.delete(pointerId);
 		if (activeTouches.current.size < 2) pinchGesture.current.active = false;
 		if (activeTouches.current.size === 0) window.setTimeout(() => { pinchGesture.current.suppress = false; }, 0);
@@ -1727,7 +1751,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
   function movePointer(event: ReactPointerEvent<HTMLImageElement>) {
 	event.preventDefault();
-		if (event.pointerType !== "mouse" && updateTouchGesture(event)) return;
+		if (event.pointerType !== "mouse") {
+			if (updateTouchGesture(event)) return;
+			if (pinchGesture.current.suppress) return;
+		}
 		if (mobileTrackpadMode) {
 			if (trackpadGesture.current.pointerId !== event.pointerId) return;
 			const rect = event.currentTarget.getBoundingClientRect();
@@ -1791,25 +1818,42 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			const size = ensureTrackpadCursor(event.currentTarget);
 			if (action === "down") {
 				event.currentTarget.setPointerCapture(event.pointerId);
+				const previousTap = lastTrackpadTap.current;
+				const secondTap = performance.now() - previousTap.at < 330 && Math.hypot(event.clientX - previousTap.clientX, event.clientY - previousTap.clientY) < 48;
+				if (secondTap) {
+					lastTrackpadTap.current.at = 0;
+					const position = trackpadCursor.current;
+					sendInput({ type: "pointer", action: "move", x: position.x, y: position.y });
+					sendInput({ type: "pointer", action: "down", button: "left", x: position.x, y: position.y });
+					trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, distance: 0, longPress: false, dragging: true, secondTap: true, timer: 0 };
+					positionLocalCursor(trackpadCursor.current, size);
+					return;
+				}
 				const timer = window.setTimeout(() => {
 					const gesture = trackpadGesture.current;
 					if (gesture.pointerId !== event.pointerId || gesture.distance > 10 || pinchGesture.current.active) return;
 					gesture.longPress = true;
+					lastTrackpadTap.current.at = 0;
 					sendPointerTap("right");
 				}, 650);
-				trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, distance: 0, longPress: false, timer };
+				trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, distance: 0, longPress: false, dragging: false, secondTap: false, timer };
 				positionLocalCursor(trackpadCursor.current, size);
 				return;
 			}
 			if (trackpadGesture.current.timer) window.clearTimeout(trackpadGesture.current.timer);
 			if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-			if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.distance < 10 && !trackpadGesture.current.longPress && !dragLock) {
+			if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.dragging) {
+				const position = trackpadCursor.current;
+				sendInput({ type: "pointer", action: "up", button: "left", x: position.x, y: position.y });
+			} else if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.distance < 10 && !trackpadGesture.current.longPress && !dragLock) {
 				const position = trackpadCursor.current;
 				sendInput({ type: "pointer", action: "move", x: position.x, y: position.y });
 				sendInput({ type: "pointer", action: "down", button: "left", x: position.x, y: position.y });
 				sendInput({ type: "pointer", action: "up", button: "left", x: position.x, y: position.y });
+				lastTrackpadTap.current = { at: performance.now(), clientX: event.clientX, clientY: event.clientY };
 			}
 			trackpadGesture.current.pointerId = -1;
+			trackpadGesture.current.dragging = false;
 			trackpadGesture.current.timer = 0;
 			if (event.pointerType !== "mouse") endTouchGesture(event.pointerId);
 			return;
@@ -1843,7 +1887,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	function cancelPointer(event: ReactPointerEvent<HTMLImageElement>) {
 		event.preventDefault();
-		if (event.pointerType !== "mouse") endTouchGesture(event.pointerId);
+		if (event.pointerType !== "mouse") endTouchGesture(event.pointerId, true);
 		if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
 		if (directGesture.current.pointerId === event.pointerId) {
 			if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
@@ -1853,6 +1897,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			sendInput({ type: "pointer", action: "up", button: "left", ...pointerPosition(event) });
 		}
 		trackpadGesture.current.pointerId = -1;
+		if (trackpadGesture.current.dragging) sendInput({ type: "pointer", action: "up", button: "left", x: trackpadCursor.current.x, y: trackpadCursor.current.y });
+		trackpadGesture.current.dragging = false;
 		if (trackpadGesture.current.timer) window.clearTimeout(trackpadGesture.current.timer);
 		trackpadGesture.current.timer = 0;
 	}
@@ -1912,12 +1958,21 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		keyboardOpenRef.current = open;
 		setKeyboardOpen(open);
 		if (open) {
-			setMobileDockHidden(false);
-			setControlsCollapsed(false);
+			// The IME needs only a slim text bridge. Hide the large tool sheet and the
+			// compact dock so the remote desktop remains visible above the keyboard.
+			if (coarsePointerClient) {
+				setMobileDockHidden(true);
+				setControlsCollapsed(true);
+			}
 			window.requestAnimationFrame(() => window.setTimeout(() => mobileKeyboardRef.current?.focus({ preventScroll: true }), 30));
 			return;
 		}
 		mobileKeyboardRef.current?.blur();
+		// The text field is only a live input bridge, not a document editor. Clear
+		// its local mirror without sending Backspace to the remote computer.
+		setMobileText("");
+		mobileTextSyncedRef.current = "";
+		if (coarsePointerClient) setMobileDockHidden(false);
 		const bridge = (window as unknown as { RemoteItAndroid?: { hideKeyboard?: () => void } }).RemoteItAndroid;
 		bridge?.hideKeyboard?.();
 		// Android reports its full viewport a moment after the IME closes. Refresh
@@ -1929,10 +1984,22 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		}, 180);
 	}
 
-	function commitMobileText(appendEnter: boolean) {
-		if (mobileText) sendRemoteText(mobileText);
-		if (appendEnter) sendVirtualKeyTap(13);
+	function syncMobileText(next: string) {
+		const plan = planRemoteTextReconciliation(mobileTextSyncedRef.current, next);
+		for (let index = 0; index < plan.backspaces; index += 1) sendVirtualKeyTap(8);
+		if (plan.text) sendRemoteText(plan.text);
+		mobileTextSyncedRef.current = next;
+	}
+
+	function updateMobileText(next: string) {
+		setMobileText(next);
+		if (!mobileCompositionRef.current) syncMobileText(next);
+	}
+
+	function sendMobileEnter() {
+		sendVirtualKeyTap(13);
 		setMobileText("");
+		mobileTextSyncedRef.current = "";
 		if (keyboardOpen) window.requestAnimationFrame(() => mobileKeyboardRef.current?.focus({ preventScroll: true }));
 	}
 
@@ -1976,7 +2043,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	const resetCamera = () => scheduleCamera({ zoom: 1, panX: 0, panY: 0 });
 
-	const workspace = <section className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""} ${mobileDockHidden ? "remote-mobile-dock-hidden" : ""}`}>
+	const workspace = <section className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""} ${mobileDockHidden ? "remote-mobile-dock-hidden" : ""} ${keyboardOpen ? "remote-keyboard-open" : ""}`}>
 		<header>
 			<div><span className="eyebrow">ЗАЩИЩЁННЫЙ СЕАНС</span><h2>{device.name}</h2><small><span className={`desktop-live-dot ${status?.agentConnected ? "active" : ""}`} />{status?.agentConnected ? `Экран ${status.frameWidth || "—"}×${status.frameHeight || "—"} · ${status.controlEnabled ? "управление активно" : "предпросмотр — нажмите на экран для управления"}` : "Ожидание настольного Agent…"}</small></div>
 			<div className="desktop-actions">
@@ -1995,7 +2062,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			{frameURL ? <>
 				<div className="remote-screen-canvas">
 					<div className="remote-screen-image-layer" style={remoteImageLayerStyle}>
-						<img ref={frameImageRef} className="remote-screen-image" src={frameURL} draggable={false} onLoad={(event) => { const width = event.currentTarget.naturalWidth; const height = event.currentTarget.naturalHeight; setRenderedFrameSize((current) => current.width === width && current.height === height ? current : { width, height }); }} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onDoubleClick={resetCamera} onWheel={wheel} onContextMenu={(event) => event.preventDefault()} />
+				<img ref={frameImageRef} className="remote-screen-image" src={frameURL} draggable={false} onLoad={(event) => { const width = event.currentTarget.naturalWidth; const height = event.currentTarget.naturalHeight; setRenderedFrameSize((current) => current.width === width && current.height === height ? current : { width, height }); }} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onWheel={wheel} onContextMenu={(event) => event.preventDefault()} />
 						{localCursorVisible && <span ref={localCursorRef} className="remote-local-cursor" aria-hidden="true"><MousePointer2 size={22} strokeWidth={2.4} /></span>}
 					</div>
 				</div>
@@ -2021,19 +2088,19 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button type="button" className="remote-tool-button" onClick={() => sendPointerTap("right")}><MousePointer2 size={15} /> ПКМ</button>
 				<button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)}><Keyboard size={15} /> Клавиатура</button>
 				<button type="button" className="remote-tool-button" onClick={sendCtrlAltDelete}><Keyboard size={15} /> Ctrl+Alt+Del</button>
+				<button type="button" className="remote-tool-button" onClick={resetCamera}><Maximize2 size={15} /> По размеру</button>
 				<button type="button" className={`remote-tool-button ${dragLock ? "active" : ""}`} aria-pressed={dragLock} onClick={toggleDragLock}>Зажать</button>
 				{onOpenFiles && <button type="button" className="remote-tool-button" onClick={onOpenFiles}><Folder size={15} /> Файлы</button>}
 				<button type="button" className="remote-tool-button" onClick={() => void pasteClipboard()}><Clipboard size={15} /> Буфер</button>
 				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
 			</div>
-			{keyboardOpen && <div className="remote-mobile-keyboard">
-				<input ref={mobileKeyboardRef} value={mobileText} onChange={(event) => setMobileText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} placeholder="Текст для удалённого компьютера" enterKeyHint="done" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
-				<button type="button" disabled={!mobileText} onClick={() => commitMobileText(false)}>Ввести</button>
-				<button type="button" onClick={() => commitMobileText(true)}>Enter</button>
-				<button type="button" className="remote-keyboard-close" onClick={() => setMobileKeyboardVisibility(false)} aria-label="Закрыть клавиатуру"><X size={17} /></button>
-			</div>}
 			<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button>
 		</footer>
+		{keyboardOpen && <div className="remote-mobile-keyboard" role="group" aria-label="Ввод на удалённом компьютере">
+			<input ref={mobileKeyboardRef} name="remoteit-live-input" autoComplete="off" value={mobileText} onChange={(event) => updateMobileText(event.target.value)} onCompositionStart={() => { mobileCompositionRef.current = true; }} onCompositionEnd={(event) => { mobileCompositionRef.current = false; syncMobileText(event.currentTarget.value); }} onSelect={(event) => { const input = event.currentTarget; if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) window.requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length)); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); sendMobileEnter(); } }} placeholder="Ввод в реальном времени" enterKeyHint="send" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+			<button type="button" className="remote-keyboard-enter" onClick={sendMobileEnter}>Enter</button>
+			<button type="button" className="remote-keyboard-close" onClick={() => setMobileKeyboardVisibility(false)} aria-label="Закрыть клавиатуру"><X size={17} /></button>
+		</div>}
 		{error && <div className="desktop-error">{error}</div>}
 	</section>;
 	return embedded ? workspace : <div className="remote-desktop-backdrop" onMouseDown={(event) => event.target === event.currentTarget && finishRemoteSession()}>{workspace}</div>;

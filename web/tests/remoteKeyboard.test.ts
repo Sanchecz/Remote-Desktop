@@ -5,6 +5,7 @@ import {
 	browserCodeToVirtualKey,
 	chunkRemoteText,
 	planRemoteKeyboardInput,
+	planRemoteTextReconciliation,
 } from "../src/remoteKeyboard.ts";
 
 const event = (overrides: Partial<{ code: string; key: string; ctrlKey: boolean; altKey: boolean; metaKey: boolean }> = {}) => ({
@@ -71,4 +72,17 @@ test("chunks pasted Unicode text by code points without splitting surrogate pair
 	const chunks = chunkRemoteText(source);
 	assert.deepEqual(chunks.map((chunk) => Array.from(chunk).length), [128, 2]);
 	assert.equal(chunks.join(""), source);
+});
+
+test("streams appended mobile IME text without waiting for Enter", () => {
+	assert.deepEqual(planRemoteTextReconciliation("Прив", "Привет"), { backspaces: 0, text: "ет" });
+});
+
+test("reconciles Android IME corrections using remote Backspace taps", () => {
+	assert.deepEqual(planRemoteTextReconciliation("превет", "привет"), { backspaces: 4, text: "ивет" });
+	assert.deepEqual(planRemoteTextReconciliation("hello", "hell"), { backspaces: 1, text: "" });
+});
+
+test("does not split emoji while reconciling mobile input", () => {
+	assert.deepEqual(planRemoteTextReconciliation("готов 👋", "готов ✅"), { backspaces: 1, text: "✅" });
 });
