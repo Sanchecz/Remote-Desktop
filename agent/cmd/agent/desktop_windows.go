@@ -194,6 +194,15 @@ type desktopInputSurface struct {
 }
 
 func (surface *desktopInputSurface) Sync() (bool, error) {
+	return surface.SyncBeforeSwitch(nil)
+}
+
+// SyncBeforeSwitch releases resources owned by the current desktop before
+// SetThreadDesktop attaches this thread to the newly visible one. DXGI output
+// duplication, screen DCs and compatible bitmaps pin their creating thread to
+// the old desktop; attempting SetThreadDesktop while they are still alive can
+// fail with ERROR_BUSY or leave capture returning the final old frame forever.
+func (surface *desktopInputSurface) SyncBeforeSwitch(beforeSwitch func()) (bool, error) {
 	surface.lastChecked = time.Now()
 	const maximumAllowed = 0x02000000
 	handle, _, callErr := procOpenInputDesktop.Call(0, 0, maximumAllowed)
@@ -209,8 +218,15 @@ func (surface *desktopInputSurface) Sync() (bool, error) {
 		procCloseDesktop.Call(handle)
 		return false, nil
 	}
+	if beforeSwitch != nil {
+		beforeSwitch()
+	}
 	if switched, _, switchErr := procSetThreadDesktop.Call(handle); switched == 0 {
 		procCloseDesktop.Call(handle)
+		// Retry on the next capture iteration. Keeping lastChecked at the normal
+		// cadence made a failed secure-desktop transition look frozen for another
+		// half second even after all old capture resources had been released.
+		surface.lastChecked = time.Time{}
 		return false, fmt.Errorf("switch capture to Windows desktop %q: %w", name, switchErr)
 	}
 	previous := surface.handle
@@ -228,10 +244,14 @@ func (surface *desktopInputSurface) Sync() (bool, error) {
 // still fast enough to follow lock/UAC desktop transitions without a visible
 // delay, while leaving the full 16.7 ms budget available to explicit 60 FPS.
 func (surface *desktopInputSurface) SyncIfStale(interval time.Duration) (bool, error) {
+	return surface.SyncIfStaleBeforeSwitch(interval, nil)
+}
+
+func (surface *desktopInputSurface) SyncIfStaleBeforeSwitch(interval time.Duration, beforeSwitch func()) (bool, error) {
 	if surface.handle != 0 && time.Since(surface.lastChecked) < interval {
 		return false, nil
 	}
-	return surface.Sync()
+	return surface.SyncBeforeSwitch(beforeSwitch)
 }
 
 func windowsDesktopObjectName(handle uintptr) (string, error) {
@@ -382,6 +402,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 	lastSessionID := ""
 	lastInputAt := time.Time{}
 	lastCapture := desktopCapture{}
+	lastFrameEnqueuedAt := time.Time{}
 	nextFrameAt := time.Time{}
 	currentOffer := desktopSessionOffer{}
 	offerActive := false
@@ -480,6 +501,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			frameSequence = 0
 			drainDesktopFrameUploads(frameUploads)
 			lastCapture = desktopCapture{}
+			lastFrameEnqueuedAt = time.Time{}
 			latestCapture.Store(desktopCapture{})
 			nextFrameAt = time.Time{}
 			autoCadence.Reset()
@@ -602,15 +624,21 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			// its object name can consume most of one 16.7 ms frame on virtual display
 			// drivers. A 500 ms cadence removes that periodic 60 FPS hitch while input
 			// remains responsive and the capture surface follows shortly afterwards.
-			desktopChanged, desktopErr := inputSurface.SyncIfStale(500 * time.Millisecond)
+			desktopChanged, desktopErr := inputSurface.SyncIfStaleBeforeSwitch(500*time.Millisecond, func() {
+				// Close every DXGI/GDI object before SetThreadDesktop. Windows does
+				// not permit a thread with desktop-owned objects to switch reliably.
+				capturer.Close()
+				lastCapture = desktopCapture{}
+				lastFrameEnqueuedAt = time.Time{}
+				latestCapture.Store(desktopCapture{})
+				nextFrameAt = time.Time{}
+			})
 			if desktopErr != nil {
 				captureErr = desktopErr
 			} else if desktopChanged {
-				// DXGI duplication and GDI DCs belong to the previous desktop. Rebuild
-				// them exactly once when Windows locks, unlocks or shows UAC.
-				capturer.Close()
-				lastCapture = desktopCapture{}
-				latestCapture.Store(desktopCapture{})
+				// The transition callback already released the old surface. Capture
+				// the newly visible Windows desktop immediately in this iteration.
+				nextFrameAt = time.Now()
 			}
 			// Auto begins with the same 30 FPS profile as explicit 30. It changes
 			// geometry only after the cadence controller has accumulated sustained
@@ -620,7 +648,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			capture := desktopCapture{}
 			if captureErr == nil {
 				interactive := offer.ControlEnabled && time.Since(lastInputAt) < 350*time.Millisecond
-				capture, captureErr = capturer.CaptureJPEG(captureProfileFPS, interactive, offer.CursorVisible)
+				capture, captureErr = capturer.CaptureJPEG(captureProfileFPS, interactive, offer.CursorVisible, desktopRequiresSecureCapture(inputSurface.name))
 			}
 			if captureErr == nil {
 				// Desktop Duplication reports when the surface did not change. Do not
@@ -631,6 +659,18 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 					inputCapture := capture
 					inputCapture.JPEG = nil
 					latestCapture.Store(inputCapture)
+					// The server intentionally expires video frames older than 15 seconds.
+					// Credential and lock screens can remain pixel-identical much longer,
+					// so periodically republish the immutable JPEG as a keyframe. This is
+					// also an end-to-end liveness proof for the viewer without spending
+					// 15/30/60 duplicate uploads per second.
+					if desktopShouldPublishHeartbeat(lastFrameEnqueuedAt, time.Now()) {
+						heartbeat := capture
+						heartbeat.JPEG = append([]byte(nil), capture.JPEG...)
+						frameSequence++
+						enqueueLatestDesktopFrame(frameUploads, desktopFrameUpload{access: access, sessionID: offer.ID, sequence: frameSequence, capture: heartbeat})
+						lastFrameEnqueuedAt = time.Now()
+					}
 				} else {
 					uploadCapture := capture
 					// desktopCapturer reuses its TurboJPEG buffer. The uploader runs in
@@ -640,6 +680,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 					uploadCapture.JPEG = append([]byte(nil), capture.JPEG...)
 					frameSequence++
 					enqueueLatestDesktopFrame(frameUploads, desktopFrameUpload{access: access, sessionID: offer.ID, sequence: frameSequence, capture: uploadCapture})
+					lastFrameEnqueuedAt = time.Now()
 					lastCapture = capture
 					inputCapture := capture
 					inputCapture.JPEG = nil
@@ -1347,7 +1388,7 @@ func (capturer *desktopCapturer) ensure(targetFPS int) error {
 	return nil
 }
 
-func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cursorVisible bool) (desktopCapture, error) {
+func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cursorVisible bool, secureDesktop bool) (desktopCapture, error) {
 	if err := capturer.ensure(targetFPS); err != nil {
 		return desktopCapture{}, err
 	}
@@ -1361,6 +1402,13 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 	copyMillis := 0
 	scaleMillis := 0
 	captureBackend := "dxgi"
+	if secureDesktop {
+		// Desktop Duplication is designed for the composited user desktop. On
+		// winlogon/CredUI/UAC it can successfully open yet keep returning the last
+		// user-desktop texture. GDI is slower but is the supported fresh source for
+		// the protected input desktop and avoids a frozen credential prompt.
+		captureBackend = "gdi-secure"
+	}
 	if interactive {
 		captureBackend += "-motion"
 	}
@@ -1377,7 +1425,9 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 	// Desktop Duplication operates at the native output resolution. The former
 	// <=1920 guard accidentally forced every high-DPI/4K display through GDI,
 	// even when the low-latency DXGI path was available.
-	fastResult = capturer.fast.CaptureBGRA(framePixels, frameWidth, frameHeight)
+	if !secureDesktop {
+		fastResult = capturer.fast.CaptureBGRA(framePixels, frameWidth, frameHeight)
+	}
 	copyMillis = int(time.Since(copyStartedAt).Milliseconds())
 	if fastResult == 0 && len(capturer.lastJPEG) > 0 &&
 		(!cursorVisible || cursor == capturer.lastCursor) &&
@@ -1406,8 +1456,10 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 		if interactive {
 			captureBackend += "-motion"
 		}
-	} else if fastResult < 0 || (fastResult == 0 && len(capturer.lastJPEG) == 0) {
-		captureBackend = capturer.fast.BackendDetail()
+	} else if secureDesktop || fastResult < 0 || (fastResult == 0 && len(capturer.lastJPEG) == 0) {
+		if !secureDesktop {
+			captureBackend = capturer.fast.BackendDetail()
+		}
 		framePixels = capturer.pixels
 		frameWidth, frameHeight = capturer.width, capturer.height
 		const sourceCopy = 0x00CC0020 // SRCCOPY
