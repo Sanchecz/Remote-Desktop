@@ -61,6 +61,7 @@ import {
 } from "lucide-react";
 import { chunkRemoteText, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
 import { advanceRemotePinch, clampRemoteCamera, classifyRemoteTouchGesture, isRemoteTwoFingerTap } from "./remoteCamera";
+import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
 
 type User = {
   id: string;
@@ -2444,17 +2445,45 @@ function CodexIntegrationPanel({ currentUser, csrf }: { currentUser: User; csrf:
     return () => window.clearInterval(timer);
   }, [canReviewActions, load]);
 
+  async function requestIntegrationToken() {
+    return api<{ id: string; token: string; expiresAt: string }>("/api/integration-tokens", { method: "POST", body: JSON.stringify({ name: tokenName, expiresDays }) }, csrf);
+  }
+
   async function createToken(event: FormEvent) {
     event.preventDefault();
     setWorking("create-token"); setError(""); setMessage(""); setNewToken("");
     try {
-      const result = await api<{ token: string }>("/api/integration-tokens", { method: "POST", body: JSON.stringify({ name: tokenName, expiresDays }) }, csrf);
+      const result = await requestIntegrationToken();
       setNewToken(result.token);
-      setMessage("Токен создан. Он показывается только сейчас — сохраните его в настройке MCP на доверенном компьютере.");
+      setMessage("Токен создан. Для ручной настройки он показывается только сейчас.");
       await load(true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось создать токен интеграции");
     } finally { setWorking(""); }
+  }
+
+  async function downloadReadyWindowsSetup() {
+    setWorking("ready-windows"); setError(""); setMessage(""); setNewToken("");
+    try {
+      const result = await requestIntegrationToken();
+      const installer = buildWindowsMCPInstaller(window.location.origin, result.token);
+      downloadText("RemoteIt-AI-Administrator-Setup.cmd", installer);
+      setNewToken(result.token);
+      setMessage("Готовое персональное подключение скачано. Запустите файл двойным кликом на компьютере с Codex — команды и токен вставлять не нужно.");
+      await load(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось подготовить готовое подключение AI-администратора");
+    } finally { setWorking(""); }
+  }
+
+  function downloadCodexInstruction() {
+    try {
+      downloadText("RemoteIt-инструкция-для-Codex.txt", buildCodexOperatorInstruction(window.location.origin));
+      setError("");
+      setMessage("Инструкция для другого Codex скачана. В ней нет токена или пароля.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось подготовить инструкцию");
+    }
   }
 
   async function revokeToken(id: string) {
@@ -2489,22 +2518,24 @@ function CodexIntegrationPanel({ currentUser, csrf }: { currentUser: User; csrf:
   }
 
   const pendingCount = actions.filter((item) => item.status === "awaiting_approval").length;
-  const setupCommand = newToken ? `codex mcp add remoteit --env REMOTEIT_URL="${window.location.origin}" --env REMOTEIT_INTEGRATION_TOKEN="${newToken}" -- "C:\\RemoteIt\\RemoteIt-MCP.exe"` : "";
+  const setupCommand = newToken ? `codex mcp add remoteit --env REMOTEIT_URL="${window.location.origin}" --env REMOTEIT_INTEGRATION_TOKEN="${newToken}" -- "%LOCALAPPDATA%\\RemoteIt\\MCP\\RemoteIt-MCP.exe"` : "";
 
   if (!canManageIntegrations && !canReviewActions) return null;
   return <section className="codex-integration-card">
     <div className="codex-integration-head">
       <span className="codex-mark"><Sparkles size={21} /></span>
-      <div><span className="eyebrow">УПРАВЛЯЕМЫЕ ДЕЙСТВИЯ</span><h2>Codex и RemoteIt</h2><p>Codex на доверенном компьютере владельца или администратора видит разрешённые устройства и создаёт подписанные задания. Изменяющие действия выполняются только после проверки в панели.</p></div>
-      <div className="codex-security-badge"><ShieldCheck size={17} /><span>Подпись Ed25519<strong>критические действия — только после подтверждения владельца</strong></span></div>
+      <div><span className="eyebrow">AI И АВТОМАТИЗАЦИЯ</span><h2>AI-администратор</h2><p>Подключите Codex одним готовым файлом. Он сможет находить устройства по Remote ID, проводить диагностику и создавать подписанные административные задания.</p></div>
+      <div className="codex-security-badge"><ShieldCheck size={17} /><span>Только владелец и администраторы<strong>критические действия подтверждает владелец</strong></span></div>
     </div>
     {(error || message) && <div className={error ? "panel-error codex-feedback" : "settings-success codex-feedback"}>{error || message}</div>}
     <div className="codex-integration-grid">
       {canManageIntegrations && <article className="codex-token-panel">
-        <div className="codex-section-head"><div><h3>Доверенные подключения</h3><p>Личный токен доступен только владельцу и администраторам, действует для MCP-инструментов RemoteIt и не заменяет вход в панель.</p></div><span>{tokens.filter((item) => !item.revokedAt && new Date(item.expiresAt).getTime() > Date.now()).length} активных</span></div>
-        <form className="codex-token-form" onSubmit={createToken}><label><span>Название</span><input value={tokenName} onChange={(event) => setTokenName(event.target.value)} maxLength={100} required /></label><label><span>Срок, дней</span><input type="number" min={1} max={365} value={expiresDays} onChange={(event) => setExpiresDays(Number(event.target.value))} required /></label><button className="primary-button" disabled={working === "create-token"}>{working === "create-token" ? <RefreshCw size={16} className="spin" /> : <Plus size={16} />} Создать подключение</button></form>
-        {newToken && <div className="codex-new-token"><div><span>ПОКАЗЫВАЕТСЯ ОДИН РАЗ</span><code>{newToken}</code></div><button className="secondary-button" onClick={() => void copyToken()}><Copy size={15} /> Копировать</button><details><summary>Команда подключения Codex</summary><code>{setupCommand}</code><p>Сначала скачайте RemoteIt MCP, поместите файл в <b>C:\RemoteIt</b>, затем выполните команду на компьютере с Codex.</p></details></div>}
-        <div className="codex-downloads"><a href="/downloads/RemoteIt-MCP.exe" download><Download size={16} /> RemoteIt MCP для Windows</a><a href="/downloads/remoteit-mcp-linux-amd64" download><Download size={16} /> RemoteIt MCP для Linux</a><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> Контрольные суммы</a></div>
+        <div className="codex-section-head"><div><h3>Подключить Codex</h3><p>Персональный установщик сам скачает MCP, проверит SHA-256 и зарегистрирует RemoteIt. Копировать команды или токен не потребуется.</p></div><span>{tokens.filter((item) => !item.revokedAt && new Date(item.expiresAt).getTime() > Date.now()).length} активных</span></div>
+        <div className="codex-ready-setup"><span className="codex-ready-icon"><Sparkles size={22} /></span><div><strong>Готовое подключение для Windows</strong><small>Один файл · без ручной вставки · удаляет себя после успешной установки</small></div><button className="primary-button" type="button" disabled={Boolean(working)} onClick={() => void downloadReadyWindowsSetup()}>{working === "ready-windows" ? <RefreshCw size={16} className="spin" /> : <Download size={16} />} Скачать и подключить</button></div>
+        <div className="codex-setup-options"><label><span>Название подключения</span><input value={tokenName} onChange={(event) => setTokenName(event.target.value)} maxLength={100} required /></label><label><span>Срок доступа, дней</span><input type="number" min={1} max={365} value={expiresDays} onChange={(event) => setExpiresDays(Number(event.target.value))} required /></label></div>
+        <div className="codex-guide-actions"><button className="secondary-button" type="button" onClick={downloadCodexInstruction}><FileCode2 size={15} /> Инструкция для другого Codex</button><a className="secondary-button" href="/downloads/RemoteIt-MCP.exe" download><Download size={15} /> MCP отдельно</a><a className="secondary-button" href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={15} /> SHA-256</a></div>
+        <details className="codex-manual-setup"><summary>Ручная настройка и Linux</summary><form className="codex-token-form" onSubmit={createToken}><label><span>Название</span><input value={tokenName} onChange={(event) => setTokenName(event.target.value)} maxLength={100} required /></label><label><span>Срок, дней</span><input type="number" min={1} max={365} value={expiresDays} onChange={(event) => setExpiresDays(Number(event.target.value))} required /></label><button className="primary-button" disabled={working === "create-token"}>{working === "create-token" ? <RefreshCw size={16} className="spin" /> : <Plus size={16} />} Создать токен</button></form><div className="codex-downloads"><a href="/downloads/remoteit-mcp-linux-amd64" download><Download size={16} /> MCP для Linux</a></div></details>
+        {newToken && <div className="codex-new-token"><div><span>РЕЗЕРВНАЯ РУЧНАЯ НАСТРОЙКА · ПОКАЗЫВАЕТСЯ ОДИН РАЗ</span><code>{newToken}</code></div><button className="secondary-button" onClick={() => void copyToken()}><Copy size={15} /> Копировать</button><details><summary>Показать команду</summary><code>{setupCommand}</code><p>Используйте только если готовый установщик не смог зарегистрировать MCP автоматически.</p></details></div>}
         <div className="integration-token-list">{loading && tokens.length === 0 ? <PanelLoader /> : tokens.map((item) => { const active = !item.revokedAt && new Date(item.expiresAt).getTime() > Date.now(); return <div className="integration-token-row" key={item.id}><span className={`integration-state ${active ? "active" : "revoked"}`}><Link2 size={15} /></span><div><strong>{item.name}</strong><small>до {new Date(item.expiresAt).toLocaleString("ru-RU")} · {item.lastUsedAt ? `использован ${formatRelative(item.lastUsedAt)}` : "ещё не использован"}</small></div><span className={`action-status ${active ? "success" : "muted"}`}>{active ? "Активен" : "Отозван"}</span>{active && <button className="danger-button compact-action" disabled={working === item.id} onClick={() => void revokeToken(item.id)}><Ban size={13} /> Отозвать</button>}</div>; })}</div>
       </article>}
       {canReviewActions && <article className="codex-actions-panel">
@@ -2578,7 +2609,7 @@ function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User
       <article className="settings-card"><div className="settings-card-head"><span className="stat-icon green"><KeyRound size={20} /></span><div><h2>Изменить пароль</h2><p>От 4 символов, без обязательных спецсимволов</p></div></div><form className="settings-form" onSubmit={changePassword}><label><span>Текущий пароль</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label><span>Новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label><label><span>Повторите новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label><button className="primary-button" disabled={loading}>{loading ? <RefreshCw size={17} className="spin" /> : <ShieldCheck size={17} />} Сохранить пароль</button></form></article>
       <article className="settings-card appearance-card"><div className="settings-card-head"><span className="stat-icon violet"><Palette size={20} /></span><div><h2>Внешний вид</h2><p>Белая тема используется по умолчанию</p></div></div><div className="theme-setting"><span>Оформление панели</span><ThemeSwitcher theme={theme} onChange={onTheme} /></div><small className="appearance-note">Выбор сохраняется только для этого браузера и не меняет тему у других администраторов.</small></article>
       <article className="settings-card sessions-card"><div className="settings-card-head"><span className="stat-icon violet"><Activity size={20} /></span><div><h2>Активные сессии</h2><p>{sessions.length} входов, срок каждой — 12 часов</p></div><button className="icon-button" onClick={() => void loadSessions()} aria-label="Обновить сессии"><RefreshCw size={17} className={sessionsLoading ? "spin" : ""} /></button></div><div className="sessions-list">{sessionsLoading && sessions.length === 0 ? <div className="session-placeholder">Загрузка…</div> : sessions.map((session) => <div className="session-row" key={session.id}><span className={`session-state ${session.current ? "current" : ""}`}><Monitor size={17} /></span><div><strong>{session.current ? "Текущая сессия" : session.userAgent || "Неизвестное устройство"}</strong><small>{session.ip || "IP неизвестен"} · активность {formatRelative(session.lastUsedAt)}</small></div>{session.current ? <span className="current-badge">эта сессия</span> : <button className="danger-button compact-action" onClick={() => void revokeSession(session.id)}><Ban size={14} /> Завершить</button>}</div>)}</div></article>
-      <article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android APK</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a><a href="/downloads/RemoteIt-MCP.exe" download><Sparkles size={16} /> MCP для Codex</a><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a></div></article>
+      <article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android APK</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a>{(currentUser.role === "owner" || currentUser.role === "admin") && <><a href="/downloads/RemoteIt-MCP.exe" download><Sparkles size={16} /> MCP для Codex</a><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a></>}</div></article>
 	  <article className="settings-card creator-card"><div className="settings-card-head"><span className="stat-icon green"><Send size={20} /></span><div><h2>О RemoteIt</h2><p>Частная платформа удалённого администрирования</p></div></div><a className="creator-link" href="https://t.me/Sanchcz" target="_blank" rel="noreferrer"><span><small>Создатель</small><strong>@Sanchcz</strong></span><span>Telegram</span></a></article>
     </section>
   </>;

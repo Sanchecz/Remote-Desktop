@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
-    "test": "pnpm run test:keyboard && pnpm run test:camera",
+    "test": "pnpm run test:keyboard && pnpm run test:camera && pnpm run test:codex",
     "test:keyboard": "node --experimental-strip-types --test tests/remoteKeyboard.test.ts",
     "test:camera": "node --experimental-strip-types --test tests/remoteCamera.test.ts",
+    "test:codex": "node --experimental-strip-types --test tests/codexSetup.test.ts",
     "check": "pnpm run test && pnpm run build"
   },
   "dependencies": {
