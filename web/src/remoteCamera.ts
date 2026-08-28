@@ -44,14 +44,19 @@ export function advanceRemotePinch(camera: RemoteCamera, previousMidpoint: Point
 
 export function clampRemoteCamera(camera: RemoteCamera, content: Point, viewport: Point, overscan = 32): RemoteCamera {
 	const zoom = Math.max(1, Math.min(4, camera.zoom));
-	// A fitted desktop is commonly letterboxed on a portrait phone. The old
-	// bounds collapsed that empty axis to `overscan`, so an otherwise correct
-	// off-centre pinch was immediately pulled back towards the viewport centre.
-	// The absolute half-difference lets the fitted frame travel through its
-	// letterbox as it grows, while retaining the same finite boundary once the
-	// zoomed frame becomes larger than the viewport.
-	const maxPanX = Math.abs(Math.max(1, content.x) * zoom - Math.max(1, viewport.x)) / 2 + overscan;
-	const maxPanY = Math.abs(Math.max(1, content.y) * zoom - Math.max(1, viewport.y)) / 2 + overscan;
+	// At 100% the fitted desktop stays centred. Once the administrator zooms in,
+	// allow any chosen edge (including the bottom of a letterboxed portrait
+	// viewport) to travel beneath the fingers while keeping a small, recoverable
+	// piece of the frame visible. The previous half-difference clamp pulled a
+	// valid bottom-edge pinch back towards the viewport centre.
+	const axisLimit = (contentLength: number, viewportLength: number) => {
+		if (zoom <= 1.0001) return 0;
+		const scaled = Math.max(1, contentLength) * zoom;
+		const visibleGrip = Math.max(48, Math.min(96, scaled / 3, Math.max(1, viewportLength) / 3));
+		return Math.max(0, (scaled + Math.max(1, viewportLength)) / 2 - visibleGrip) + overscan;
+	};
+	const maxPanX = axisLimit(content.x, viewport.x);
+	const maxPanY = axisLimit(content.y, viewport.y);
 	return {
 		zoom,
 		panX: Math.max(-maxPanX, Math.min(maxPanX, camera.panX)),

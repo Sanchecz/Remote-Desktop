@@ -29,8 +29,8 @@ test("off-centre pinch does not jump its anchor to the viewport centre", () => {
 test("camera boundaries permit useful panning but prevent losing the whole desktop", () => {
 	const clamped = clampRemoteCamera({ zoom: 8, panX: 99_000, panY: -99_000 }, { x: 960, y: 540 }, { x: 960, y: 540 });
 	assert.equal(clamped.zoom, 4);
-	assert.equal(clamped.panX, 1472);
-	assert.equal(clamped.panY, -842);
+	assert.equal(clamped.panX, 2336);
+	assert.equal(clamped.panY, -1286);
 });
 
 test("successive pinch samples preserve their moving midpoint without recentering", () => {
@@ -63,6 +63,21 @@ test("portrait letterboxing does not force an off-centre pinch back to the middl
 
 	assert.ok(Math.abs(pointAfterClamp.x - anchor.x) < 1e-9);
 	assert.ok(Math.abs(pointAfterClamp.y - anchor.y) < 1e-9);
+});
+
+test("portrait pinch can keep the lower desktop edge under the fingers", () => {
+	const content = { x: 390, y: 219 };
+	const viewport = { x: 390, y: 760 };
+	const center = { x: viewport.x / 2, y: viewport.y / 2 };
+	const fingers = { x: 250, y: 675 };
+	const anchor = pointUnderScreenCoordinate(fingers, center, { zoom: 1, panX: 0, panY: 0 });
+	const zoomed = advanceRemotePinch({ zoom: 1, panX: 0, panY: 0 }, fingers, fingers, center, 100, 230);
+	const clamped = clampRemoteCamera(zoomed, content, viewport);
+	const pointAfterClamp = pointUnderScreenCoordinate(fingers, center, clamped);
+
+	assert.ok(Math.abs(pointAfterClamp.x - anchor.x) < 1e-9);
+	assert.ok(Math.abs(pointAfterClamp.y - anchor.y) < 1e-9);
+	assert.ok(clamped.panY < -100, "bottom-focused pinch must not be recentered");
 });
 
 test("mobile trackpad distinguishes zoom, scroll and two-finger right click", () => {

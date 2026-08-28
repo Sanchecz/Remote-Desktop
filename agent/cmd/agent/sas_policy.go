@@ -20,3 +20,15 @@ func desiredSoftwareSASGeneration(current uint64, exists bool) (uint32, bool, er
 func windowsSASEventName(kind string, sessionID uint32) string {
 	return fmt.Sprintf(`Global\RemoteIt-SAS-%s-%d`, kind, sessionID)
 }
+
+// SendSAS receives TRUE when the caller is executing as the interactive user.
+// The RemoteIt service deliberately impersonates the token of the target
+// Windows session before calling sas.dll, so that call must use the AsUser
+// branch. Keeping the choice outside the Windows-only file makes the contract
+// regression-testable on every build host.
+func windowsSASAsUserArgument(impersonatingInteractiveUser bool) uintptr {
+	if impersonatingInteractiveUser {
+		return 1
+	}
+	return 0
+}

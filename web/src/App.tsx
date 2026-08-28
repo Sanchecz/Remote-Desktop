@@ -219,7 +219,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.7";
+const LATEST_AGENT_VERSION = "1.0.8";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1194,12 +1194,19 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
   const [starting, setStarting] = useState(true);
 	const [latencyMs, setLatencyMs] = useState(0);
 	const [frameFPS, setFrameFPS] = useState(0);
-	// The primary pointer, rather than the mere presence of a touchscreen,
-	// distinguishes a phone/tablet from a Windows laptop with touch support.
-	// Hybrid PCs must retain the normal local mouse cursor and absolute input.
-	const [coarsePointerClient] = useState(() => typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches && !window.matchMedia("(any-pointer: fine)").matches);
+	// Android WebView sometimes advertises an emulated fine pointer even though
+	// the administrator is holding a phone. Trust the native bridge / mobile UA
+	// first, then fall back to the pointer media queries. A Windows hybrid laptop
+	// still keeps normal desktop controls because it has neither mobile marker.
+	const [coarsePointerClient] = useState(() => {
+		if (typeof window === "undefined") return false;
+		const androidBridge = Boolean((window as unknown as { RemoteItAndroid?: unknown }).RemoteItAndroid);
+		const mobileRuntime = /RemoteIt-Android|Android|iPhone|iPad|Mobile/i.test(window.navigator.userAgent);
+		return androidBridge || mobileRuntime || (window.matchMedia("(pointer: coarse)").matches && !window.matchMedia("(any-pointer: fine)").matches);
+	});
 	const [keyboardOpen, setKeyboardOpen] = useState(false);
 	const [mobileText, setMobileText] = useState("");
+	const [sasFeedback, setSASFeedback] = useState("");
 	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
 	const [dragLock, setDragLock] = useState(false);
 	// Phones start with an unobstructed full-screen canvas and a small floating
@@ -1220,8 +1227,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const viewportRef = useRef<HTMLDivElement>(null);
 	const mobileKeyboardRef = useRef<HTMLInputElement>(null);
 	const mobileTextSyncedRef = useRef("");
-	const mobileCompositionRef = useRef(false);
 	const keyboardOpenRef = useRef(false);
+	const sasFeedbackTimer = useRef(0);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
   const lastPointerSent = useRef(0);
   const trackpadCursor = useRef({ x: 0, y: 0, ready: false });
@@ -1256,6 +1263,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	useEffect(() => { keyboardOpenRef.current = keyboardOpen; }, [keyboardOpen]);
 
 	useEffect(() => () => window.cancelAnimationFrame(cameraAnimationFrame.current), []);
+	useEffect(() => () => window.clearTimeout(sasFeedbackTimer.current), []);
 
 	function scheduleCamera(next: { zoom: number; panX: number; panY: number }) {
 		pendingCameraRef.current = clampCamera(next);
@@ -1323,6 +1331,17 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			localCursorRef.current.style.top = "50%";
 		}
 	}, [status?.frameWidth, status?.frameHeight]);
+
+	useEffect(() => {
+		if (!mobileTrackpadMode) return;
+		const image = frameImageRef.current;
+		if (!image) return;
+		const size = frameSize(image);
+		if (!trackpadCursor.current.ready) {
+			trackpadCursor.current = { x: Math.round(size.width / 2), y: Math.round(size.height / 2), ready: true };
+		}
+		window.requestAnimationFrame(() => positionLocalCursor(trackpadCursor.current, size));
+	}, [mobileTrackpadMode, frameURL, renderedFrameSize.width, renderedFrameSize.height]);
 
 	useEffect(() => {
 		if (status?.controlEnabled) controlEnabledRef.current = true;
@@ -1930,7 +1949,12 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		// Ctrl+Alt+Delete is a Windows Secure Attention Sequence. It cannot be
 		// synthesized with ordinary key packets, so the privileged desktop worker
 		// handles this dedicated event through the Windows SAS interface.
+		releaseRemoteModifiers();
+		setError("");
 		sendInput({ type: "sas" });
+		setSASFeedback("Ctrl+Alt+Delete передан системной службе Windows");
+		window.clearTimeout(sasFeedbackTimer.current);
+		sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 3_500);
 	}
 
 	function sendPointerTap(button: "left" | "right") {
@@ -1945,6 +1969,19 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const next = !dragLock;
 		sendInput({ type: "pointer", action: next ? "down" : "up", button: "left", x: position.x, y: position.y });
 		setDragLock(next);
+	}
+
+	function selectPointerMode(next: "direct" | "trackpad") {
+		if (next === pointerMode) return;
+		if (next === "direct" && dragLock) toggleDragLock();
+		setPointerMode(next);
+		if (next !== "trackpad") return;
+		window.requestAnimationFrame(() => {
+			const image = frameImageRef.current;
+			if (!image) return;
+			const size = ensureTrackpadCursor(image);
+			positionLocalCursor(trackpadCursor.current, size);
+		});
 	}
 
 	function finishRemoteSession() {
@@ -1973,7 +2010,6 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		// its local mirror without sending Backspace to the remote computer.
 		setMobileText("");
 		mobileTextSyncedRef.current = "";
-		if (coarsePointerClient) setMobileDockHidden(false);
 		const bridge = (window as unknown as { RemoteItAndroid?: { hideKeyboard?: () => void } }).RemoteItAndroid;
 		bridge?.hideKeyboard?.();
 		// Android reports its full viewport a moment after the IME closes. Refresh
@@ -1994,7 +2030,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	function updateMobileText(next: string) {
 		setMobileText(next);
-		if (!mobileCompositionRef.current) syncMobileText(next);
+		// Android IMEs commonly replace the composing suffix and do not emit a
+		// dependable key event for Backspace. Reconcile every native input update;
+		// the operation is idempotent, including the final composition event.
+		syncMobileText(next);
 	}
 
 	function sendMobileEnter() {
@@ -2071,20 +2110,21 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			</> : <div className="remote-screen-wait"><ScreenShare size={42} /><strong>{starting ? "Создаём сеанс…" : "Ожидаем первый кадр"}</strong><span>На удалённом компьютере должен быть запущен RemoteIt Agent 0.9.26 или новее.</span></div>}
 		</div>
 		{coarsePointerClient && controlsCollapsed && !mobileDockHidden && <nav className="remote-mobile-dock" aria-label="Быстрое управление удалённым компьютером">
-			<button type="button" className={pointerMode === "trackpad" ? "active" : ""} aria-pressed={pointerMode === "trackpad"} onClick={() => setPointerMode("trackpad")}><MousePointer2 size={18} /><span>Курсор</span></button>
-			<button type="button" className={pointerMode === "direct" ? "active" : ""} aria-pressed={pointerMode === "direct"} onClick={() => { if (dragLock) toggleDragLock(); setPointerMode("direct"); }}><Hand size={18} /><span>Касание</span></button>
+			<button type="button" className={pointerMode === "trackpad" ? "active" : ""} aria-pressed={pointerMode === "trackpad"} onClick={() => selectPointerMode("trackpad")}><MousePointer2 size={18} /><span>Курсор</span></button>
+			<button type="button" className={pointerMode === "direct" ? "active" : ""} aria-pressed={pointerMode === "direct"} onClick={() => selectPointerMode("direct")}><Hand size={18} /><span>Касание</span></button>
 			<button type="button" onClick={() => setMobileKeyboardVisibility(true)}><Keyboard size={18} /><span>Клавиатура</span></button>
 			<button type="button" onClick={() => { setMobileDockHidden(false); setControlsCollapsed(false); }}><SlidersHorizontal size={18} /><span>Ещё</span></button>
 			<button type="button" className="dock-hide" onClick={() => setMobileDockHidden(true)} aria-label="Скрыть все элементы управления"><X size={17} /></button>
 		</nav>}
 		{coarsePointerClient && controlsCollapsed && mobileDockHidden && <button type="button" className="remote-mobile-dock-reveal" onClick={() => setMobileDockHidden(false)} aria-label="Показать управление"><SlidersHorizontal size={18} /></button>}
+		{coarsePointerClient && <button type="button" className={`remote-mobile-keyboard-fab ${keyboardOpen ? "active" : ""} ${controlsCollapsed && !mobileDockHidden ? "dock-visible" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} aria-label={keyboardOpen ? "Закрыть клавиатуру" : "Открыть клавиатуру"} title={keyboardOpen ? "Закрыть клавиатуру" : "Открыть клавиатуру"}><Keyboard size={20} /></button>}
 		{coarsePointerClient && !controlsCollapsed && <button type="button" className="remote-controls-scrim" aria-label="Скрыть панель управления" onClick={toggleControls} />}
 		<footer className="remote-session-footer">
 			<div className="remote-session-tools">
 				<span><MousePointer2 size={15} /> {pointerMode === "direct" ? "Касание — левый клик · удержание — правый" : "Ведите пальцем — перемещайте курсор; короткое касание — клик"}</span>
 				<div className="remote-pointer-modes">
-					<button type="button" className={`remote-tool-button ${pointerMode === "trackpad" ? "active" : ""}`} aria-pressed={pointerMode === "trackpad"} onClick={() => setPointerMode("trackpad")}><MousePointer2 size={16} /> Курсор</button>
-					<button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => { if (dragLock) toggleDragLock(); setPointerMode("direct"); }}><Hand size={16} /> Касание</button>
+					<button type="button" className={`remote-tool-button ${pointerMode === "trackpad" ? "active" : ""}`} aria-pressed={pointerMode === "trackpad"} onClick={() => selectPointerMode("trackpad")}><MousePointer2 size={16} /> Курсор</button>
+					<button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => selectPointerMode("direct")}><Hand size={16} /> Касание</button>
 				</div>
 				<button type="button" className="remote-tool-button" onClick={() => sendPointerTap("right")}><MousePointer2 size={15} /> ПКМ</button>
 				<button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)}><Keyboard size={15} /> Клавиатура</button>
@@ -2098,10 +2138,11 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button>
 		</footer>
 		{keyboardOpen && <div className="remote-mobile-keyboard" role="group" aria-label="Ввод на удалённом компьютере">
-			<input ref={mobileKeyboardRef} name="remoteit-live-input" autoComplete="off" value={mobileText} onChange={(event) => updateMobileText(event.target.value)} onCompositionStart={() => { mobileCompositionRef.current = true; }} onCompositionEnd={(event) => { mobileCompositionRef.current = false; syncMobileText(event.currentTarget.value); }} onSelect={(event) => { const input = event.currentTarget; if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) window.requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length)); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); sendMobileEnter(); } }} placeholder="Ввод в реальном времени" enterKeyHint="send" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+			<input ref={mobileKeyboardRef} name="remoteit-live-input" autoComplete="off" value={mobileText} onInput={(event) => updateMobileText(event.currentTarget.value)} onCompositionEnd={(event) => updateMobileText(event.currentTarget.value)} onSelect={(event) => { const input = event.currentTarget; if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) window.requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length)); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); sendMobileEnter(); } }} placeholder="Ввод в реальном времени" enterKeyHint="send" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
 			<button type="button" className="remote-keyboard-enter" onClick={sendMobileEnter}>Enter</button>
 			<button type="button" className="remote-keyboard-close" onClick={() => setMobileKeyboardVisibility(false)} aria-label="Закрыть клавиатуру"><X size={17} /></button>
 		</div>}
+		{sasFeedback && <div className="desktop-command-feedback" role="status"><CheckCircle2 size={16} />{sasFeedback}</div>}
 		{error && <div className="desktop-error">{error}</div>}
 	</section>;
 	return embedded ? workspace : <div className="remote-desktop-backdrop" onMouseDown={(event) => event.target === event.currentTarget && finishRemoteSession()}>{workspace}</div>;

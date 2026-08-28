@@ -206,7 +206,11 @@ func sendWindowsSASFromService(sessionID uint32) error {
 		if err := procSendSAS.Find(); err != nil {
 			return fmt.Errorf("Windows SendSAS export is unavailable: %w", err)
 		}
-		procSendSAS.Call(0)
+		// WTSQueryUserToken + SetThreadToken made this service thread execute as
+		// the target interactive user. The documented SendSAS contract therefore
+		// requires AsUser=TRUE; FALSE addresses the service session and can return
+		// without opening Winlogon in the user's desktop.
+		procSendSAS.Call(windowsSASAsUserArgument(true))
 		return nil
 	})
 }

@@ -37,3 +37,12 @@ func TestWindowsSASEventNameIncludesSessionAndKind(t *testing.T) {
 		t.Fatalf("unexpected event name %q", got)
 	}
 }
+
+func TestWindowsSASUsesAsUserAfterSessionImpersonation(t *testing.T) {
+	if got := windowsSASAsUserArgument(true); got != 1 {
+		t.Fatalf("impersonated SendSAS argument = %d, want TRUE (1)", got)
+	}
+	if got := windowsSASAsUserArgument(false); got != 0 {
+		t.Fatalf("service SendSAS argument = %d, want FALSE (0)", got)
+	}
+}
