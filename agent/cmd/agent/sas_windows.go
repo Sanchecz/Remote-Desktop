@@ -31,6 +31,14 @@ var windowsSASPolicyMu sync.Mutex
 // explicit: the worker requests SAS for its own session and the service performs
 // the documented SendSAS call while impersonating that session's user token.
 func runWindowsSASBroker(ctx context.Context) {
+	// Software SAS is a machine policy, not a per-call capability. Keeping the
+	// service bit enabled for the lifetime of the installed service matches the
+	// Windows policy contract and avoids a race where Winlogon observes the old
+	// value after a short-lived registry change has already been rolled back.
+	// The ease-of-access bit, if configured by the administrator, is preserved.
+	if err := ensureWindowsSoftwareSASPolicy(); err != nil {
+		log.Printf("не удалось включить системную политику Ctrl+Alt+Delete: %v", err)
+	}
 	watchers := make(map[uint32]context.CancelFunc)
 	syncSessions := func() {
 		sessions, err := activeWindowsSessions()
@@ -137,7 +145,7 @@ func serveWindowsSASRequests(ctx context.Context, sessionID uint32) {
 	}
 }
 
-func withWindowsSoftwareSASPolicy(action func() error) error {
+func ensureWindowsSoftwareSASPolicy() error {
 	windowsSASPolicyMu.Lock()
 	defer windowsSASPolicyMu.Unlock()
 
@@ -161,58 +169,54 @@ func withWindowsSoftwareSASPolicy(action func() error) error {
 			return fmt.Errorf("allow service Secure Attention Sequence: %w", err)
 		}
 	}
-
-	actionErr := action()
-	var restoreErr error
-	if changed {
-		if exists {
-			restoreErr = key.SetDWordValue("SoftwareSASGeneration", uint32(current))
-		} else {
-			restoreErr = key.DeleteValue("SoftwareSASGeneration")
-			if errors.Is(restoreErr, registry.ErrNotExist) {
-				restoreErr = nil
-			}
-		}
-	}
-	if restoreErr != nil {
-		restoreErr = fmt.Errorf("restore SoftwareSASGeneration policy: %w", restoreErr)
-	}
-	return errors.Join(actionErr, restoreErr)
+	return nil
 }
 
 func sendWindowsSASFromService(sessionID uint32) error {
-	return withWindowsSoftwareSASPolicy(func() error {
-		var primary windows.Token
-		if err := windows.WTSQueryUserToken(sessionID, &primary); err != nil {
-			return fmt.Errorf("query user token for Windows session %d: %w", sessionID, err)
-		}
-		defer primary.Close()
-
-		var impersonation windows.Token
-		if err := windows.DuplicateTokenEx(primary, windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE, nil, windows.SecurityImpersonation, windows.TokenImpersonation, &impersonation); err != nil {
-			return fmt.Errorf("duplicate user token for Windows session %d: %w", sessionID, err)
-		}
-		defer impersonation.Close()
-
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		if err := windows.SetThreadToken(nil, impersonation); err != nil {
-			return fmt.Errorf("impersonate Windows session %d: %w", sessionID, err)
-		}
-		defer windows.RevertToSelf()
-		if err := sasDesktop.Load(); err != nil {
-			return fmt.Errorf("Windows Secure Attention Sequence is unavailable: %w", err)
-		}
-		if err := procSendSAS.Find(); err != nil {
-			return fmt.Errorf("Windows SendSAS export is unavailable: %w", err)
-		}
-		// WTSQueryUserToken + SetThreadToken made this service thread execute as
-		// the target interactive user. The documented SendSAS contract therefore
-		// requires AsUser=TRUE; FALSE addresses the service session and can return
-		// without opening Winlogon in the user's desktop.
-		procSendSAS.Call(windowsSASAsUserArgument(true))
+	if err := ensureWindowsSoftwareSASPolicy(); err != nil {
+		return err
+	}
+	if err := sasDesktop.Load(); err != nil {
+		return fmt.Errorf("Windows Secure Attention Sequence is unavailable: %w", err)
+	}
+	if err := procSendSAS.Find(); err != nil {
+		return fmt.Errorf("Windows SendSAS export is unavailable: %w", err)
+	}
+	if !windowsSASShouldImpersonate(sessionID, windows.WTSGetActiveConsoleSessionId()) {
+		// Microsoft documents FALSE for a genuine LocalSystem SCM service. This
+		// is the only branch authorized to reach Winlogon on the physical console;
+		// impersonating the logged-on user here can return without showing SAS.
+		procSendSAS.Call(windowsSASAsUserArgument(false))
 		return nil
-	})
+	}
+
+	// SendSAS does not accept a session ID. For a non-console RDS/VDI target,
+	// impersonate that exact interactive token rather than affecting the console
+	// or another user's desktop.
+	var primary windows.Token
+	if err := windows.WTSQueryUserToken(sessionID, &primary); err != nil {
+		return fmt.Errorf("query user token for Windows session %d: %w", sessionID, err)
+	}
+	defer primary.Close()
+
+	var impersonation windows.Token
+	if err := windows.DuplicateTokenEx(primary, windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE, nil, windows.SecurityImpersonation, windows.TokenImpersonation, &impersonation); err != nil {
+		return fmt.Errorf("duplicate user token for Windows session %d: %w", sessionID, err)
+	}
+	defer impersonation.Close()
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := windows.SetThreadToken(nil, impersonation); err != nil {
+		return fmt.Errorf("impersonate Windows session %d: %w", sessionID, err)
+	}
+	defer windows.RevertToSelf()
+	// The service thread now runs in the target interactive user's security
+	// context. SendSAS has no return value, so selecting the documented AsUser
+	// branch is essential: FALSE may return normally while addressing no visible
+	// interactive session at all.
+	procSendSAS.Call(windowsSASAsUserArgument(true))
+	return nil
 }
 
 func requestWindowsServiceSAS() error {

@@ -38,11 +38,20 @@ func TestWindowsSASEventNameIncludesSessionAndKind(t *testing.T) {
 	}
 }
 
-func TestWindowsSASUsesAsUserAfterSessionImpersonation(t *testing.T) {
+func TestWindowsSASAsUserArgumentFollowsMicrosoftContract(t *testing.T) {
 	if got := windowsSASAsUserArgument(true); got != 1 {
-		t.Fatalf("impersonated SendSAS argument = %d, want TRUE (1)", got)
+		t.Fatalf("current-user SendSAS argument = %d, want TRUE (1)", got)
 	}
 	if got := windowsSASAsUserArgument(false); got != 0 {
 		t.Fatalf("service SendSAS argument = %d, want FALSE (0)", got)
+	}
+}
+
+func TestWindowsSASInvocationModeSeparatesConsoleAndVDISessions(t *testing.T) {
+	if windowsSASShouldImpersonate(4, 4) {
+		t.Fatal("the SCM service must call SendSAS(FALSE) for the active console")
+	}
+	if !windowsSASShouldImpersonate(7, 4) {
+		t.Fatal("a non-console VDI session must retain the addressed user helper")
 	}
 }

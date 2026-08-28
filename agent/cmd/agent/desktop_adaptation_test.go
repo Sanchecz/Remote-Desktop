@@ -49,16 +49,30 @@ func TestDesktopAutoCadenceDropsOnlyOnSustainedCongestionAndRecovers(t *testing.
 
 func TestDesktopAutoCadenceUsesSixtyOnlyForFastTransport(t *testing.T) {
 	cadence := newDesktopAutoCadence()
-	for index := 0; index < 300; index++ {
+	for index := 0; index < desktopAutoPromoteSamples-1; index++ {
 		cadence.Observe(10 * time.Millisecond)
 	}
+	if cadence.FPS != 30 {
+		t.Fatalf("fast transport promoted before hysteresis threshold: %d", cadence.FPS)
+	}
+	cadence.Observe(10 * time.Millisecond)
 	if cadence.FPS != 60 {
 		t.Fatalf("fast transport selected %d FPS, want 60", cadence.FPS)
 	}
-	for index := 0; index < 5; index++ {
+	for index := 0; index < desktopAutoSixtySlowSamples; index++ {
 		cadence.Observe(30 * time.Millisecond)
 	}
 	if cadence.FPS != 30 {
 		t.Fatalf("slower transport retained %d FPS, want 30", cadence.FPS)
+	}
+}
+
+func TestDesktopAutoCadenceDoesNotPromoteOnBorderlineTransport(t *testing.T) {
+	cadence := newDesktopAutoCadence()
+	for index := 0; index < desktopAutoPromoteSamples*2; index++ {
+		cadence.Observe(22 * time.Millisecond)
+	}
+	if cadence.FPS != 30 {
+		t.Fatalf("borderline transport selected %d FPS, want stable 30", cadence.FPS)
 	}
 }

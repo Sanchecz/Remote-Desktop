@@ -154,6 +154,13 @@ type queuedDesktopInput struct {
 	Event desktopInputEvent `json:"event"`
 }
 
+type desktopInputAck struct {
+	ID    int64     `json:"id"`
+	Type  string    `json:"type"`
+	Error string    `json:"error"`
+	At    time.Time `json:"at"`
+}
+
 type desktopInputQueue struct {
 	mu        sync.Mutex
 	events    []queuedDesktopInput
@@ -166,8 +173,9 @@ func newDesktopInputQueue() *desktopInputQueue {
 	return &desktopInputQueue{notify: make(chan struct{}, 1), touchedAt: time.Now().UTC()}
 }
 
-func (queue *desktopInputQueue) enqueue(events []desktopInputEvent) {
+func (queue *desktopInputQueue) enqueue(events []desktopInputEvent) int64 {
 	queue.mu.Lock()
+	lastID := queue.nextID
 	for _, event := range events {
 		if event.Type == "pointer" && event.Action == "move" {
 			filtered := queue.events[:0]
@@ -179,6 +187,7 @@ func (queue *desktopInputQueue) enqueue(events []desktopInputEvent) {
 			queue.events = filtered
 		}
 		queue.nextID++
+		lastID = queue.nextID
 		queue.events = append(queue.events, queuedDesktopInput{ID: queue.nextID, Event: event})
 	}
 	if len(queue.events) > 120 {
@@ -190,6 +199,7 @@ func (queue *desktopInputQueue) enqueue(events []desktopInputEvent) {
 	case queue.notify <- struct{}{}:
 	default:
 	}
+	return lastID
 }
 
 func (queue *desktopInputQueue) drain(limit int) []queuedDesktopInput {
@@ -286,6 +296,7 @@ func (s *server) deleteDesktopFrame(sessionID string) {
 	}
 	s.desktopFrameSignals.Delete(sessionID + "\x00viewerinput")
 	s.desktopAgentSeen.Delete(sessionID)
+	s.desktopInputAcks.Delete(sessionID)
 	s.desktopViewerTouches.Delete(sessionID)
 	s.desktopSessionRuntime.Delete(sessionID)
 	s.desktopInputQueues.Delete(sessionID)
@@ -349,6 +360,13 @@ func (s *server) pruneDesktopRuntimeState(cutoff time.Time) {
 			return true
 		})
 	}
+	s.desktopInputAcks.Range(func(key, value any) bool {
+		ack, ok := value.(desktopInputAck)
+		if !ok || ack.At.Before(cutoff) {
+			s.desktopInputAcks.Delete(key)
+		}
+		return true
+	})
 	s.desktopSessionRuntime.Range(func(key, value any) bool {
 		runtime, ok := value.(desktopSessionRuntimeState)
 		if !ok || runtime.ValidatedAt.Before(cutoff) {
@@ -611,7 +629,13 @@ func (s *server) desktopSessionStatus(w http.ResponseWriter, r *http.Request) {
 	if value, ok := s.desktopFrameDiagnostics.Load(sessionID); ok {
 		diagnostics, _ = value.(desktopFrameDiagnostics)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": sessionID, "deviceId": deviceID, "status": status, "controlEnabled": control, "targetFps": targetFPS, "cursorVisible": cursorVisible, "frameWidth": frameWidth, "frameHeight": frameHeight, "frameAt": frameAt, "frameSequence": frameSequence, "producerFrameSequence": producerFrameSequence, "agentConnected": agentConnected, "agentError": agentError, "captureDiagnostics": diagnostics})
+	var inputAck *desktopInputAck
+	if value, ok := s.desktopInputAcks.Load(sessionID); ok {
+		if stored, valid := value.(desktopInputAck); valid {
+			inputAck = &stored
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": sessionID, "deviceId": deviceID, "status": status, "controlEnabled": control, "targetFps": targetFPS, "cursorVisible": cursorVisible, "frameWidth": frameWidth, "frameHeight": frameHeight, "frameAt": frameAt, "frameSequence": frameSequence, "producerFrameSequence": producerFrameSequence, "agentConnected": agentConnected, "agentError": agentError, "captureDiagnostics": diagnostics, "inputAck": inputAck})
 }
 
 func (s *server) desktopSessionFrame(w http.ResponseWriter, r *http.Request) {
@@ -768,8 +792,8 @@ func (s *server) desktopSessionInput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "Управление в этом сеансе ещё не включено")
 		return
 	}
-	s.desktopQueue(sessionID).enqueue(events)
-	writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
+	inputID := s.desktopQueue(sessionID).enqueue(events)
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "inputId": inputID})
 }
 
 func validDesktopInput(event desktopInputEvent) bool {
@@ -1227,7 +1251,10 @@ func (s *server) desktopAgentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Error string `json:"error"`
+		Error      string `json:"error"`
+		InputID    int64  `json:"inputId"`
+		InputType  string `json:"inputType"`
+		InputError string `json:"inputError"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		return
@@ -1235,6 +1262,15 @@ func (s *server) desktopAgentStatus(w http.ResponseWriter, r *http.Request) {
 	input.Error = strings.TrimSpace(input.Error)
 	if len(input.Error) > 500 {
 		input.Error = input.Error[:500]
+	}
+	input.InputType = strings.TrimSpace(strings.ToLower(input.InputType))
+	input.InputError = strings.TrimSpace(input.InputError)
+	if len(input.InputError) > 500 {
+		input.InputError = input.InputError[:500]
+	}
+	if input.InputID < 0 || (input.InputID > 0 && input.InputType != "sas") || (input.InputID == 0 && (input.InputType != "" || input.InputError != "")) {
+		writeError(w, http.StatusBadRequest, "Некорректное подтверждение команды удалённого управления")
+		return
 	}
 	sessionID := chi.URLParam(r, "id")
 	result, err := s.db.Exec(r.Context(), `UPDATE remote_desktop_sessions SET agent_seen_at=now(),agent_error=$1 WHERE id=$2 AND device_id=$3 AND status='active' AND expires_at>now() AND viewer_seen_at>now()-interval '45 seconds'`, input.Error, sessionID, deviceID)
@@ -1247,6 +1283,9 @@ func (s *server) desktopAgentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.desktopAgentSeen.Store(sessionID, time.Now().UTC())
+	if input.InputID > 0 {
+		s.desktopInputAcks.Store(sessionID, desktopInputAck{ID: input.InputID, Type: input.InputType, Error: input.InputError, At: time.Now().UTC()})
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -219,7 +219,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.8";
+const LATEST_AGENT_VERSION = "1.0.12";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1089,6 +1089,12 @@ type DesktopSession = {
   frameAt: string | null;
   agentConnected: boolean;
   agentError: string;
+	inputAck?: {
+		id: number;
+		type: string;
+		error: string;
+		at: string;
+	} | null;
   captureDiagnostics?: {
     captureMillis: number;
     copyMillis: number;
@@ -1207,6 +1213,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [keyboardOpen, setKeyboardOpen] = useState(false);
 	const [mobileText, setMobileText] = useState("");
 	const [sasFeedback, setSASFeedback] = useState("");
+	const [sasFeedbackError, setSASFeedbackError] = useState(false);
 	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
 	const [dragLock, setDragLock] = useState(false);
 	// Phones start with an unobstructed full-screen canvas and a small floating
@@ -1229,6 +1236,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const mobileTextSyncedRef = useRef("");
 	const keyboardOpenRef = useRef(false);
 	const sasFeedbackTimer = useRef(0);
+	const sasPendingInputID = useRef(0);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
   const lastPointerSent = useRef(0);
   const trackpadCursor = useRef({ x: 0, y: 0, ready: false });
@@ -1263,7 +1271,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	useEffect(() => { keyboardOpenRef.current = keyboardOpen; }, [keyboardOpen]);
 
 	useEffect(() => () => window.cancelAnimationFrame(cameraAnimationFrame.current), []);
-	useEffect(() => () => window.clearTimeout(sasFeedbackTimer.current), []);
+	useEffect(() => () => {
+		window.clearTimeout(sasFeedbackTimer.current);
+		sasPendingInputID.current = 0;
+	}, []);
 
 	function scheduleCamera(next: { zoom: number; panX: number; panY: number }) {
 		pendingCameraRef.current = clampCamera(next);
@@ -1386,6 +1397,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		let pendingPresentation: { frame: Blob; order: number } | null = null;
 		let presentationRunning = false;
 		let presentationOrder = 0;
+		const decoderImage = new Image();
+		decoderImage.decoding = "async";
 		frameArrivalTimes.current = [];
 		setFrameFPS(0);
     const refreshStatus = async () => {
@@ -1395,8 +1408,22 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
         const nextStatus = await api<DesktopSession>(`/api/desktop-sessions/${sessionId}`);
 			setLatencyMs(Math.max(1, Math.round(performance.now()-requestStarted)));
         if (disposed) return;
-        setStatus(nextStatus);
-        setError(nextStatus.agentError || "");
+			setStatus(nextStatus);
+			setError(nextStatus.agentError || "");
+			const acknowledgement = nextStatus.inputAck;
+			if (acknowledgement?.type === "sas" && acknowledgement.id === sasPendingInputID.current) {
+				sasPendingInputID.current = 0;
+				window.clearTimeout(sasFeedbackTimer.current);
+				if (acknowledgement.error) {
+					setSASFeedbackError(true);
+					setSASFeedback(`Ctrl+Alt+Delete не выполнен: ${acknowledgement.error}`);
+					setError(acknowledgement.error);
+				} else {
+					setSASFeedbackError(false);
+					setSASFeedback("Ctrl+Alt+Delete выполнен системной службой Windows");
+					sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
+				}
+			}
       } catch (reason) {
         if (!disposed) setError(reason instanceof Error ? reason.message : "Связь с удалённым экраном потеряна");
       } finally {
@@ -1411,15 +1438,13 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 					const candidate = pendingPresentation;
 					pendingPresentation = null;
 					const nextURL = URL.createObjectURL(candidate.frame);
-					const preloaded = new Image();
-					preloaded.decoding = "async";
 					const loaded = new Promise<void>((resolve, reject) => {
-						preloaded.onload = () => resolve();
-						preloaded.onerror = () => reject(new Error("JPEG decode failed"));
+						decoderImage.onload = () => resolve();
+						decoderImage.onerror = () => reject(new Error("JPEG decode failed"));
 					});
-					preloaded.src = nextURL;
+					decoderImage.src = nextURL;
 					try {
-						await preloaded.decode();
+						await decoderImage.decode();
 					} catch {
 						try { await loaded; } catch { URL.revokeObjectURL(nextURL); continue; }
 					}
@@ -1479,26 +1504,30 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			fallbackStarted = true;
 			void refreshFrame();
 		};
-		const presentViewerPayload = async (payload: unknown) => {
-			let buffer: ArrayBuffer;
-			if (payload instanceof Blob) buffer = await payload.arrayBuffer();
-			else if (payload instanceof ArrayBuffer) buffer = payload;
-			else return;
+		const decodeViewerBuffer = (buffer: ArrayBuffer) => {
 			if (disposed) return;
 			const bytes = new Uint8Array(buffer);
 			const isSequenced = bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x54 && bytes[2] === 0x56 && bytes[3] === 0x31;
 			if (!isSequenced) {
-				presentFrame(new Blob([buffer], { type: "image/jpeg" }));
+				presentFrame(new Blob([bytes], { type: "image/jpeg" }));
 				return;
 			}
 			const view = new DataView(buffer);
 			const sequence = view.getUint32(4, false) * 0x1_0000_0000 + view.getUint32(8, false);
-			// Blob conversion callbacks from the two sockets can complete out of
-			// order. Producer sequence numbers make the merge deterministic and
-			// prevent an older frame from visually replacing a newer one.
 			if (sequence <= lastPresentedSequence) return;
 			lastPresentedSequence = sequence;
-			presentFrame(new Blob([buffer.slice(12)], { type: "image/jpeg" }));
+			// A Uint8Array view avoids ArrayBuffer.slice copying every 200-300 KiB
+			// JPEG before the browser decoder sees it. This matters at 60 FPS and
+			// also reduces WebView garbage-collection hitches on Android.
+			presentFrame(new Blob([bytes.subarray(12)], { type: "image/jpeg" }));
+		};
+		const presentViewerPayload = (payload: unknown) => {
+			let buffer: ArrayBuffer;
+			if (payload instanceof ArrayBuffer) {
+				decodeViewerBuffer(payload);
+				return;
+			}
+			if (payload instanceof Blob) void payload.arrayBuffer().then(decodeViewerBuffer);
 		};
 		const laneClosed = (lane: number) => {
 			frameLaneClosed[lane] = true;
@@ -1508,7 +1537,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			const socket = new WebSocket(`${streamProtocol}//${window.location.host}/api/desktop-sessions/${sessionId}/stream?lane=${lane}`);
 			socket.binaryType = "arraybuffer";
 			socket.onopen = () => { frameLaneClosed[lane] = false; };
-			socket.onmessage = (event) => { void presentViewerPayload(event.data); };
+			socket.onmessage = (event) => { presentViewerPayload(event.data); };
 			socket.onerror = () => socket.close();
 			socket.onclose = () => laneClosed(lane);
 			window.setTimeout(() => {
@@ -1582,7 +1611,22 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			});
 	};
 
-  const sendInput = useCallback((event: Record<string, unknown>, activatesControl = true) => {
+	const activateRemoteControl = useCallback((): Promise<void> => {
+		if (!sessionId) return Promise.reject(new Error("Удалённый сеанс ещё не готов"));
+		if (controlEnabledRef.current) return Promise.resolve();
+		if (!controlActivationRef.current) {
+			controlActivationRef.current = fetch(`/api/desktop-sessions/${sessionId}`, { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ controlEnabled: true }) })
+				.then((response) => {
+					if (!response.ok) throw new Error(`Не удалось включить управление: HTTP ${response.status}`);
+					controlEnabledRef.current = true;
+					setStatus((current) => current ? { ...current, controlEnabled: true } : current);
+				})
+				.finally(() => { controlActivationRef.current = null; });
+		}
+		return controlActivationRef.current!;
+	}, [sessionId, csrf]);
+
+	const sendInput = useCallback((event: Record<string, unknown>, activatesControl = true) => {
 		if (!sessionId) return;
 		const enqueueOrdered = () => {
 			const last = inputQueue.current.at(-1);
@@ -1593,15 +1637,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		};
 		if (controlEnabledRef.current) { enqueueOrdered(); return; }
 		if (!activatesControl) return;
-		if (!controlActivationRef.current) {
-			controlActivationRef.current = fetch(`/api/desktop-sessions/${sessionId}`, { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ controlEnabled: true }) })
-				.then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); controlEnabledRef.current = true; setStatus((current) => current ? { ...current, controlEnabled: true } : current); })
-				.finally(() => { controlActivationRef.current = null; });
-		}
-		const activation = controlActivationRef.current;
-		if (activation) void activation.then(enqueueOrdered).catch(() => setError("Не удалось включить управление — проверьте соединение."));
+		void activateRemoteControl().then(enqueueOrdered).catch((reason) => setError(reason instanceof Error ? reason.message : "Не удалось включить управление — проверьте соединение."));
 		return;
-  }, [sessionId, csrf]);
+	}, [sessionId, activateRemoteControl]);
 
 	const releaseRemoteModifiers = useCallback(() => {
 		textKeyboardKeys.current.clear();
@@ -1945,16 +1983,46 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		sendInput({ type: "key", action: "up", keyCode });
 	}
 
-	function sendCtrlAltDelete() {
+	async function sendCtrlAltDelete() {
 		// Ctrl+Alt+Delete is a Windows Secure Attention Sequence. It cannot be
-		// synthesized with ordinary key packets, so the privileged desktop worker
-		// handles this dedicated event through the Windows SAS interface.
+		// synthesized with ordinary key packets. Use the acknowledged HTTP path for
+		// this privileged event so the UI reports success only after the Windows
+		// service, not merely the web server, has executed SendSAS.
 		releaseRemoteModifiers();
 		setError("");
-		sendInput({ type: "sas" });
-		setSASFeedback("Ctrl+Alt+Delete передан системной службе Windows");
 		window.clearTimeout(sasFeedbackTimer.current);
-		sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 3_500);
+		sasPendingInputID.current = 0;
+		setSASFeedbackError(false);
+		setSASFeedback("Передаём Ctrl+Alt+Delete системной службе Windows…");
+		try {
+			await activateRemoteControl();
+			if (!sessionId) throw new Error("Удалённый сеанс ещё не готов");
+			const response = await fetch(`/api/desktop-sessions/${sessionId}/input`, {
+				method: "POST",
+				credentials: "same-origin",
+				headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+				body: JSON.stringify({ type: "sas" }),
+			});
+			if (!response.ok) throw new Error(`Команда Ctrl+Alt+Delete не принята: HTTP ${response.status}`);
+			const result = await response.json() as { inputId?: number };
+			if (!Number.isSafeInteger(result.inputId) || Number(result.inputId) <= 0) throw new Error("Сервер не присвоил номер команде Ctrl+Alt+Delete");
+			sasPendingInputID.current = Number(result.inputId);
+			setSASFeedback("Команда доставлена Agent — ожидаем подтверждение Windows…");
+			sasFeedbackTimer.current = window.setTimeout(() => {
+				if (sasPendingInputID.current !== Number(result.inputId)) return;
+				sasPendingInputID.current = 0;
+				const message = "Agent не подтвердил Ctrl+Alt+Delete за 8 секунд. Проверьте системную установку и связь.";
+				setSASFeedbackError(true);
+				setSASFeedback(message);
+				setError(message);
+			}, 8_000);
+		} catch (reason) {
+			sasPendingInputID.current = 0;
+			const message = reason instanceof Error ? reason.message : "Не удалось передать Ctrl+Alt+Delete";
+			setSASFeedbackError(true);
+			setSASFeedback(message);
+			setError(message);
+		}
 	}
 
 	function sendPointerTap(button: "left" | "right") {
@@ -2091,7 +2159,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<label className="remote-scale-control" title="Частота кадров"><span>FPS</span><select value={targetFPS} onChange={(event) => updateTargetFPS(event.target.value as typeof targetFPS)}><option value="auto">Авто · 30</option><option value="15">15</option><option value="30">30</option><option value="60">60 · Плавность</option></select></label>
 				<label className="remote-scale-control" title="Масштаб изображения удалённого экрана"><span>Масштаб</span><select value={screenScale} onChange={(event) => setScreenScale(event.target.value as typeof screenScale)}><option value="fit">По размеру</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option><option value="125">125%</option><option value="150">150%</option></select></label>
 				<button className="remote-header-tool" onClick={() => viewportRef.current?.requestFullscreen()} title="На весь экран"><Maximize2 size={17} /><span>Полный экран</span></button>
-				<button className="remote-header-tool" onClick={sendCtrlAltDelete} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>
+				<button className="remote-header-tool" onClick={() => void sendCtrlAltDelete()} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>
 				<button className="remote-header-tool" onClick={() => void pasteClipboard()} title="Вставить текст из локального буфера"><Clipboard size={17} /><span>Буфер</span></button>
 				<button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>
 				{onOpenFiles && <button className="remote-header-tool" onClick={onOpenFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>}
@@ -2128,7 +2196,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				</div>
 				<button type="button" className="remote-tool-button" onClick={() => sendPointerTap("right")}><MousePointer2 size={15} /> ПКМ</button>
 				<button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)}><Keyboard size={15} /> Клавиатура</button>
-				<button type="button" className="remote-tool-button" onClick={sendCtrlAltDelete}><Keyboard size={15} /> Ctrl+Alt+Del</button>
+				<button type="button" className="remote-tool-button" onClick={() => void sendCtrlAltDelete()}><Keyboard size={15} /> Ctrl+Alt+Del</button>
 				<button type="button" className="remote-tool-button" onClick={resetCamera}><Maximize2 size={15} /> По размеру</button>
 				<button type="button" className={`remote-tool-button ${dragLock ? "active" : ""}`} aria-pressed={dragLock} onClick={toggleDragLock}>Зажать</button>
 				{onOpenFiles && <button type="button" className="remote-tool-button" onClick={onOpenFiles}><Folder size={15} /> Файлы</button>}
@@ -2142,7 +2210,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			<button type="button" className="remote-keyboard-enter" onClick={sendMobileEnter}>Enter</button>
 			<button type="button" className="remote-keyboard-close" onClick={() => setMobileKeyboardVisibility(false)} aria-label="Закрыть клавиатуру"><X size={17} /></button>
 		</div>}
-		{sasFeedback && <div className="desktop-command-feedback" role="status"><CheckCircle2 size={16} />{sasFeedback}</div>}
+		{sasFeedback && <div className={`desktop-command-feedback ${sasFeedbackError ? "error" : ""}`} role="status">{sasFeedbackError ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}{sasFeedback}</div>}
 		{error && <div className="desktop-error">{error}</div>}
 	</section>;
 	return embedded ? workspace : <div className="remote-desktop-backdrop" onMouseDown={(event) => event.target === event.currentTarget && finishRemoteSession()}>{workspace}</div>;

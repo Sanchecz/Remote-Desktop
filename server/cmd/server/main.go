@@ -50,6 +50,7 @@ type server struct {
 	desktopFrameDiagnostics sync.Map
 	desktopFrameSignals     sync.Map
 	desktopAgentSeen        sync.Map
+	desktopInputAcks        sync.Map
 	desktopViewerTouches    sync.Map
 	desktopSessionAccess    sync.Map
 	desktopSessionRuntime   sync.Map

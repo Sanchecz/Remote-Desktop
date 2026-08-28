@@ -38,3 +38,36 @@ func TestCoalesceDesktopInputRetainsActionsAndNewestMove(t *testing.T) {
 		t.Fatalf("input actions changed while coalescing: %#v", events)
 	}
 }
+
+func TestDesktopUploadBufferIsImmutableAndReleased(t *testing.T) {
+	source := []byte{1, 2, 3, 4}
+	cloned, pooled := cloneDesktopJPEGForUpload(source)
+	if !pooled || len(cloned) != len(source) {
+		t.Fatalf("clone = %v, pooled = %v", cloned, pooled)
+	}
+	source[0] = 9
+	if cloned[0] != 1 {
+		t.Fatalf("uploader buffer aliases the reusable capture buffer: %v", cloned)
+	}
+	upload := desktopFrameUpload{capture: desktopCapture{JPEG: cloned}, pooled: pooled}
+	releaseDesktopFrameUpload(&upload)
+	if upload.capture.JPEG != nil || upload.pooled {
+		t.Fatalf("released upload still owns a JPEG buffer: %#v", upload)
+	}
+}
+
+func TestEnqueueLatestDesktopFrameReleasesReplacedUpload(t *testing.T) {
+	uploads := make(chan desktopFrameUpload, 1)
+	firstJPEG, firstPooled := cloneDesktopJPEGForUpload([]byte{1})
+	first := desktopFrameUpload{sequence: 1, capture: desktopCapture{JPEG: firstJPEG}, pooled: firstPooled}
+	uploads <- first
+
+	secondJPEG, secondPooled := cloneDesktopJPEGForUpload([]byte{2})
+	second := desktopFrameUpload{sequence: 2, capture: desktopCapture{JPEG: secondJPEG}, pooled: secondPooled}
+	enqueueLatestDesktopFrame(uploads, second)
+	queued := <-uploads
+	if queued.sequence != 2 || len(queued.capture.JPEG) != 1 || queued.capture.JPEG[0] != 2 {
+		t.Fatalf("latest upload was not retained: %#v", queued)
+	}
+	releaseDesktopFrameUpload(&queued)
+}

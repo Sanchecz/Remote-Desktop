@@ -21,7 +21,13 @@ func desktopProfileForInteraction(targetFPS int, interactive bool) desktopCaptur
 		// while still leaving room for input packets on a 100 Mbit/s WAN link. The
 		// sharp 4:4:4 rest frame is restored immediately after input stops.
 		if targetFPS >= 60 {
-			profile.quality = min(profile.quality, 88)
+			// A q88 Full HD desktop averaged roughly 236 KiB per motion frame in
+			// production: more than 110 Mbit/s at 60 FPS, so a 100 Mbit/s path could
+			// physically deliver only 52-54 FPS. q85 keeps the native 1920 geometry
+			// (and therefore sharper text than downscaling) while fitting the motion
+			// stream inside the selected cadence. The next idle frame returns to the
+			// full-chroma q88 profile automatically.
+			profile.quality = min(profile.quality, 85)
 			profile.chroma = desktopJPEGChroma420
 		} else if targetFPS <= 15 {
 			profile.quality = min(profile.quality, 92)

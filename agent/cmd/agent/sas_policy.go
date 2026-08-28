@@ -5,7 +5,7 @@ import "fmt"
 // Windows defines SoftwareSASGeneration as a two-bit policy:
 // 0 = disabled, 1 = services, 2 = ease-of-access applications, 3 = both.
 // RemoteIt only needs the service bit and must preserve the other bit while the
-// secure-attention request is being dispatched.
+// installed service is available for secure-attention requests.
 func desiredSoftwareSASGeneration(current uint64, exists bool) (uint32, bool, error) {
 	if !exists {
 		return 1, true, nil
@@ -21,14 +21,23 @@ func windowsSASEventName(kind string, sessionID uint32) string {
 	return fmt.Sprintf(`Global\RemoteIt-SAS-%s-%d`, kind, sessionID)
 }
 
-// SendSAS receives TRUE when the caller is executing as the interactive user.
-// The RemoteIt service deliberately impersonates the token of the target
-// Windows session before calling sas.dll, so that call must use the AsUser
-// branch. Keeping the choice outside the Windows-only file makes the contract
-// regression-testable on every build host.
-func windowsSASAsUserArgument(impersonatingInteractiveUser bool) uintptr {
-	if impersonatingInteractiveUser {
+// SendSAS receives TRUE when the calling thread runs in the current
+// interactive user's security context. The RemoteIt broker impersonates the
+// target Windows session before the call, so AsUser must be TRUE. Passing
+// FALSE targets the unimpersonated service context and can silently do nothing
+// because SendSAS has no return value. Keeping the conversion outside the
+// Windows-only file makes this contract regression-testable on every host.
+func windowsSASAsUserArgument(callingAsCurrentUser bool) uintptr {
+	if callingAsCurrentUser {
 		return 1
 	}
 	return 0
+}
+
+// The SendSAS contract distinguishes a real SCM service from a normal process.
+// A LocalSystem service addressing the physical console must use AsUser=FALSE.
+// Non-console RDS/VDI sessions still need the explicitly impersonated helper
+// path, otherwise Windows can deliver the sequence to the wrong session.
+func windowsSASShouldImpersonate(targetSessionID, consoleSessionID uint32) bool {
+	return targetSessionID != consoleSessionID
 }

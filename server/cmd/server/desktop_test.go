@@ -91,13 +91,19 @@ func TestDesktopInputQueuePreservesActionsAndCoalescesPointerMoves(t *testing.T)
 func TestDesktopInputQueueIsBoundedAndDrainsInBatches(t *testing.T) {
 	queue := newDesktopInputQueue()
 	for index := 0; index < 140; index++ {
-		queue.enqueue([]desktopInputEvent{{Type: "key", Action: "down", KeyCode: 65}})
+		inputID := queue.enqueue([]desktopInputEvent{{Type: "key", Action: "down", KeyCode: 65}})
+		if inputID != int64(index+1) {
+			t.Fatalf("expected monotonically increasing input id %d, got %d", index+1, inputID)
+		}
 	}
 	first := queue.drain(64)
 	second := queue.drain(64)
 	third := queue.drain(64)
 	if len(first) != 64 || len(second) != 56 || len(third) != 0 {
 		t.Fatalf("expected a bounded 120 event queue, got batches %d/%d/%d", len(first), len(second), len(third))
+	}
+	if first[0].ID != 21 || second[len(second)-1].ID != 140 {
+		t.Fatalf("expected retained input ids 21..140, got %d..%d", first[0].ID, second[len(second)-1].ID)
 	}
 }
 
@@ -109,6 +115,7 @@ func TestDesktopRuntimeCleanupRemovesEverySessionObject(t *testing.T) {
 	s.desktopFrames.Store(sessionID, desktopFrameState{Frame: []byte{1, 2, 3}, DeviceID: deviceID, At: time.Now().UTC()})
 	s.desktopFrameLanes.Store(sessionID+"\x000", desktopFrameState{Frame: []byte{1, 2, 3}, DeviceID: deviceID, At: time.Now().UTC()})
 	s.desktopAgentSeen.Store(sessionID, time.Now().UTC())
+	s.desktopInputAcks.Store(sessionID, desktopInputAck{ID: 7, Type: "sas", At: time.Now().UTC()})
 	s.desktopViewerTouches.Store(sessionID, time.Now().UTC())
 	s.desktopSessionAccess.Store(sessionID+"\x00browser-session", cachedDesktopSessionAccess{DeviceID: deviceID, CheckedAt: time.Now().UTC()})
 	s.desktopInputQueues.Store(sessionID, newDesktopInputQueue())
@@ -116,7 +123,7 @@ func TestDesktopRuntimeCleanupRemovesEverySessionObject(t *testing.T) {
 	s.deleteDesktopFrame(sessionID)
 
 	for name, state := range map[string]*sync.Map{
-		"frames": &s.desktopFrames, "frame lanes": &s.desktopFrameLanes, "agent seen": &s.desktopAgentSeen, "viewer touches": &s.desktopViewerTouches,
+		"frames": &s.desktopFrames, "frame lanes": &s.desktopFrameLanes, "agent seen": &s.desktopAgentSeen, "input acks": &s.desktopInputAcks, "viewer touches": &s.desktopViewerTouches,
 		"runtime": &s.desktopSessionRuntime, "access": &s.desktopSessionAccess, "queues": &s.desktopInputQueues,
 	} {
 		found := false

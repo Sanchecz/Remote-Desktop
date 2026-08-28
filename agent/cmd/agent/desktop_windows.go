@@ -105,6 +105,40 @@ type desktopFrameUpload struct {
 	sessionID string
 	sequence  uint64
 	capture   desktopCapture
+	pooled    bool
+}
+
+var desktopJPEGUploadPool sync.Pool
+
+func cloneDesktopJPEGForUpload(source []byte) ([]byte, bool) {
+	if len(source) == 0 {
+		return nil, false
+	}
+	var destination []byte
+	if pooled, ok := desktopJPEGUploadPool.Get().(*[]byte); ok && pooled != nil {
+		destination = *pooled
+	}
+	if cap(destination) < len(source) {
+		destination = make([]byte, len(source))
+	} else {
+		destination = destination[:len(source)]
+	}
+	copy(destination, source)
+	return destination, true
+}
+
+func releaseDesktopFrameUpload(upload *desktopFrameUpload) {
+	if upload == nil || !upload.pooled || upload.capture.JPEG == nil {
+		return
+	}
+	buffer := upload.capture.JPEG[:0]
+	// Remote frames are bounded well below this in normal profiles. Do not keep
+	// an abnormal multi-megabyte allocation alive forever after one bad frame.
+	if cap(buffer) <= 8<<20 {
+		desktopJPEGUploadPool.Put(&buffer)
+	}
+	upload.capture.JPEG = nil
+	upload.pooled = false
 }
 
 type desktopFrameUploadResult struct {
@@ -133,6 +167,7 @@ func (timer *desktopWaitTimer) Close() {
 }
 
 type desktopInput struct {
+	ID      int64  `json:"-"`
 	Type    string `json:"type"`
 	Action  string `json:"action,omitempty"`
 	Button  string `json:"button,omitempty"`
@@ -149,7 +184,13 @@ type desktopInputTask struct {
 }
 
 type desktopInputTaskResult struct {
-	err error
+	err        error
+	sasResults []desktopSASResult
+}
+
+type desktopSASResult struct {
+	inputID int64
+	err     error
 }
 
 func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, results chan<- desktopInputTaskResult) {
@@ -165,16 +206,38 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 		case <-ctx.Done():
 			return
 		case task := <-tasks:
-			_, taskErr := surface.SyncIfStale(100 * time.Millisecond)
-			if taskErr == nil {
-				for _, event := range task.events {
-					if taskErr = executeDesktopInput(event, task.capture); taskErr != nil {
-						break
+			result := desktopInputTaskResult{}
+			var surfaceErr error
+			surfaceReady := false
+			for _, event := range task.events {
+				// The Secure Attention Sequence is handled by the SCM service and
+				// must not depend on attaching this worker thread to the interactive
+				// desktop. In particular, OpenInputDesktop may be unavailable while
+				// Windows is already showing Winlogon — exactly where SAS is needed.
+				if event.Type == "sas" {
+					sasErr := executeDesktopInput(event, task.capture)
+					result.sasResults = append(result.sasResults, desktopSASResult{inputID: event.ID, err: sasErr})
+					if result.err == nil && sasErr != nil {
+						result.err = sasErr
 					}
+					continue
+				}
+				if !surfaceReady && surfaceErr == nil {
+					_, surfaceErr = surface.SyncIfStale(100 * time.Millisecond)
+					surfaceReady = surfaceErr == nil
+				}
+				if surfaceErr != nil {
+					if result.err == nil {
+						result.err = surfaceErr
+					}
+					continue
+				}
+				if inputErr := executeDesktopInput(event, task.capture); inputErr != nil && result.err == nil {
+					result.err = inputErr
 				}
 			}
 			select {
-			case results <- desktopInputTaskResult{err: taskErr}:
+			case results <- result:
 			case <-ctx.Done():
 				return
 			}
@@ -517,6 +580,17 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 		// desktop once. Button/key/wheel actions remain ordered and are never lost.
 		select {
 		case completed := <-inputResults:
+			for _, sasResult := range completed.sasResults {
+				if sasResult.inputID <= 0 {
+					continue
+				}
+				if err := reportDesktopInputResult(ctx, controlClient, access, offer.ID, sasResult); err != nil {
+					select {
+					case inputErrors <- err:
+					default:
+					}
+				}
+			}
 			if completed.err != nil {
 				select {
 				case inputErrors <- completed.err:
@@ -666,9 +740,9 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 					// 15/30/60 duplicate uploads per second.
 					if desktopShouldPublishHeartbeat(lastFrameEnqueuedAt, time.Now()) {
 						heartbeat := capture
-						heartbeat.JPEG = append([]byte(nil), capture.JPEG...)
+						heartbeat.JPEG, _ = cloneDesktopJPEGForUpload(capture.JPEG)
 						frameSequence++
-						enqueueLatestDesktopFrame(frameUploads, desktopFrameUpload{access: access, sessionID: offer.ID, sequence: frameSequence, capture: heartbeat})
+						enqueueLatestDesktopFrame(frameUploads, desktopFrameUpload{access: access, sessionID: offer.ID, sequence: frameSequence, capture: heartbeat, pooled: true})
 						lastFrameEnqueuedAt = time.Now()
 					}
 				} else {
@@ -677,9 +751,9 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 					// parallel, so give it an immutable copy and keep at most the newest
 					// waiting frame. This overlaps capture/encoding with HTTPS without
 					// ever building a latency-producing frame backlog.
-					uploadCapture.JPEG = append([]byte(nil), capture.JPEG...)
+					uploadCapture.JPEG, _ = cloneDesktopJPEGForUpload(capture.JPEG)
 					frameSequence++
-					enqueueLatestDesktopFrame(frameUploads, desktopFrameUpload{access: access, sessionID: offer.ID, sequence: frameSequence, capture: uploadCapture})
+					enqueueLatestDesktopFrame(frameUploads, desktopFrameUpload{access: access, sessionID: offer.ID, sequence: frameSequence, capture: uploadCapture, pooled: true})
 					lastFrameEnqueuedAt = time.Now()
 					lastCapture = capture
 					inputCapture := capture
@@ -809,6 +883,26 @@ func reportDesktopStatus(ctx context.Context, client *http.Client, access deskto
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("desktop status: HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func reportDesktopInputResult(ctx context.Context, client *http.Client, access desktopAgentAccess, sessionID string, result desktopSASResult) error {
+	inputError := ""
+	if result.err != nil {
+		inputError = result.err.Error()
+	}
+	payload, err := json.Marshal(map[string]any{"inputId": result.inputID, "inputType": "sas", "inputError": inputError})
+	if err != nil {
+		return err
+	}
+	response, err := desktopRequest(ctx, client, access, http.MethodPost, "/api/desktop/agent/sessions/"+sessionID+"/status", bytes.NewReader(payload), map[string]string{"Content-Type": "application/json"})
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("desktop input acknowledgement: HTTP %d", response.StatusCode)
 	}
 	return nil
 }
@@ -1032,6 +1126,7 @@ func (stream *desktopFrameStreamClient) readInputs(ctx context.Context, connecti
 func decodeDesktopInputStreamMessage(payload []byte) ([]desktopInput, error) {
 	var message struct {
 		Events []struct {
+			ID    int64        `json:"id"`
 			Event desktopInput `json:"event"`
 		} `json:"events"`
 	}
@@ -1040,6 +1135,7 @@ func decodeDesktopInputStreamMessage(payload []byte) ([]desktopInput, error) {
 	}
 	events := make([]desktopInput, 0, len(message.Events))
 	for _, queued := range message.Events {
+		queued.Event.ID = queued.ID
 		events = append(events, queued.Event)
 	}
 	return events, nil
@@ -1128,9 +1224,13 @@ func runDesktopFrameUploadLane(ctx context.Context, client *http.Client, lane in
 				// The second lane is an acceleration path. The primary lane continues
 				// to provide both video and the HTTP compatibility fallback while this
 				// lane reconnects, so do not surface a false session error to the user.
+				releaseDesktopFrameUpload(&upload)
 				continue
 			}
-			result := desktopFrameUploadResult{sessionID: upload.sessionID, capture: upload.capture, duration: time.Since(startedAt), err: err}
+			resultCapture := upload.capture
+			resultCapture.JPEG = nil
+			result := desktopFrameUploadResult{sessionID: upload.sessionID, capture: resultCapture, duration: time.Since(startedAt), err: err}
+			releaseDesktopFrameUpload(&upload)
 			select {
 			case results <- result:
 			case <-ctx.Done():
@@ -1180,19 +1280,22 @@ func enqueueLatestDesktopFrame(uploads chan desktopFrameUpload, upload desktopFr
 	// is already stale, replace it with the newest complete image. Remote input
 	// therefore never waits behind seconds of obsolete screen history.
 	select {
-	case <-uploads:
+	case stale := <-uploads:
+		releaseDesktopFrameUpload(&stale)
 	default:
 	}
 	select {
 	case uploads <- upload:
 	default:
+		releaseDesktopFrameUpload(&upload)
 	}
 }
 
 func drainDesktopFrameUploads(uploads chan desktopFrameUpload) {
 	for {
 		select {
-		case <-uploads:
+		case stale := <-uploads:
+			releaseDesktopFrameUpload(&stale)
 		default:
 			return
 		}
@@ -1210,6 +1313,7 @@ func fetchDesktopInputs(ctx context.Context, client *http.Client, access desktop
 	}
 	var payload struct {
 		Events []struct {
+			ID    int64        `json:"id"`
 			Event desktopInput `json:"event"`
 		} `json:"events"`
 	}
@@ -1218,6 +1322,7 @@ func fetchDesktopInputs(ctx context.Context, client *http.Client, access desktop
 	}
 	events := make([]desktopInput, 0, len(payload.Events))
 	for _, item := range payload.Events {
+		item.Event.ID = item.ID
 		events = append(events, item.Event)
 	}
 	return events, nil

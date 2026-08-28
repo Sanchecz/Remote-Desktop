@@ -14,7 +14,7 @@ func TestDesktopInteractiveProfileBalancesQualityAndWireSize(t *testing.T) {
 		}
 	}
 	smooth := desktopProfileForInteraction(60, true)
-	if smooth.quality != 88 || smooth.chroma != desktopJPEGChroma420 {
+	if smooth.quality != 85 || smooth.chroma != desktopJPEGChroma420 {
 		t.Fatalf("60 FPS motion profile must remain transport bounded: %#v", smooth)
 	}
 }

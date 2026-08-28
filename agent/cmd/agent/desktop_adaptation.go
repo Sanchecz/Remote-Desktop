@@ -2,6 +2,17 @@ package main
 
 import "time"
 
+const (
+	desktopAutoFastSample       = 20 * time.Millisecond
+	desktopAutoPromoteSamples   = 90
+	desktopAutoCongestedSample  = 110 * time.Millisecond
+	desktopAutoCongestedSamples = 20
+	desktopAutoSixtySlowSample  = 28 * time.Millisecond
+	desktopAutoSixtySlowSamples = 8
+	desktopAutoRecoverySample   = 65 * time.Millisecond
+	desktopAutoRecoverySamples  = 20
+)
+
 // desktopCaptureInterval is the hard producer limit for the selected mode.
 // Capture is paced from absolute deadlines, so capture/encode time does not get
 // added to every period.  Do not schedule ahead of the advertised cadence:
@@ -41,43 +52,43 @@ func (cadence *desktopAutoCadence) Observe(uploadDuration time.Duration) {
 	switch cadence.FPS {
 	case 15:
 		cadence.slow = 0
-		if uploadDuration < 65*time.Millisecond {
+		if uploadDuration < desktopAutoRecoverySample {
 			cadence.stable++
 		} else {
 			cadence.stable = 0
 		}
-		if cadence.stable >= 20 {
+		if cadence.stable >= desktopAutoRecoverySamples {
 			cadence.FPS = 30
 			cadence.stable = 0
 		}
 	case 60:
 		cadence.stable = 0
-		if uploadDuration > 24*time.Millisecond {
+		if uploadDuration > desktopAutoSixtySlowSample {
 			cadence.slow++
 		} else {
 			cadence.slow = 0
 		}
-		if cadence.slow >= 5 {
+		if cadence.slow >= desktopAutoSixtySlowSamples {
 			cadence.FPS = 30
 			cadence.slow = 0
 		}
 	default:
 		cadence.FPS = 30
-		if uploadDuration > 110*time.Millisecond {
+		if uploadDuration > desktopAutoCongestedSample {
 			cadence.slow++
 			cadence.stable = 0
 		} else {
 			cadence.slow = 0
-			if uploadDuration < 14*time.Millisecond {
+			if uploadDuration < desktopAutoFastSample {
 				cadence.stable++
 			} else {
 				cadence.stable = 0
 			}
 		}
-		if cadence.slow >= 20 {
+		if cadence.slow >= desktopAutoCongestedSamples {
 			cadence.FPS = 15
 			cadence.slow = 0
-		} else if cadence.stable >= 300 {
+		} else if cadence.stable >= desktopAutoPromoteSamples {
 			cadence.FPS = 60
 			cadence.stable = 0
 		}
