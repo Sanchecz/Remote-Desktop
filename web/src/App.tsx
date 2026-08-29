@@ -61,7 +61,7 @@ import {
   X
 } from "lucide-react";
 import { chunkRemoteText, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
-import { advanceRemotePinch, cameraFollowingRemotePoint, clampRemoteCamera, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient } from "./remoteCamera";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, cameraFollowingRemotePoint, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient } from "./remoteCamera";
 import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
 import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, resolveRemoteViewport, type RemoteViewport } from "./remoteViewport";
 import { isRecoverableRemoteStatusFailure, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
@@ -222,7 +222,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.17";
+const LATEST_AGENT_VERSION = "1.0.18";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1323,6 +1323,18 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			setMobileKeyboardVisibility(false);
 			setControlsCollapsed(true);
 			setMobileDockHidden(false);
+			// A real rotation starts from one predictable camera: the complete remote
+			// desktop fitted into the final visual viewport. Retaining a portrait zoom
+			// or fixed percentage in landscape forced the administrator to pan up/down.
+			setScreenScale("fit");
+			const reset = { zoom: 1, panX: 0, panY: 0 };
+			cameraRef.current = reset;
+			pendingCameraRef.current = reset;
+			setCamera(reset);
+			activeTouches.current.clear();
+			pinchGesture.current.active = false;
+			viewport.scrollLeft = 0;
+			viewport.scrollTop = 0;
 		};
 		const update = () => {
 			const visible = readVisibleViewport();
@@ -1845,6 +1857,15 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		return size;
 	}
 
+	function serialisedTrackpadPosition() {
+		const image = frameImageRef.current;
+		const size = image ? frameSize(image) : {
+			width: Math.max(1, status?.frameWidth || 1),
+			height: Math.max(1, status?.frameHeight || 1),
+		};
+		return clampRemotePoint(trackpadCursor.current, { x: size.width, y: size.height });
+	}
+
 	function positionLocalCursor(position: { x: number; y: number }, size: { width: number; height: number }) {
 		const cursor = localCursorRef.current;
 		if (!cursor) return;
@@ -1888,7 +1909,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
 		if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", x: directGesture.current.x, y: directGesture.current.y });
 		if (trackpadGesture.current.timer) { window.clearTimeout(trackpadGesture.current.timer); trackpadGesture.current.timer = 0; }
-		if (trackpadGesture.current.dragging) sendInput({ type: "pointer", action: "up", button: "left", x: trackpadCursor.current.x, y: trackpadCursor.current.y });
+		if (trackpadGesture.current.dragging) sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() });
 		trackpadGesture.current.pointerId = -1;
 		trackpadGesture.current.dragging = false;
 		directGesture.current.pointerId = -1;
@@ -1980,10 +2001,12 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				window.clearTimeout(trackpadGesture.current.timer);
 				trackpadGesture.current.timer = 0;
 			}
-			const next = {
-				x: Math.max(0, Math.min(size.width - 1, Math.round(trackpadCursor.current.x + deltaX * size.width / Math.max(1, rect.width)))),
-				y: Math.max(0, Math.min(size.height - 1, Math.round(trackpadCursor.current.y + deltaY * size.height / Math.max(1, rect.height)))),
-			};
+			const next = advanceRemoteTrackpadCursor(
+				trackpadCursor.current,
+				{ x: deltaX, y: deltaY },
+				{ x: size.width, y: size.height },
+				{ x: rect.width, y: rect.height },
+			);
 			trackpadCursor.current = { ...next, ready: true };
 			positionLocalCursor(next, size);
 			const followedCamera = cameraFollowingRemotePoint(
@@ -2001,7 +2024,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				// the first movement makes the cursor follow the finger immediately;
 				// previously only the later tap enabled control, so the first drag was
 				// silently discarded and subsequent clicks appeared offset.
-				sendInput({ type: "pointer", action: "move", ...next });
+				sendInput({ type: "pointer", action: "move", ...clampRemotePoint(next, { x: size.width, y: size.height }) });
 			}
 			return;
 		}
@@ -2044,7 +2067,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				const secondTap = performance.now() - previousTap.at < 330 && Math.hypot(event.clientX - previousTap.clientX, event.clientY - previousTap.clientY) < 48;
 				if (secondTap) {
 					lastTrackpadTap.current.at = 0;
-					const position = trackpadCursor.current;
+					const position = serialisedTrackpadPosition();
 					sendInput({ type: "pointer", action: "move", x: position.x, y: position.y });
 					sendInput({ type: "pointer", action: "down", button: "left", x: position.x, y: position.y });
 					trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, distance: 0, longPress: false, dragging: true, secondTap: true, timer: 0 };
@@ -2065,10 +2088,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (trackpadGesture.current.timer) window.clearTimeout(trackpadGesture.current.timer);
 			if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
 			if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.dragging) {
-				const position = trackpadCursor.current;
+				const position = serialisedTrackpadPosition();
 				sendInput({ type: "pointer", action: "up", button: "left", x: position.x, y: position.y });
 			} else if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.distance < 10 && !trackpadGesture.current.longPress) {
-				const position = trackpadCursor.current;
+				const position = serialisedTrackpadPosition();
 				sendInput({ type: "pointer", action: "move", x: position.x, y: position.y });
 				sendInput({ type: "pointer", action: "down", button: "left", x: position.x, y: position.y });
 				sendInput({ type: "pointer", action: "up", button: "left", x: position.x, y: position.y });
@@ -2119,7 +2142,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			sendInput({ type: "pointer", action: "up", button: "left", ...pointerPosition(event) });
 		}
 		trackpadGesture.current.pointerId = -1;
-		if (trackpadGesture.current.dragging) sendInput({ type: "pointer", action: "up", button: "left", x: trackpadCursor.current.x, y: trackpadCursor.current.y });
+		if (trackpadGesture.current.dragging) sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() });
 		trackpadGesture.current.dragging = false;
 		if (trackpadGesture.current.timer) window.clearTimeout(trackpadGesture.current.timer);
 		trackpadGesture.current.timer = 0;
@@ -2198,7 +2221,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	function sendPointerTap(button: "left" | "right") {
-		const position = trackpadCursor.current;
+		const position = serialisedTrackpadPosition();
 		sendInput({ type: "pointer", action: "move", x: position.x, y: position.y });
 		sendInput({ type: "pointer", action: "down", button, x: position.x, y: position.y });
 		sendInput({ type: "pointer", action: "up", button, x: position.x, y: position.y });

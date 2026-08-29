@@ -72,6 +72,25 @@ export function clampRemotePoint(point: Point, frame: Point): Point {
 	};
 }
 
+// A phone touchpad receives fractional CSS-pixel deltas. Rounding after every
+// event discards those fractions and makes the remote cursor alternately stop
+// and jump, especially when a 1080p/2K/4K desktop is fitted into a phone. Keep
+// the precise remote position between events and round only the packet sent to
+// the Agent. A gentle continuous acceleration gives slow movements pixel-level
+// precision while keeping long swipes practical on a small screen.
+export function advanceRemoteTrackpadCursor(current: Point, delta: Point, frame: Point, rendered: Point): Point {
+	const frameWidth = Math.max(1, frame.x);
+	const frameHeight = Math.max(1, frame.y);
+	const renderedWidth = Math.max(1, rendered.x);
+	const renderedHeight = Math.max(1, rendered.y);
+	const travel = Math.hypot(delta.x, delta.y);
+	const acceleration = Math.min(1.5, 0.55 + Math.sqrt(Math.max(0, travel)) * 0.17);
+	return {
+		x: Math.max(0, Math.min(frameWidth - 1, current.x + delta.x * frameWidth / renderedWidth * acceleration)),
+		y: Math.max(0, Math.min(frameHeight - 1, current.y + delta.y * frameHeight / renderedHeight * acceleration)),
+	};
+}
+
 // Fit the complete remote desktop inside the available canvas without ever
 // rounding one dimension beyond the viewport. This is the default camera in
 // both phone orientations and remains correct for 1080p, 2K and 4K sources.

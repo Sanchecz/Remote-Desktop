@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advanceRemotePinch, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, clampRemoteCamera, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remotePointFromClient } from "../src/remoteCamera.ts";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remotePointFromClient } from "../src/remoteCamera.ts";
 
 test("pinch zoom preserves the remote point below the moving finger midpoint", () => {
 	const center = { x: 540, y: 360 };
@@ -112,9 +112,35 @@ test("zoomed mobile cursor auto-pans only when it reaches a viewport edge", () =
 	assert.equal(right.panY, 0);
 });
 
+test("mobile trackpad preserves fractional movement instead of sticking between pixels", () => {
+	const frame = { x: 1920, y: 1080 };
+	const rendered = { x: 844, y: 475 };
+	let precise = { x: 960, y: 540 };
+	const packets: Array<{ x: number; y: number }> = [];
+	for (let index = 0; index < 12; index += 1) {
+		precise = advanceRemoteTrackpadCursor(precise, { x: 0.25, y: 0.15 }, frame, rendered);
+		packets.push(clampRemotePoint(precise, frame));
+	}
+	assert.ok(precise.x > 963, "fractional samples must accumulate in the precise cursor");
+	assert.ok(new Set(packets.map((packet) => `${packet.x}:${packet.y}`)).size > 2, "rounded network packets must advance smoothly");
+});
+
+test("mobile trackpad is precise for slow motion, accelerates long swipes and stays in frame", () => {
+	const frame = { x: 3840, y: 2160 };
+	const rendered = { x: 915, y: 515 };
+	const slow = advanceRemoteTrackpadCursor({ x: 1000, y: 800 }, { x: 1, y: 0 }, frame, rendered);
+	const fast = advanceRemoteTrackpadCursor({ x: 1000, y: 800 }, { x: 25, y: 0 }, frame, rendered);
+	assert.ok(slow.x > 1000 && slow.x < 1000 + frame.x / rendered.x, "slow motion must remain below one physical screen pixel per CSS pixel");
+	assert.ok((fast.x - 1000) / 25 > slow.x - 1000, "a long swipe must receive smooth acceleration");
+	assert.deepEqual(
+		advanceRemoteTrackpadCursor({ x: 1, y: 1 }, { x: -10_000, y: 10_000 }, frame, rendered),
+		{ x: 0, y: 2159 },
+	);
+});
+
 test("fit mode keeps the entire desktop visible in phone portrait and landscape", () => {
 	for (const frame of [{ x: 1920, y: 1080 }, { x: 2560, y: 1440 }, { x: 3840, y: 2160 }]) {
-		for (const viewport of [{ x: 390, y: 786 }, { x: 844, y: 342 }, { x: 360, y: 640 }, { x: 915, y: 364 }]) {
+		for (const viewport of [{ x: 390, y: 786 }, { x: 844, y: 342 }, { x: 360, y: 640 }, { x: 915, y: 364 }, { x: 1280, y: 576 }, { x: 740, y: 328 }]) {
 			const fitted = fitRemoteFrame(frame, viewport);
 			assert.ok(fitted.x <= viewport.x, `${frame.x}x${frame.y} exceeds portrait/landscape width`);
 			assert.ok(fitted.y <= viewport.y, `${frame.x}x${frame.y} exceeds portrait/landscape height`);
