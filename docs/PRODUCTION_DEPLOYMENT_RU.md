@@ -17,16 +17,16 @@
 
 ```sh
 sudo install -d -m 0750 /opt/genesisit/releases /opt/genesisit/shared /opt/genesisit/backups
-sudo install -d -m 0750 /opt/genesisit/releases/1.0.15
-sudo tar -xzf remoteit-1.0.15-source.tar.gz -C /opt/genesisit/releases/1.0.15
-sudo ln -sfn /opt/genesisit/releases/1.0.15 /opt/genesisit/current
+sudo install -d -m 0750 /opt/genesisit/releases/1.0.16
+sudo tar -xzf remoteit-1.0.16-source.tar.gz -C /opt/genesisit/releases/1.0.16
+sudo ln -sfn /opt/genesisit/releases/1.0.16 /opt/genesisit/current
 cd /opt/genesisit/current
 ```
 
 Проверьте SHA-256 до распаковки:
 
 ```sh
-sha256sum -c remoteit-1.0.15-source.tar.gz.sha256
+sha256sum -c remoteit-1.0.16-source.tar.gz.sha256
 ```
 
 ## 3. Закрытая конфигурация
