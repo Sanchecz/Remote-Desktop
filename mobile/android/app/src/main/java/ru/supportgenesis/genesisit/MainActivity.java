@@ -85,7 +85,7 @@ public final class MainActivity extends Activity {
         settings.setTextZoom(100);
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " RemoteIt-Android/1.0.16");
+        settings.setUserAgentString(settings.getUserAgentString() + " RemoteIt-Android/1.0.17");
 		webView.addJavascriptInterface(new RemoteItAndroidBridge(), "RemoteItAndroid");
 
         CookieManager cookies = CookieManager.getInstance();
@@ -159,6 +159,19 @@ public final class MainActivity extends Activity {
 			runOnUiThread(() -> {
 				remoteSessionActive = active;
 				applySystemBars();
+				if (active && webView != null) {
+					webView.postDelayed(MainActivity.this::applySystemBars, 120);
+					webView.postDelayed(MainActivity.this::applySystemBars, 420);
+				}
+			});
+		}
+
+		@JavascriptInterface
+		public void requestImmersiveFullscreen() {
+			runOnUiThread(() -> {
+				remoteSessionActive = true;
+				applySystemBars();
+				if (webView != null) webView.postDelayed(MainActivity.this::applySystemBars, 180);
 			});
 		}
 
@@ -209,10 +222,17 @@ public final class MainActivity extends Activity {
 			// Send a second resize after insets settle so the remote canvas fills the
 			// final landscape area instead of keeping the portrait dimensions.
 			webView.postDelayed(() -> {
+				applySystemBars();
+				webView.requestLayout();
+				webView.invalidate();
+				webView.evaluateJavascript("window.dispatchEvent(new Event('resize'));window.dispatchEvent(new Event('orientationchange'));", null);
+			}, 180);
+			webView.postDelayed(() -> {
+				applySystemBars();
 				webView.requestLayout();
 				webView.invalidate();
 				webView.evaluateJavascript("window.dispatchEvent(new Event('resize'));", null);
-			}, 180);
+			}, 520);
 		}
 	}
 

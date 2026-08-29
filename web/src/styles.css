@@ -446,7 +446,9 @@ td code { color: #8becc2; font-size: 11px; padding: 4px 7px; border-radius: 5px;
 .remote-desktop-modal .icon-button { color: var(--muted); background: var(--panel-2); border-color: var(--line); }
 .remote-screen { position: relative; min-width: 0; min-height: 0; overflow: auto; outline: 0; background: #030507; overscroll-behavior: contain; scrollbar-color: #344252 #090d13; touch-action: none; user-select: none; -webkit-user-select: none; }
 .remote-screen:focus { box-shadow: inset 0 0 0 2px color-mix(in srgb,var(--green) 60%,transparent); }
-.remote-screen:fullscreen { width: 100vw; height: 100vh; background: #000; }
+.remote-screen:fullscreen,.remote-desktop-modal:fullscreen,.remote-desktop-modal:-webkit-full-screen { width: 100vw; height: 100vh; border: 0; border-radius: 0; background: #000; }
+.remote-desktop-modal:fullscreen > .remote-screen,.remote-desktop-modal:-webkit-full-screen > .remote-screen { width: 100%; height: 100%; }
+.remote-mobile-fullscreen-fab { display: none; }
 .remote-screen-canvas { width: 100%; height: 100%; min-width: 100%; min-height: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; touch-action: none; }
 .remote-screen-image-layer { position: relative; flex: 0 0 auto; overflow: visible; transform-origin: center; will-change: transform; backface-visibility: hidden; contain: layout paint style; }
 .remote-screen.screen-scale-fit { overflow: hidden; }
@@ -506,12 +508,15 @@ td code { color: #8becc2; font-size: 11px; padding: 4px 7px; border-radius: 5px;
 .remote-files-head > div { display: grid; gap: 3px; }
 .remote-files-head strong { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 12px; }
 .remote-files-head small, .remote-files-limit { color: var(--muted); font-size: 9px; line-height: 1.45; }
+.remote-files-cap { min-height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid color-mix(in srgb,var(--green) 28%,var(--line)); border-radius: 999px; color: var(--green); background: color-mix(in srgb,var(--green) 6%,var(--panel)); font-size: 9px; font-weight: 750; white-space: nowrap; }
 .remote-files-open { width: 100%; justify-content: center; }
+.remote-files-toolbar { display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: 8px; }
 .remote-path { display: flex; gap: 8px; }
 .remote-path input { min-width: 0; flex: 1; height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: var(--input-bg); outline: 0; }
 .remote-path input:focus { border-color: var(--green); }
 .remote-path .secondary-button { min-height: 38px; }
-.remote-parent { width: max-content; border: 0; padding: 2px 0; color: var(--green); background: transparent; cursor: pointer; font-size: 10px; }
+.remote-parent { width: max-content; }
+.remote-refresh-folder { min-width: 106px; }
 .remote-upload-input { display: none; }
 .remote-upload-zone { display: flex; align-items: center; justify-content: center; gap: 9px; min-height: 58px; padding: 9px 12px; border: 1px dashed color-mix(in srgb,var(--green) 42%,var(--line)); border-radius: 10px; color: var(--green); background: color-mix(in srgb,var(--green) 4%,var(--panel)); cursor: pointer; transition: border-color .16s ease,background .16s ease,transform .16s ease; }
 .remote-upload-zone span { display: grid; gap: 2px; text-align: left; }
@@ -519,19 +524,24 @@ td code { color: #8becc2; font-size: 11px; padding: 4px 7px; border-radius: 5px;
 .remote-upload-zone small { color: var(--muted); font-size: 8px; }
 .remote-upload-zone:hover,.remote-upload-zone.dragging { border-color: var(--green); background: color-mix(in srgb,var(--green) 10%,var(--panel)); transform: translateY(-1px); }
 .remote-upload-zone:disabled { cursor: wait; opacity: .55; transform: none; }
-.remote-file-list { display: grid; max-height: 330px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
-.remote-file-row { min-width: 0; display: grid; grid-template-columns: 28px minmax(0,1fr) 34px; align-items: center; gap: 4px; min-height: 48px; padding: 5px 7px; border-bottom: 1px solid var(--line); }
+.remote-file-list-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: -4px; padding: 2px 3px; color: var(--text); font-size: 10px; font-weight: 750; }
+.remote-file-list-head small { color: var(--muted); font-size: 8px; font-weight: 500; }
+.remote-file-list { display: grid; max-height: min(48vh,520px); overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); scrollbar-gutter: stable; }
+.remote-file-row { min-width: 0; display: grid; grid-template-columns: 34px minmax(0,1fr) auto; align-items: center; gap: 5px; min-height: 54px; padding: 6px 8px; border-bottom: 1px solid var(--line); transition: background .15s ease; }
 .remote-file-row:last-child { border-bottom: 0; }
-.remote-file-icon { display: grid; place-items: center; color: var(--green); }
+.remote-file-row:hover { background: color-mix(in srgb,var(--green) 4%,var(--panel)); }
+.remote-file-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; color: var(--green); background: color-mix(in srgb,var(--green) 7%,var(--panel)); }
 .remote-file-name, .remote-download { border: 0; background: transparent; color: var(--text); cursor: pointer; }
 .remote-file-name { min-width: 0; display: grid; gap: 2px; padding: 3px; text-align: left; }
 .remote-file-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .remote-file-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 8px; }
 .remote-file-name:hover strong { color: var(--green); }
-.remote-download { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; }
+.remote-download { min-width: 34px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 0 9px; border-radius: 8px; color: var(--green); font-size: 8px; font-weight: 750; }
 .remote-download:hover { background: var(--hover-bg); }
 .remote-download:disabled { cursor: not-allowed; opacity: .35; }
-.remote-files-loading, .remote-files-empty { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px; color: var(--muted); font-size: 9px; }
+.remote-open-folder-icon { transform: rotate(-90deg); }
+.remote-files-loading, .remote-files-empty { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 12px; color: var(--muted); font-size: 9px; }
+.remote-files-limit { display: flex; align-items: center; gap: 7px; padding: 9px 10px; border-radius: 9px; color: color-mix(in srgb,var(--green) 82%,var(--text)); background: color-mix(in srgb,var(--green) 5%,var(--panel)); }
 .console-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .console-toolbar > div { display: grid; gap: 5px; }
 .console-toolbar > div > strong { font-size: 16px; }
@@ -1321,7 +1331,7 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.remote-desktop-backdrop { padding: 0; }
 	.remote-desktop-modal { width: 100vw; height: 100dvh; min-height: 100svh; border: 0; border-radius: 0; grid-template-columns: minmax(0,1fr); grid-template-rows: auto minmax(0,1fr); }
 	.remote-desktop-modal > * { min-width: 0; }
-	.remote-desktop-embedded { position: fixed; z-index: 170; inset: 0; width: 100vw; height: 100dvh; min-height: 0; }
+	.remote-desktop-embedded { position: fixed; z-index: 170; inset: auto; left: var(--remote-vv-left,0px); top: var(--remote-vv-top,0px); width: var(--remote-vv-width,100vw); height: var(--remote-vv-height,100dvh); min-height: 0; contain: layout paint; }
 	.remote-desktop-modal > header { position: relative; z-index: 8; min-height: calc(58px + env(safe-area-inset-top)); padding: max(7px,env(safe-area-inset-top)) max(9px,env(safe-area-inset-right)) 7px max(12px,env(safe-area-inset-left)); background: rgba(15,21,29,.98); }
 	.remote-desktop-modal > header .eyebrow { display: none; }
 	.remote-desktop-modal h2 { max-width: 42vw; margin: 0 0 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
@@ -1355,18 +1365,20 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	/* Remote Desktop-like compact controller. The two interaction models stay
 	   visible without covering the screen; the complete sheet is secondary. */
 	.remote-controls-collapsed .remote-session-footer { display: none !important; }
-	.remote-mobile-dock { position: fixed; z-index: 190; right: max(66px,calc(58px + env(safe-area-inset-right))); bottom: max(10px,env(safe-area-inset-bottom)); left: max(9px,env(safe-area-inset-left)); min-height: 58px; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)) 34px; gap: 4px; padding: 5px; border: 1px solid rgba(255,255,255,.2); border-radius: 17px; color: #dbe5ee; background: rgba(8,17,25,.88); -webkit-backdrop-filter: blur(20px) saturate(1.15); backdrop-filter: blur(20px) saturate(1.15); box-shadow: 0 14px 40px rgba(0,0,0,.34); animation: remoteSheetIn .18s ease-out both; }
+	.remote-mobile-dock { position: absolute; z-index: 190; right: max(66px,calc(58px + env(safe-area-inset-right))); bottom: max(10px,env(safe-area-inset-bottom)); left: max(9px,env(safe-area-inset-left)); min-height: 58px; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)) 34px; gap: 4px; padding: 5px; border: 1px solid rgba(255,255,255,.24); border-radius: 17px; color: #dbe5ee; background: #0a121b; -webkit-backdrop-filter: blur(20px) saturate(1.15); backdrop-filter: blur(20px) saturate(1.15); box-shadow: 0 14px 40px rgba(0,0,0,.42); opacity: 1; isolation: isolate; animation: remoteSheetIn .18s ease-out both; }
 	.remote-mobile-dock button { min-width: 0; min-height: 46px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 4px 3px; border: 1px solid transparent; border-radius: 12px; color: #b9c7d4; background: transparent; font: inherit; font-size: 7.5px; font-weight: 750; touch-action: manipulation; }
 	.remote-mobile-dock button.active { color: #42dea0; border-color: rgba(66,222,160,.42); background: rgba(32,180,119,.15); }
 	.remote-mobile-dock button:active { transform: scale(.96); }
 	.remote-mobile-dock .dock-hide { width: 34px; min-height: 46px; color: #8fa0af; }
-	.remote-mobile-dock-reveal { position: fixed; z-index: 194; right: max(66px,calc(58px + env(safe-area-inset-right))); bottom: max(10px,env(safe-area-inset-bottom)); width: 44px; height: 44px; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.22); border-radius: 50%; color: #fff; background: rgba(8,17,25,.8); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); box-shadow: 0 8px 25px rgba(0,0,0,.28); touch-action: manipulation; }
+	.remote-mobile-dock-reveal { position: absolute; z-index: 194; right: max(66px,calc(58px + env(safe-area-inset-right))); bottom: max(10px,env(safe-area-inset-bottom)); width: 44px; height: 44px; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.22); border-radius: 50%; color: #fff; background: #0a121b; -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); box-shadow: 0 8px 25px rgba(0,0,0,.34); touch-action: manipulation; }
 	.remote-mobile-dock-hidden .remote-mobile-dock-reveal { display: grid; }
-	.remote-mobile-keyboard-fab { position: fixed; z-index: 205; right: max(10px,env(safe-area-inset-right)); bottom: max(10px,env(safe-area-inset-bottom)); width: 46px; height: 46px; display: grid; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.24); border-radius: 50%; color: #e9f2f7; background: rgba(8,17,25,.84); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); box-shadow: 0 10px 28px rgba(0,0,0,.32); touch-action: manipulation; }
+	.remote-mobile-keyboard-fab { position: absolute; z-index: 205; right: max(10px,env(safe-area-inset-right)); bottom: max(10px,env(safe-area-inset-bottom)); width: 46px; height: 46px; display: grid; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.24); border-radius: 50%; color: #e9f2f7; background: #0a121b; -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); box-shadow: 0 10px 28px rgba(0,0,0,.38); touch-action: manipulation; }
+	.remote-mobile-fullscreen-fab { position: absolute; z-index: 205; top: max(9px,env(safe-area-inset-top)); right: max(10px,env(safe-area-inset-right)); width: 44px; height: 44px; display: grid; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.24); border-radius: 50%; color: #e9f2f7; background: #0a121b; box-shadow: 0 10px 28px rgba(0,0,0,.38); touch-action: manipulation; }
+	.remote-mobile-fullscreen-fab:active { transform: scale(.95); }
 	.remote-mobile-keyboard-fab.active { color: #062419; border-color: rgba(57,231,155,.78); background: #39e79b; }
 	.remote-mobile-keyboard-fab:active { transform: scale(.95); }
 	.remote-session-footer > .danger-button,.remote-desktop-embedded .remote-footer-end { min-height: 44px; display: flex; flex: 1 1 100%; color: #ec4545; border: 1px solid #ff7878; background: transparent; }
-	.remote-mobile-keyboard { position: fixed; z-index: 200; right: max(64px,calc(56px + env(safe-area-inset-right))); bottom: max(7px,env(safe-area-inset-bottom)); left: max(8px,env(safe-area-inset-left)); display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 6px; padding: 6px; border-color: rgba(255,255,255,.22); border-radius: 14px; background: rgba(8,17,25,.9); -webkit-backdrop-filter: blur(20px) saturate(1.15); backdrop-filter: blur(20px) saturate(1.15); }
+	.remote-mobile-keyboard { position: absolute; z-index: 200; right: max(64px,calc(56px + env(safe-area-inset-right))); bottom: max(7px,env(safe-area-inset-bottom)); left: max(8px,env(safe-area-inset-left)); display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 6px; padding: 6px; border-color: rgba(255,255,255,.22); border-radius: 14px; background: #0a121b; -webkit-backdrop-filter: blur(20px) saturate(1.15); backdrop-filter: blur(20px) saturate(1.15); }
 	.remote-mobile-keyboard input { width: 100%; height: 42px; color: #15202b; background: #fff; border-color: #dce3e9; font-size: 16px; }
 	.remote-mobile-keyboard button { min-height: 42px; }
 	.remote-keyboard-open .remote-stream-stats { opacity: .72; }
@@ -1376,6 +1388,13 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.remote-files-overlay > header { min-height: calc(58px + env(safe-area-inset-top)); padding: max(7px,env(safe-area-inset-top)) max(10px,env(safe-area-inset-right)) 7px max(12px,env(safe-area-inset-left)); }
 	.remote-files-overlay-body { padding: 10px max(10px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left)); }
 	.remote-files-overlay-body .remote-files-card { min-height: 0; }
+	.remote-files-head { align-items: flex-start; }
+	.remote-files-toolbar { grid-template-columns: auto minmax(0,1fr); }
+	.remote-files-toolbar .remote-path { grid-column: 1/-1; grid-row: 2; }
+	.remote-refresh-folder { min-width: 42px; }
+	.remote-refresh-folder span,.remote-download span { display: none; }
+	.remote-file-list { max-height: none; }
+	.remote-files-limit { align-items: flex-start; }
   .device-drawer > header, .drawer-scroll { padding-left: 16px; padding-right: 16px; }
   .settings-grid { grid-template-columns: 1fr; }
   .sessions-card, .downloads-card { grid-column: auto; }
@@ -1450,19 +1469,59 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.token-panel-full > .compact-list-footer { border: 0; }
 }
 
+/* Some Android browsers and embedded WebViews update the CSS orientation media
+   query one frame (or one browser-toolbar animation) after visualViewport. The
+   runtime class is driven by the measured visible rectangle, so a session that
+   started in portrait cannot retain the portrait header/sheet after rotation. */
+@media (max-width: 1024px), (pointer: coarse) {
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape { position: fixed; z-index: 170; inset: auto; left: var(--remote-vv-left,0px); top: var(--remote-vv-top,0px); width: var(--remote-vv-width,100vw); height: var(--remote-vv-height,100dvh); min-height: 0; display: block; border: 0; border-radius: 0; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape > .remote-screen { position: absolute; inset: 0; width: 100%; height: 100%; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape > header { position: absolute; z-index: 188; top: max(6px,env(safe-area-inset-top)); right: max(8px,env(safe-area-inset-right)); left: max(8px,env(safe-area-inset-left)); min-height: 42px; display: flex; padding: 5px 7px 5px 10px; border: 1px solid rgba(255,255,255,.16); border-radius: 14px; background: linear-gradient(90deg,rgba(8,17,25,.9),rgba(8,17,25,.74)); -webkit-backdrop-filter: blur(18px) saturate(1.12); backdrop-filter: blur(18px) saturate(1.12); box-shadow: 0 8px 28px rgba(0,0,0,.22); pointer-events: none; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape > header > * { pointer-events: auto; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape > header .eyebrow,
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape > header small,
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape > header .remote-header-tool,
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape > header .remote-mode-badge { display: none; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape.remote-controls-collapsed > header { display: none; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-controls-scrim { position: absolute; z-index: 5; inset: 0; display: block; padding: 0; border: 0; background: rgba(2,8,12,.14); -webkit-backdrop-filter: blur(1.5px); backdrop-filter: blur(1.5px); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape > .remote-session-footer { position: absolute; z-index: 187; top: max(58px,calc(50px + env(safe-area-inset-top))); right: auto; bottom: max(9px,env(safe-area-inset-bottom)); left: max(9px,env(safe-area-inset-left)); width: min(226px,38vw); max-height: calc(100dvh - 68px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); display: flex; align-content: flex-start; flex-direction: column; gap: 7px; padding: 9px !important; border: 1px solid rgba(207,218,227,.9) !important; border-radius: 17px; background: rgba(250,252,253,.96) !important; overflow-y: auto; box-shadow: 0 20px 55px rgba(0,0,0,.28); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-session-tools { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; flex: 0 0 auto; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-pointer-modes { grid-column: 1/-1; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-tool-button { min-width: 0; min-height: 46px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 5px; border-color: #dce3e9; border-radius: 11px; color: #283442; background: #fff; font-size: 8px; touch-action: manipulation; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-tool-button:hover,
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-tool-button.active { color: #14895f; border-color: #44c997; background: #eefaf5; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-footer-end { width: 100%; min-height: 42px; display: flex; color: #ec4545; border: 1px solid #ff7878; background: transparent; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape.remote-controls-collapsed > .remote-session-footer { display: none !important; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-mobile-dock { position: absolute; z-index: 190; top: auto; right: max(64px,calc(56px + env(safe-area-inset-right))); bottom: max(8px,env(safe-area-inset-bottom)); left: auto; width: min(350px,calc(100% - 82px - env(safe-area-inset-left) - env(safe-area-inset-right))); min-height: 50px; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)) 32px; gap: 4px; padding: 5px; border: 1px solid rgba(255,255,255,.24); border-radius: 17px; color: #dbe5ee; background: #0a121b; -webkit-backdrop-filter: blur(20px) saturate(1.15); backdrop-filter: blur(20px) saturate(1.15); box-shadow: 0 14px 40px rgba(0,0,0,.42); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-mobile-dock button { min-width: 0; min-height: 40px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 4px 3px; border: 1px solid transparent; border-radius: 12px; color: #b9c7d4; background: transparent; font: inherit; font-size: 7.5px; font-weight: 750; touch-action: manipulation; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-mobile-dock button.active { color: #42dea0; border-color: rgba(66,222,160,.42); background: rgba(32,180,119,.15); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-mobile-dock .dock-hide { width: 32px; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-mobile-dock-reveal { position: absolute; z-index: 194; right: max(66px,calc(58px + env(safe-area-inset-right))); bottom: max(8px,env(safe-area-inset-bottom)); width: 44px; height: 44px; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.22); border-radius: 50%; color: #fff; background: #0a121b; box-shadow: 0 8px 25px rgba(0,0,0,.34); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape.remote-mobile-dock-hidden .remote-mobile-dock-reveal { display: grid; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-mobile-keyboard-fab { position: absolute; z-index: 205; right: max(10px,env(safe-area-inset-right)); bottom: max(10px,env(safe-area-inset-bottom)); width: 46px; height: 46px; display: grid; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.24); border-radius: 50%; color: #e9f2f7; background: #0a121b; box-shadow: 0 10px 28px rgba(0,0,0,.38); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-mobile-fullscreen-fab { position: absolute; z-index: 205; top: max(8px,env(safe-area-inset-top)); right: max(9px,env(safe-area-inset-right)); width: 43px; height: 43px; display: grid; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.24); border-radius: 50%; color: #eef6f9; background: #0a121b; box-shadow: 0 10px 28px rgba(0,0,0,.4); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-mobile-keyboard { position: absolute; z-index: 200; right: max(64px,calc(56px + env(safe-area-inset-right))); bottom: max(7px,env(safe-area-inset-bottom)); left: max(8px,env(safe-area-inset-left)); width: auto; display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 6px; padding: 6px; border: 1px solid rgba(255,255,255,.22); border-radius: 14px; background: #0a121b; box-shadow: 0 12px 34px rgba(0,0,0,.34); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-mobile-keyboard input { width: 100%; height: 42px; color: #15202b; background: #fff; border-color: #dce3e9; font-size: 16px; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-stream-stats { top: max(58px,calc(50px + env(safe-area-inset-top))); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape.remote-controls-collapsed .remote-stream-stats { top: max(7px,env(safe-area-inset-top)); left: max(7px,env(safe-area-inset-left)); }
+}
+
 @media (max-width: 1024px) and (orientation: landscape) {
 	.remote-mobile-keyboard-fab { display: grid; }
-	.remote-desktop-embedded { position: fixed; z-index: 170; inset: 0; width: 100vw; height: 100dvh; min-height: 0; border: 0; border-radius: 0; }
+	.remote-mobile-fullscreen-fab { position: absolute; z-index: 205; top: max(8px,env(safe-area-inset-top)); right: max(9px,env(safe-area-inset-right)); width: 43px; height: 43px; display: grid; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.24); border-radius: 50%; color: #eef6f9; background: #0a121b; box-shadow: 0 10px 28px rgba(0,0,0,.4); touch-action: manipulation; }
+	.remote-mobile-fullscreen-fab:active { transform: scale(.95); }
+	.remote-desktop-embedded { position: fixed; z-index: 170; inset: auto; left: var(--remote-vv-left,0px); top: var(--remote-vv-top,0px); width: var(--remote-vv-width,100vw); height: var(--remote-vv-height,100dvh); min-height: 0; border: 0; border-radius: 0; }
 	.remote-desktop-backdrop { width: 100vw; height: 100dvh; overflow: hidden; }
 	.remote-desktop-modal { position: relative; grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,1fr); }
 	/* The generic modal rule above must not turn the embedded remote workspace
 	   back into a relative child of .remote-control-stage. On wide phones that
 	   shifted the 100vw surface by the stage's x/y offset and collapsed the
 	   visible desktop height. Keep the session pinned to the visual viewport. */
-	.remote-desktop-modal.remote-desktop-embedded { position: fixed; inset: 0; width: 100vw; height: 100dvh; min-height: 0; display: block; }
+	.remote-desktop-modal.remote-desktop-embedded { position: fixed; inset: auto; left: var(--remote-vv-left,0px); top: var(--remote-vv-top,0px); width: var(--remote-vv-width,100vw); height: var(--remote-vv-height,100dvh); min-height: 0; display: block; }
 	.remote-desktop-modal > header { position: absolute; z-index: 188; top: max(6px,env(safe-area-inset-top)); right: max(8px,env(safe-area-inset-right)); left: max(8px,env(safe-area-inset-left)); min-height: 42px; padding: 5px 7px 5px 10px; border: 1px solid rgba(255,255,255,.16); border-radius: 14px; background: linear-gradient(90deg,rgba(8,17,25,.88),rgba(8,17,25,.72)); -webkit-backdrop-filter: blur(18px) saturate(1.12); backdrop-filter: blur(18px) saturate(1.12); box-shadow: 0 8px 28px rgba(0,0,0,.22); pointer-events: none; }
 	.remote-desktop-modal > header > * { pointer-events: auto; }
 	.remote-desktop-modal header small { display: none; }
+	.remote-controls-collapsed > header { display: none; }
 	/* Every action below also exists in the landscape control rail. Keeping
 	   duplicates in the narrow header clipped controls on real phones. */
 	.remote-desktop-embedded > header .remote-header-tool { display: none; }
@@ -1477,13 +1536,14 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.remote-tool-button:hover,.remote-tool-button.active { color: #14895f; border-color: #44c997; background: #eefaf5; }
 	.remote-desktop-embedded .remote-footer-end { width: 100%; min-height: 44px; display: flex; color: #ec4545; border: 1px solid #ff7878; background: transparent; }
 	.remote-controls-collapsed .remote-session-footer { display: none !important; }
-	.remote-mobile-dock { position: fixed; top: auto; right: max(64px,calc(56px + env(safe-area-inset-right))); bottom: max(8px,env(safe-area-inset-bottom)); left: auto; width: min(350px,calc(100vw - 82px - env(safe-area-inset-left) - env(safe-area-inset-right))); min-height: 50px; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)) 32px; gap: 4px; padding: 5px; border: 1px solid rgba(255,255,255,.2); border-radius: 17px; color: #dbe5ee; background: rgba(8,17,25,.88); -webkit-backdrop-filter: blur(20px) saturate(1.15); backdrop-filter: blur(20px) saturate(1.15); box-shadow: 0 14px 40px rgba(0,0,0,.34); }
+	.remote-mobile-dock { position: absolute; top: auto; right: max(64px,calc(56px + env(safe-area-inset-right))); bottom: max(8px,env(safe-area-inset-bottom)); left: auto; width: min(350px,calc(100% - 82px - env(safe-area-inset-left) - env(safe-area-inset-right))); min-height: 50px; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)) 32px; gap: 4px; padding: 5px; border: 1px solid rgba(255,255,255,.24); border-radius: 17px; color: #dbe5ee; background: #0a121b; -webkit-backdrop-filter: blur(20px) saturate(1.15); backdrop-filter: blur(20px) saturate(1.15); box-shadow: 0 14px 40px rgba(0,0,0,.42); }
 	.remote-mobile-dock button { min-height: 40px; }
-	.remote-mobile-dock-reveal { position: fixed; right: max(66px,calc(58px + env(safe-area-inset-right))); bottom: max(8px,env(safe-area-inset-bottom)); }
+	.remote-mobile-dock-reveal { position: absolute; right: max(66px,calc(58px + env(safe-area-inset-right))); bottom: max(8px,env(safe-area-inset-bottom)); }
 	.remote-mobile-dock-hidden .remote-mobile-dock-reveal { display: grid; }
-	.remote-mobile-keyboard { position: fixed; right: max(64px,calc(56px + env(safe-area-inset-right))); bottom: max(7px,env(safe-area-inset-bottom)); left: max(8px,env(safe-area-inset-left)); width: auto; display: grid; grid-template-columns: minmax(0,1fr) auto auto; }
+	.remote-mobile-keyboard { position: absolute; right: max(64px,calc(56px + env(safe-area-inset-right))); bottom: max(7px,env(safe-area-inset-bottom)); left: max(8px,env(safe-area-inset-left)); width: auto; display: grid; grid-template-columns: minmax(0,1fr) auto auto; }
 	.remote-mobile-keyboard input { width: 100%; }
 	.remote-stream-stats { top: max(58px,calc(50px + env(safe-area-inset-top))); }
+	.remote-controls-collapsed .remote-stream-stats { top: max(7px,env(safe-area-inset-top)); left: max(7px,env(safe-area-inset-left)); }
 	.remote-files-overlay > header { min-height: calc(44px + env(safe-area-inset-top)); padding-top: max(4px,env(safe-area-inset-top)); padding-bottom: 4px; }
 	.remote-files-overlay > header .eyebrow { display: none; }
 	.remote-files-overlay > header h2 { margin: 0; font-size: 13px; }

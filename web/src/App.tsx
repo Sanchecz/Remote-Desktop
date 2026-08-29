@@ -7,6 +7,7 @@ import {
   Boxes,
   CheckCircle2,
   ChevronDown,
+	ChevronUp,
 	CircleHelp,
   CircleUserRound,
   Clock3,
@@ -62,6 +63,8 @@ import {
 import { chunkRemoteText, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
 import { advanceRemotePinch, cameraFollowingRemotePoint, clampRemoteCamera, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient } from "./remoteCamera";
 import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
+import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, resolveRemoteViewport, type RemoteViewport } from "./remoteViewport";
+import { isRecoverableRemoteStatusFailure, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
 
 type User = {
   id: string;
@@ -219,7 +222,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.16";
+const LATEST_AGENT_VERSION = "1.0.17";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1227,11 +1230,20 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [targetFPS, setTargetFPS] = useState<"auto" | "15" | "30" | "60">("auto");
 	const [renderedFrameSize, setRenderedFrameSize] = useState({ width: 0, height: 0 });
 	const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+	const [remoteViewport, setRemoteViewport] = useState<RemoteViewport>(() => resolveRemoteViewport({
+		innerWidth: typeof window === "undefined" ? 1 : window.innerWidth,
+		innerHeight: typeof window === "undefined" ? 1 : window.innerHeight,
+		documentWidth: typeof document === "undefined" ? 1 : document.documentElement.clientWidth,
+		documentHeight: typeof document === "undefined" ? 1 : document.documentElement.clientHeight,
+		visualViewport: typeof window === "undefined" || !window.visualViewport ? null : window.visualViewport,
+	}));
+	const [fullscreenActive, setFullscreenActive] = useState(false);
 	const [camera, setCamera] = useState({ zoom: 1, panX: 0, panY: 0 });
 	const cameraRef = useRef(camera);
 	const pendingCameraRef = useRef(camera);
 	const cameraAnimationFrame = useRef(0);
 	const viewportRef = useRef<HTMLDivElement>(null);
+	const workspaceRef = useRef<HTMLElement>(null);
 	const mobileKeyboardRef = useRef<HTMLInputElement>(null);
 	const mobileTextSyncedRef = useRef("");
 	const keyboardOpenRef = useRef(false);
@@ -1248,6 +1260,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const frameArrivalTimes = useRef<number[]>([]);
 	const activeTouches = useRef(new Map<number, { x: number; y: number }>());
 	const pinchGesture = useRef({ active: false, suppress: false, mode: "pending" as "pending" | "zoom" | "scroll", startDistance: 1, lastDistance: 1, lastMidX: 0, lastMidY: 0, wheelDistance: 0, midpointTravel: 0, startedAt: 0, rightClickSent: false });
+	const wheelAccumulator = useRef(0);
 	const inputQueue = useRef<Record<string, unknown>[]>([]);
 	const inputFlushTimer = useRef(0);
 	const inputInFlight = useRef(false);
@@ -1290,7 +1303,31 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const viewport = viewportRef.current;
 		if (!viewport) return;
 		const delayedUpdates = new Set<number>();
+		const readVisibleViewport = () => resolveRemoteViewport({
+			innerWidth: window.innerWidth,
+			innerHeight: window.innerHeight,
+			documentWidth: document.documentElement.clientWidth,
+			documentHeight: document.documentElement.clientHeight,
+			visualViewport: window.visualViewport,
+		});
+		const initialVisible = readVisibleViewport();
+		let lastLandscape = initialVisible.landscape;
+		const applyOrientationState = (visible: RemoteViewport, force = false) => {
+			if (!force && visible.landscape === lastLandscape) return;
+			lastLandscape = visible.landscape;
+			if (!coarsePointerClient) return;
+			// Browsers do not agree on whether rotating an already-open page emits
+			// orientationchange, resize, both, or only visualViewport.resize. Drive
+			// the compact controller from the measured rectangle so every engine
+			// reaches the same state without treating an IME resize as a rotation.
+			setMobileKeyboardVisibility(false);
+			setControlsCollapsed(true);
+			setMobileDockHidden(false);
+		};
 		const update = () => {
+			const visible = readVisibleViewport();
+			applyOrientationState(visible);
+			setRemoteViewport((current) => remoteViewportChanged(current, visible) ? visible : current);
 			const next = { width: viewport.clientWidth, height: viewport.clientHeight };
 			setViewportSize((current) => {
 				// Android resizes the WebView while its IME is visible. Keep the
@@ -1306,23 +1343,49 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			// first the orientation flips, then system bars/insets receive their final
 			// size. Measuring both phases prevents a stale portrait-sized fit in
 			// landscape (and the inverse when returning to portrait).
-			for (const delay of [0, 80, 240]) {
+			for (const delay of REMOTE_VIEWPORT_SETTLE_DELAYS) {
 				const id = window.setTimeout(() => { delayedUpdates.delete(id); update(); }, delay);
 				delayedUpdates.add(id);
 			}
 		};
+		const updateAfterOrientationChange = () => {
+			// A real orientation change is the only viewport transition that should
+			// close the IME and return the compact dock. visualViewport also resizes
+			// when the keyboard or browser chrome opens; treating that as rotation
+			// would immediately close the keyboard again on Android and Safari.
+			applyOrientationState(readVisibleViewport(), true);
+			updateAfterViewportSettles();
+		};
+		if (coarsePointerClient && initialVisible.landscape) applyOrientationState(initialVisible, true);
 		update();
 		const observer = new ResizeObserver(update);
 		observer.observe(viewport);
-		window.addEventListener("orientationchange", updateAfterViewportSettles);
-		window.visualViewport?.addEventListener("resize", update);
+		window.addEventListener("resize", updateAfterViewportSettles);
+		window.addEventListener("orientationchange", updateAfterOrientationChange);
+		window.addEventListener("pageshow", updateAfterViewportSettles);
+		window.visualViewport?.addEventListener("resize", updateAfterViewportSettles);
+		window.visualViewport?.addEventListener("scroll", update);
 		return () => {
 			observer.disconnect();
-			window.removeEventListener("orientationchange", updateAfterViewportSettles);
-			window.visualViewport?.removeEventListener("resize", update);
+			window.removeEventListener("resize", updateAfterViewportSettles);
+			window.removeEventListener("orientationchange", updateAfterOrientationChange);
+			window.removeEventListener("pageshow", updateAfterViewportSettles);
+			window.visualViewport?.removeEventListener("resize", updateAfterViewportSettles);
+			window.visualViewport?.removeEventListener("scroll", update);
 			for (const id of delayedUpdates) window.clearTimeout(id);
 		};
-	}, [frameURL]);
+	}, [frameURL, coarsePointerClient]);
+
+	useEffect(() => {
+		const doc = document as Document & { webkitFullscreenElement?: Element | null };
+		const update = () => setFullscreenActive(Boolean(document.fullscreenElement || doc.webkitFullscreenElement));
+		document.addEventListener("fullscreenchange", update);
+		document.addEventListener("webkitfullscreenchange", update as EventListener);
+		return () => {
+			document.removeEventListener("fullscreenchange", update);
+			document.removeEventListener("webkitfullscreenchange", update as EventListener);
+		};
+	}, []);
 
 	useEffect(() => {
 		const bridge = (window as unknown as { RemoteItAndroid?: { setRemoteSessionActive: (active: boolean) => void } }).RemoteItAndroid;
@@ -1406,10 +1469,15 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
     let lastFrameAt = "";
     let statusTimer = 0;
     let frameTimer = 0;
-		let frameSockets: WebSocket[] = [];
+		const frameSockets: Array<WebSocket | null> = Array(6).fill(null);
+		const frameReconnectTimers = Array(6).fill(0) as number[];
+		const frameReconnectAttempts = Array(6).fill(0) as number[];
 		let inputSocket: WebSocket | null = null;
-		const frameLaneClosed = [false, false, false, false, false, false];
-		let fallbackStarted = false;
+		let inputReconnectTimer = 0;
+		let inputReconnectAttempt = 0;
+		const frameLaneClosed = [true, true, true, true, true, true];
+		let fallbackActive = false;
+		let consecutiveStatusFailures = 0;
 		let lastFrameStatsAt = 0;
 		let lastPresentedSequence = -1;
 		let pendingPresentation: { frame: Blob; order: number } | null = null;
@@ -1426,6 +1494,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
         const nextStatus = await api<DesktopSession>(`/api/desktop-sessions/${sessionId}`);
 			setLatencyMs(Math.max(1, Math.round(performance.now()-requestStarted)));
         if (disposed) return;
+			consecutiveStatusFailures = 0;
 			setStatus(nextStatus);
 			setError(nextStatus.agentError || "");
 			const acknowledgement = nextStatus.inputAck;
@@ -1443,7 +1512,12 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				}
 			}
       } catch (reason) {
-        if (!disposed) setError(reason instanceof Error ? reason.message : "Связь с удалённым экраном потеряна");
+				if (!disposed) {
+					consecutiveStatusFailures += 1;
+					setError(isRecoverableRemoteStatusFailure(consecutiveStatusFailures)
+						? "Связь нестабильна — RemoteIt переподключается автоматически…"
+						: (reason instanceof Error ? reason.message : "Удалённый сеанс временно недоступен"));
+				}
       } finally {
         if (!disposed) statusTimer = window.setTimeout(() => void refreshStatus(), 900);
       }
@@ -1497,7 +1571,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			void drainPresentationQueue();
 		};
     const refreshFrame = async () => {
-      if (disposed) return;
+			if (disposed || !fallbackActive) return;
       try {
         const after = lastFrameAt ? `&after=${encodeURIComponent(lastFrameAt)}` : "";
         const response = await fetch(`/api/desktop-sessions/${sessionId}/frame?t=${Date.now()}${after}`, { credentials: "same-origin", cache: "no-store" });
@@ -1514,13 +1588,18 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				// top of HTTP latency capped a healthy 30 FPS Agent at 24-26 displayed
 				// FPS and delayed every newly uploaded frame. Five milliseconds keeps
 				// the browser close to the producer cadence without parallel requests.
-				if (!disposed) frameTimer = window.setTimeout(() => void refreshFrame(), 5);
+				if (!disposed && fallbackActive) frameTimer = window.setTimeout(() => void refreshFrame(), 5);
       }
     };
 		const startFrameFallback = () => {
-			if (disposed || fallbackStarted) return;
-			fallbackStarted = true;
+			if (disposed || fallbackActive) return;
+			fallbackActive = true;
 			void refreshFrame();
+		};
+		const stopFrameFallback = () => {
+			fallbackActive = false;
+			window.clearTimeout(frameTimer);
+			frameTimer = 0;
 		};
 		const decodeViewerBuffer = (buffer: ArrayBuffer) => {
 			if (disposed) return;
@@ -1547,37 +1626,87 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			}
 			if (payload instanceof Blob) void payload.arrayBuffer().then(decodeViewerBuffer);
 		};
-		const laneClosed = (lane: number) => {
-			frameLaneClosed[lane] = true;
-			if (frameLaneClosed.every(Boolean)) startFrameFallback();
+		const streamProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+		const scheduleFrameReconnect = (lane: number) => {
+			if (disposed || frameReconnectTimers[lane]) return;
+			const delay = remoteReconnectDelay(frameReconnectAttempts[lane]++);
+			frameReconnectTimers[lane] = window.setTimeout(() => {
+				frameReconnectTimers[lane] = 0;
+				openFrameLane(lane);
+			}, delay);
 		};
-		const openFrameLane = (lane: number) => {
+		const laneClosed = (lane: number, socket: WebSocket) => {
+			if (frameSockets[lane] !== socket) return;
+			frameSockets[lane] = null;
+			frameLaneClosed[lane] = true;
+			if (disposed) return;
+			if (shouldUseRemoteFrameFallback(frameLaneClosed)) startFrameFallback();
+			scheduleFrameReconnect(lane);
+		};
+		function openFrameLane(lane: number) {
+			if (disposed) return;
 			const socket = new WebSocket(`${streamProtocol}//${window.location.host}/api/desktop-sessions/${sessionId}/stream?lane=${lane}`);
+			frameSockets[lane] = socket;
 			socket.binaryType = "arraybuffer";
-			socket.onopen = () => { frameLaneClosed[lane] = false; };
-			socket.onmessage = (event) => { presentViewerPayload(event.data); };
-			socket.onerror = () => socket.close();
-			socket.onclose = () => laneClosed(lane);
-			window.setTimeout(() => {
+			let connectTimeout = window.setTimeout(() => {
 				if (!disposed && socket.readyState !== WebSocket.OPEN) socket.close();
 			}, 2_500);
-			return socket;
-		};
-		const streamProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-		frameSockets = [0, 1, 2, 3, 4, 5].map(openFrameLane);
+			socket.onopen = () => {
+				window.clearTimeout(connectTimeout);
+				connectTimeout = 0;
+				frameReconnectAttempts[lane] = 0;
+				frameLaneClosed[lane] = false;
+				stopFrameFallback();
+				setError((value) => value.startsWith("Связь нестабильна") ? "" : value);
+			};
+			socket.onmessage = (event) => { presentViewerPayload(event.data); };
+			socket.onerror = () => socket.close();
+			socket.onclose = () => {
+				window.clearTimeout(connectTimeout);
+				laneClosed(lane, socket);
+			};
+		}
+		[0, 1, 2, 3, 4, 5].forEach(openFrameLane);
 		// A dedicated low-bandwidth socket keeps keyboard and pointer packets out
 		// of both JPEG TCP flows. If it closes, the existing ordered HTTP fallback
 		// takes over without interrupting the video lanes.
-		inputSocket = new WebSocket(`${streamProtocol}//${window.location.host}/api/desktop-sessions/${sessionId}/stream?lane=input`);
-		inputSocket.onopen = () => { frameSocketRef.current = inputSocket; };
-		inputSocket.onerror = () => inputSocket?.close();
-		inputSocket.onclose = () => { if (frameSocketRef.current === inputSocket) frameSocketRef.current = null; };
+		const scheduleInputReconnect = () => {
+			if (disposed || inputReconnectTimer) return;
+			inputReconnectTimer = window.setTimeout(() => {
+				inputReconnectTimer = 0;
+				openInputSocket();
+			}, remoteReconnectDelay(inputReconnectAttempt++));
+		};
+		function openInputSocket() {
+			if (disposed) return;
+			const socket = new WebSocket(`${streamProtocol}//${window.location.host}/api/desktop-sessions/${sessionId}/stream?lane=input`);
+			inputSocket = socket;
+			let connectTimeout = window.setTimeout(() => {
+				if (!disposed && socket.readyState !== WebSocket.OPEN) socket.close();
+			}, 2_500);
+			socket.onopen = () => {
+				window.clearTimeout(connectTimeout);
+				connectTimeout = 0;
+				inputReconnectAttempt = 0;
+				frameSocketRef.current = socket;
+			};
+			socket.onerror = () => socket.close();
+			socket.onclose = () => {
+				window.clearTimeout(connectTimeout);
+				if (inputSocket === socket) inputSocket = null;
+				if (frameSocketRef.current === socket) frameSocketRef.current = null;
+				if (!disposed) scheduleInputReconnect();
+			};
+		}
+		openInputSocket();
     void refreshStatus();
     return () => {
       disposed = true;
 			pendingPresentation = null;
-			frameSockets.forEach((socket) => socket.close());
+			frameSockets.forEach((socket) => socket?.close());
+			frameReconnectTimers.forEach((timer) => window.clearTimeout(timer));
 			inputSocket?.close();
+			window.clearTimeout(inputReconnectTimer);
 			if (frameSocketRef.current === inputSocket) frameSocketRef.current = null;
 			window.clearTimeout(statusTimer);
 			window.clearTimeout(frameTimer);
@@ -1800,9 +1929,12 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			));
 		} else if (gesture.mode === "scroll") {
 			gesture.wheelDistance += midpoint.y - gesture.lastMidY;
-			if (Math.abs(gesture.wheelDistance) >= 12) {
-				sendInput({ type: "wheel", delta: gesture.wheelDistance > 0 ? -120 : 120 });
-				gesture.wheelDistance = 0;
+			let steps = 0;
+			while (Math.abs(gesture.wheelDistance) >= 8 && steps < 5) {
+				const direction = gesture.wheelDistance > 0 ? 1 : -1;
+				sendInput({ type: "wheel", delta: direction > 0 ? -120 : 120 });
+				gesture.wheelDistance -= direction * 8;
+				steps += 1;
 			}
 		}
 		gesture.lastMidX = midpoint.x;
@@ -1995,7 +2127,15 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	function wheel(event: ReactWheelEvent<HTMLDivElement>) {
     event.preventDefault();
-    sendInput({ type: "wheel", delta: event.deltaY > 0 ? -120 : 120 });
+		const pixelDelta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? Math.max(320, viewportSize.height) : 1);
+		wheelAccumulator.current += pixelDelta;
+		let steps = 0;
+		while (Math.abs(wheelAccumulator.current) >= 36 && steps < 6) {
+			const direction = wheelAccumulator.current > 0 ? 1 : -1;
+			sendInput({ type: "wheel", delta: direction > 0 ? -120 : 120 });
+			wheelAccumulator.current -= direction * 36;
+			steps += 1;
+		}
   }
 
   function keyboard(event: ReactKeyboardEvent<HTMLDivElement>, action: "down" | "up") {
@@ -2186,14 +2326,45 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		scheduleCamera({ zoom: 1, panX: 0, panY: 0 });
 	};
 
-	const workspace = <section className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""} ${mobileDockHidden ? "remote-mobile-dock-hidden" : ""} ${keyboardOpen ? "remote-keyboard-open" : ""}`}>
+	async function toggleRemoteFullscreen() {
+		const target = workspaceRef.current as (HTMLElement & { webkitRequestFullscreen?: () => Promise<void> | void }) | null;
+		const doc = document as Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => Promise<void> | void };
+		try {
+			const bridge = (window as unknown as { RemoteItAndroid?: { requestImmersiveFullscreen?: () => void } }).RemoteItAndroid;
+			bridge?.requestImmersiveFullscreen?.();
+			if (document.fullscreenElement || doc.webkitFullscreenElement) {
+				if (document.exitFullscreen) await document.exitFullscreen();
+				else await doc.webkitExitFullscreen?.();
+				return;
+			}
+			if (!target) return;
+			if (target.requestFullscreen) await target.requestFullscreen({ navigationUI: "hide" });
+			else if (target.webkitRequestFullscreen) await target.webkitRequestFullscreen();
+			else {
+				// iOS Safari does not expose element fullscreen for normal DOM nodes.
+				// The visual-viewport layout still fills every CSS pixel it provides.
+				setError("Браузер не поддерживает полноэкранный режим страницы — экран заполнен до границ браузера");
+			}
+		} catch {
+			setError("Полноэкранный режим заблокирован браузером — нажмите кнопку ещё раз");
+		}
+	}
+
+	const remoteViewportStyle = coarsePointerClient ? {
+		"--remote-vv-left": `${remoteViewport.left}px`,
+		"--remote-vv-top": `${remoteViewport.top}px`,
+		"--remote-vv-width": `${remoteViewport.width}px`,
+		"--remote-vv-height": `${remoteViewport.height}px`,
+	} as CSSProperties : undefined;
+
+	const workspace = <section ref={workspaceRef} style={remoteViewportStyle} className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""} ${mobileDockHidden ? "remote-mobile-dock-hidden" : ""} ${keyboardOpen ? "remote-keyboard-open" : ""} ${remoteViewport.landscape ? "remote-runtime-landscape" : "remote-runtime-portrait"} ${fullscreenActive ? "remote-is-fullscreen" : ""}`}>
 		<header>
 			<div><span className="eyebrow">ЗАЩИЩЁННЫЙ СЕАНС</span><h2>{device.name}</h2><small><span className={`desktop-live-dot ${status?.agentConnected ? "active" : ""}`} />{status?.agentConnected ? `Экран ${status.frameWidth || "—"}×${status.frameHeight || "—"} · ${status.controlEnabled ? "управление активно" : "предпросмотр — нажмите на экран для управления"}` : "Ожидание настольного Agent…"}</small></div>
 			<div className="desktop-actions">
 				<span className="remote-mode-badge">{pointerMode === "direct" ? "Касание" : "Курсор"}</span>
 				<label className="remote-scale-control" title="Частота кадров"><span>FPS</span><select value={targetFPS} onChange={(event) => updateTargetFPS(event.target.value as typeof targetFPS)}><option value="auto">Авто · 30</option><option value="15">15</option><option value="30">30</option><option value="60">60 · Плавность</option></select></label>
 				<label className="remote-scale-control" title="Масштаб изображения удалённого экрана"><span>Масштаб</span><select value={screenScale} onChange={(event) => setScreenScale(event.target.value as typeof screenScale)}><option value="fit">По размеру</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option><option value="125">125%</option><option value="150">150%</option></select></label>
-				<button className="remote-header-tool" onClick={() => viewportRef.current?.requestFullscreen()} title="На весь экран"><Maximize2 size={17} /><span>Полный экран</span></button>
+				<button className="remote-header-tool" onClick={() => void toggleRemoteFullscreen()} title={fullscreenActive ? "Выйти из полноэкранного режима" : "На весь экран"}><Maximize2 size={17} /><span>{fullscreenActive ? "Свернуть" : "Полный экран"}</span></button>
 				<button className="remote-header-tool" onClick={() => void sendCtrlAltDelete()} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>
 				<button className="remote-header-tool" onClick={() => void pasteClipboard()} title="Вставить текст из локального буфера"><Clipboard size={17} /><span>Буфер</span></button>
 				<button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>
@@ -2220,6 +2391,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			<button type="button" className="dock-hide" onClick={() => setMobileDockHidden(true)} aria-label="Скрыть все элементы управления"><X size={17} /></button>
 		</nav>}
 		{coarsePointerClient && controlsCollapsed && mobileDockHidden && <button type="button" className="remote-mobile-dock-reveal" onClick={() => setMobileDockHidden(false)} aria-label="Показать управление"><SlidersHorizontal size={18} /></button>}
+		{coarsePointerClient && controlsCollapsed && <button type="button" className="remote-mobile-fullscreen-fab" onClick={() => void toggleRemoteFullscreen()} aria-label={fullscreenActive ? "Выйти из полноэкранного режима" : "Открыть на весь экран"} title={fullscreenActive ? "Свернуть" : "На весь экран"}><Maximize2 size={19} /></button>}
 		{coarsePointerClient && <button type="button" className={`remote-mobile-keyboard-fab ${keyboardOpen ? "active" : ""} ${controlsCollapsed && !mobileDockHidden ? "dock-visible" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} aria-label={keyboardOpen ? "Закрыть клавиатуру" : "Открыть клавиатуру"} title={keyboardOpen ? "Закрыть клавиатуру" : "Открыть клавиатуру"}><Keyboard size={20} /></button>}
 		{coarsePointerClient && !controlsCollapsed && <button type="button" className="remote-controls-scrim" aria-label="Скрыть панель управления" onClick={toggleControls} />}
 		<footer className="remote-session-footer">
@@ -2231,7 +2403,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				</div>
 				<button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)}><Keyboard size={15} /> Клавиатура</button>
 				<button type="button" className="remote-tool-button" onClick={() => void sendCtrlAltDelete()}><Keyboard size={15} /> Ctrl+Alt+Del</button>
+				<button type="button" className="remote-tool-button" onClick={() => void toggleRemoteFullscreen()}><Maximize2 size={15} /> {fullscreenActive ? "Свернуть" : "Полный экран"}</button>
 				<button type="button" className="remote-tool-button" onClick={resetCamera}><Maximize2 size={15} /> По размеру</button>
+				<button type="button" className="remote-tool-button" onClick={() => sendInput({ type: "wheel", delta: 360 })}><ChevronUp size={16} /> Прокрутить вверх</button>
+				<button type="button" className="remote-tool-button" onClick={() => sendInput({ type: "wheel", delta: -360 })}><ChevronDown size={16} /> Прокрутить вниз</button>
 				<button type="button" className="remote-tool-button" onClick={openRemoteFiles}><Folder size={15} /> Файлы</button>
 				<button type="button" className="remote-tool-button" onClick={() => void pasteClipboard()}><Clipboard size={15} /> Буфер</button>
 				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
@@ -2301,6 +2476,10 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
   const [transferProgress, setTransferProgress] = useState("");
   const uploadInput = useRef<HTMLInputElement>(null);
 
+	useEffect(() => {
+		if (device.online) void openPath("");
+	}, [device.id, device.online]);
+
   async function runFileJob(type: "files_list", targetPath: string, extra: Record<string, unknown> = {}) {
     const created = await api<{ id: string }>(`/api/devices/${device.id}/jobs`, {
       method: "POST",
@@ -2330,7 +2509,13 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
       const created = await api<{ id: string }>(`/api/devices/${device.id}/file-transfers`, { method: "POST", body: JSON.stringify({ direction: "from_device", name: entry.name, remotePath: entry.path, size: entry.size }) }, csrf);
       await waitForLargeTransfer(created.id, (transfer) => setTransferProgress(`Подготовка скачивания: ${formatBytes(transfer.received)} из ${formatBytes(transfer.size)}`), "ready");
       const anchor = document.createElement("a");
-      anchor.href = `/api/file-transfers/${created.id}/download`; anchor.download = entry.name; anchor.click();
+			anchor.href = `/api/file-transfers/${created.id}/download`;
+			anchor.download = entry.name;
+			anchor.rel = "noopener";
+			anchor.style.display = "none";
+			document.body.appendChild(anchor);
+			anchor.click();
+			window.setTimeout(() => anchor.remove(), 1_000);
       setMessage(`Скачивание «${entry.name}» запущено`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось скачать файл");
@@ -2382,19 +2567,23 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
     void uploadFiles(Array.from(event.dataTransfer.files));
   }
 
-  return <section className="remote-files-card">
-    <div className="remote-files-head"><div><strong><FolderOpen size={17} /> Файлы компьютера</strong><small>Реальный просмотр через Agent · действия записываются в журнал</small></div>{started && <button className="icon-button" disabled={loading} onClick={() => void openPath(path)} aria-label="Обновить папку"><RefreshCw size={16} className={loading ? "spin" : ""} /></button>}</div>
+  return <section className="remote-files-card" aria-busy={loading}>
+		<div className="remote-files-head"><div><strong><FolderOpen size={19} /> Проводник удалённого компьютера</strong><small>Открывайте папки, скачивайте файлы и загружайте их перетаскиванием</small></div><span className="remote-files-cap"><ShieldCheck size={14} /> до 10 ГБ</span></div>
     {!started ? <button className="secondary-button remote-files-open" disabled={!device.online || loading} onClick={() => void openPath("")}><FolderOpen size={17} /> {device.online ? "Открыть файлы" : "Агент не в сети"}</button> : <>
-      <form className="remote-path" onSubmit={(event) => { event.preventDefault(); void openPath(path); }}><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="C:\\ или /home" /><button className="secondary-button" disabled={loading}>Перейти</button></form>
-      {parent && <button className="remote-parent" disabled={loading} onClick={() => void openPath(parent)}>← На уровень выше</button>}
+			<div className="remote-files-toolbar">
+				<button type="button" className="secondary-button remote-parent" disabled={loading || !parent} onClick={() => void openPath(parent)}><ChevronUp size={16} /> Выше</button>
+				<form className="remote-path" onSubmit={(event) => { event.preventDefault(); void openPath(path); }}><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="C:\\ или /home" aria-label="Путь на удалённом компьютере" /><button className="secondary-button" disabled={loading}>Перейти</button></form>
+				<button type="button" className="secondary-button remote-refresh-folder" disabled={loading} onClick={() => void openPath(path)}><RefreshCw size={16} className={loading ? "spin" : ""} /><span>Обновить</span></button>
+			</div>
       {path && <><input ref={uploadInput} className="remote-upload-input" type="file" multiple onChange={(event) => { void uploadFiles(Array.from(event.target.files || [])); event.target.value = ""; }} /><button type="button" className={`remote-upload-zone ${dragging ? "dragging" : ""}`} disabled={loading || !supportsLargeTransfers} onClick={() => uploadInput.current?.click()} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={dropFiles}><Upload size={17} /><span><strong>{supportsLargeTransfers ? "Перетащите файлы сюда" : "Обновите Agent до 0.6.0"}</strong><small>потоковая передача с прогрессом · до 10 ГБ на файл</small></span></button></>}
-      <div className="remote-file-list">{entries.map((entry) => <div className="remote-file-row" key={entry.path}><span className="remote-file-icon">{entry.directory ? <Folder size={17} /> : <FileIcon size={17} />}</span><button className="remote-file-name" disabled={loading} onClick={() => entry.directory ? void openPath(entry.path) : void downloadRemoteFile(entry)}><strong>{entry.name}</strong><small>{entry.directory ? "Папка" : formatBytes(entry.size)} · {new Date(entry.modifiedAt).toLocaleString("ru-RU")}</small></button>{!entry.directory && <button className="remote-download" disabled={loading || !supportsLargeTransfers || entry.size > 10 * 1024 * 1024 * 1024} title={!supportsLargeTransfers ? "Обновите Agent до 0.6.0" : entry.size > 10 * 1024 * 1024 * 1024 ? "Файл превышает 10 ГБ" : "Скачать"} onClick={() => void downloadRemoteFile(entry)}><Download size={16} /></button>}</div>)}</div>
+			<div className="remote-file-list-head"><span>Содержимое папки</span><small>{entries.length} объектов</small></div>
+			<div className="remote-file-list">{entries.map((entry) => <div className="remote-file-row" key={entry.path}><span className="remote-file-icon">{entry.directory ? <Folder size={18} /> : <FileIcon size={18} />}</span><button className="remote-file-name" disabled={loading} onClick={() => entry.directory ? void openPath(entry.path) : void downloadRemoteFile(entry)}><strong>{entry.name}</strong><small>{entry.directory ? "Папка" : formatBytes(entry.size)} · {new Date(entry.modifiedAt).toLocaleString("ru-RU")}</small></button>{entry.directory ? <button className="remote-download" disabled={loading} title="Открыть папку" onClick={() => void openPath(entry.path)}><ChevronDown size={16} className="remote-open-folder-icon" /></button> : <button className="remote-download" disabled={loading || !supportsLargeTransfers || entry.size > 10 * 1024 * 1024 * 1024} title={!supportsLargeTransfers ? "Обновите Agent до 0.6.0" : entry.size > 10 * 1024 * 1024 * 1024 ? "Файл превышает 10 ГБ" : "Скачать"} onClick={() => void downloadRemoteFile(entry)}><Download size={16} /><span>Скачать</span></button>}</div>)}</div>
       {!loading && entries.length === 0 && !error && <div className="remote-files-empty">Папка пуста</div>}
     </>}
     {loading && <div className="remote-files-loading"><RefreshCw className="spin" size={16} /> {transferProgress || "Ожидание ответа Agent…"}</div>}
     {message && <div className="form-success">{message}</div>}
     {error && <div className="form-error">{error}</div>}
-    <small className="remote-files-limit">Потоковое скачивание и загрузка перетаскиванием до 10 ГБ на файл. Части по 8 МБ не загружаются целиком в память; существующие файлы не перезаписываются.</small>
+		<small className="remote-files-limit"><ShieldCheck size={14} /> Передача идёт частями по 8 МБ и автоматически продолжается после краткого обрыва. Файл до 10 ГБ не хранится целиком в памяти.</small>
   </section>;
 }
 
