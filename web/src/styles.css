@@ -1455,6 +1455,11 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.remote-desktop-embedded { position: fixed; z-index: 170; inset: 0; width: 100vw; height: 100dvh; min-height: 0; border: 0; border-radius: 0; }
 	.remote-desktop-backdrop { width: 100vw; height: 100dvh; overflow: hidden; }
 	.remote-desktop-modal { position: relative; grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,1fr); }
+	/* The generic modal rule above must not turn the embedded remote workspace
+	   back into a relative child of .remote-control-stage. On wide phones that
+	   shifted the 100vw surface by the stage's x/y offset and collapsed the
+	   visible desktop height. Keep the session pinned to the visual viewport. */
+	.remote-desktop-modal.remote-desktop-embedded { position: fixed; inset: 0; width: 100vw; height: 100dvh; min-height: 0; }
 	.remote-desktop-modal > header { position: absolute; z-index: 188; top: max(6px,env(safe-area-inset-top)); right: max(8px,env(safe-area-inset-right)); left: max(8px,env(safe-area-inset-left)); min-height: 42px; padding: 5px 7px 5px 10px; border: 1px solid rgba(255,255,255,.16); border-radius: 14px; background: linear-gradient(90deg,rgba(8,17,25,.88),rgba(8,17,25,.72)); -webkit-backdrop-filter: blur(18px) saturate(1.12); backdrop-filter: blur(18px) saturate(1.12); box-shadow: 0 8px 28px rgba(0,0,0,.22); pointer-events: none; }
 	.remote-desktop-modal > header > * { pointer-events: auto; }
 	.remote-desktop-modal header small { display: none; }
