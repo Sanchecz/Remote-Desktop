@@ -19,7 +19,7 @@ import (
 
 const (
 	maxLargeTransfer   int64 = 10 * 1024 * 1024 * 1024
-	largeTransferChunk int64 = 32 * 1024 * 1024
+	largeTransferChunk int64 = 64 * 1024 * 1024
 )
 
 type largeFileTransfer struct {

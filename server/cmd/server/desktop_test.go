@@ -9,6 +9,7 @@ import (
 func TestValidDesktopInput(t *testing.T) {
 	valid := []desktopInputEvent{
 		{Type: "pointer", Action: "move", X: 120, Y: 80},
+		{Type: "pointer", Action: "move", X: 120, Y: 80, CoordinateWidth: 2256, CoordinateHeight: 1504},
 		{Type: "pointer", Action: "down", Button: "left", X: 1, Y: 2},
 		{Type: "pointer", Action: "up", Button: "right", X: 1, Y: 2},
 		{Type: "wheel", Delta: -120},
@@ -24,6 +25,8 @@ func TestValidDesktopInput(t *testing.T) {
 	invalid := []desktopInputEvent{
 		{Type: "pointer", Action: "down", Button: "unknown"},
 		{Type: "pointer", Action: "move", X: -1},
+		{Type: "pointer", Action: "move", X: 1, Y: 1, CoordinateWidth: 1920},
+		{Type: "pointer", Action: "move", X: 1, Y: 1, CoordinateWidth: 12001, CoordinateHeight: 1080},
 		{Type: "wheel", Delta: 9999},
 		{Type: "key", Action: "down", KeyCode: 0},
 		{Type: "text"},

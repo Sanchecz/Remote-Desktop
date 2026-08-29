@@ -167,15 +167,17 @@ func (timer *desktopWaitTimer) Close() {
 }
 
 type desktopInput struct {
-	ID      int64  `json:"-"`
-	Type    string `json:"type"`
-	Action  string `json:"action,omitempty"`
-	Button  string `json:"button,omitempty"`
-	Text    string `json:"text,omitempty"`
-	X       int    `json:"x,omitempty"`
-	Y       int    `json:"y,omitempty"`
-	Delta   int    `json:"delta,omitempty"`
-	KeyCode int    `json:"keyCode,omitempty"`
+	ID               int64  `json:"-"`
+	Type             string `json:"type"`
+	Action           string `json:"action,omitempty"`
+	Button           string `json:"button,omitempty"`
+	Text             string `json:"text,omitempty"`
+	X                int    `json:"x,omitempty"`
+	Y                int    `json:"y,omitempty"`
+	CoordinateWidth  int    `json:"coordinateWidth,omitempty"`
+	CoordinateHeight int    `json:"coordinateHeight,omitempty"`
+	Delta            int    `json:"delta,omitempty"`
+	KeyCode          int    `json:"keyCode,omitempty"`
 }
 
 type desktopInputTask struct {
@@ -1819,8 +1821,7 @@ func scaleDesktopFrame(source *image.RGBA, width, height int) *image.RGBA {
 func executeDesktopInput(event desktopInput, capture desktopCapture) error {
 	switch event.Type {
 	case "pointer":
-		x := capture.ScreenX + event.X*capture.ScreenWidth/max(1, capture.FrameWidth)
-		y := capture.ScreenY + event.Y*capture.ScreenHeight/max(1, capture.FrameHeight)
+		x, y := desktopPointerScreenPoint(event, capture)
 		if err := sendDesktopAbsolutePointer(x, y, capture, 0, 0); err != nil {
 			return err
 		}
@@ -1860,6 +1861,30 @@ func executeDesktopInput(event desktopInput, capture desktopCapture) error {
 		return sendDesktopSecureAttentionSequence()
 	}
 	return nil
+}
+
+func desktopPointerScreenPoint(event desktopInput, capture desktopCapture) (int, int) {
+	// New clients identify the coordinate space of the JPEG they actually saw.
+	// Keep the current capture dimensions as a compatibility fallback for older
+	// consoles, but never reinterpret a new packet after the capture profile has
+	// changed between idle and interactive streaming.
+	coordinateWidth := event.CoordinateWidth
+	coordinateHeight := event.CoordinateHeight
+	if coordinateWidth <= 0 {
+		coordinateWidth = capture.FrameWidth
+	}
+	if coordinateHeight <= 0 {
+		coordinateHeight = capture.FrameHeight
+	}
+	// Both the browser and the Windows absolute-pointer API use inclusive pixel
+	// endpoints.  Mapping width-to-width used to leave the last physical pixel
+	// unreachable and made an out-of-date mobile packet jump outside ultrawide or
+	// portrait desktops.  Clamp in the packet's own space and preserve both
+	// endpoints exactly.
+	packetX := min(max(event.X, 0), max(0, coordinateWidth-1))
+	packetY := min(max(event.Y, 0), max(0, coordinateHeight-1))
+	return capture.ScreenX + packetX*max(0, capture.ScreenWidth-1)/max(1, coordinateWidth-1),
+		capture.ScreenY + packetY*max(0, capture.ScreenHeight-1)/max(1, coordinateHeight-1)
 }
 
 func sendDesktopSecureAttentionSequence() error {

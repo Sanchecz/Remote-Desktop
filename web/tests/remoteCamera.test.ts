@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advanceRemotePinch, advanceRemoteTrackpadCursor, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remotePointFromClient } from "../src/remoteCamera.ts";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remotePointFromClient, reprojectRemotePoint } from "../src/remoteCamera.ts";
 
 test("pinch zoom preserves the remote point below the moving finger midpoint", () => {
 	const center = { x: 540, y: 360 };
@@ -139,7 +139,7 @@ test("mobile trackpad is precise for slow motion, accelerates long swipes and st
 });
 
 test("fit mode keeps the entire desktop visible in phone portrait and landscape", () => {
-	for (const frame of [{ x: 1920, y: 1080 }, { x: 2560, y: 1440 }, { x: 3840, y: 2160 }]) {
+	for (const frame of [{ x: 1366, y: 768 }, { x: 1920, y: 1080 }, { x: 2256, y: 1504 }, { x: 2560, y: 1440 }, { x: 2560, y: 1600 }, { x: 3440, y: 1440 }, { x: 3840, y: 2160 }, { x: 1080, y: 1920 }]) {
 		for (const viewport of [{ x: 390, y: 786 }, { x: 844, y: 342 }, { x: 360, y: 640 }, { x: 915, y: 364 }, { x: 1280, y: 576 }, { x: 740, y: 328 }]) {
 			const fitted = fitRemoteFrame(frame, viewport);
 			assert.ok(fitted.x <= viewport.x, `${frame.x}x${frame.y} exceeds portrait/landscape width`);
@@ -147,4 +147,19 @@ test("fit mode keeps the entire desktop visible in phone portrait and landscape"
 			assert.ok(Math.abs(fitted.x / fitted.y - frame.x / frame.y) < 0.02, "fit must preserve the desktop aspect ratio");
 		}
 	}
+});
+
+test("cursor remains on the same normalized desktop point when stream geometry changes", () => {
+	const original = { x: 1536, y: 864 };
+	const interactive = reprojectRemotePoint(original, { x: 1920, y: 1080 }, { x: 1600, y: 900 });
+	assert.deepEqual(interactive, { x: 1280, y: 720 });
+	const restored = reprojectRemotePoint(interactive, { x: 1600, y: 900 }, { x: 3840, y: 2160 });
+	assert.deepEqual(restored, { x: 3072, y: 1728 });
+});
+
+test("coordinate reprojection is bounded for nonstandard and portrait frames", () => {
+	assert.deepEqual(reprojectRemotePoint({ x: -50, y: 9999 }, { x: 2256, y: 1504 }, { x: 1080, y: 1920 }), { x: 0, y: 1919 });
+	const ultrawide = reprojectRemotePoint({ x: 1720, y: 720 }, { x: 3440, y: 1440 }, { x: 1920, y: 804 });
+	assert.ok(Math.abs(ultrawide.x - 960) < 1e-9);
+	assert.ok(Math.abs(ultrawide.y - 402) < 1e-9);
 });

@@ -422,14 +422,16 @@ func (s *server) pruneDesktopRuntimeState(cutoff time.Time) {
 }
 
 type desktopInputEvent struct {
-	Type    string `json:"type"`
-	Action  string `json:"action,omitempty"`
-	Button  string `json:"button,omitempty"`
-	Text    string `json:"text,omitempty"`
-	X       int    `json:"x,omitempty"`
-	Y       int    `json:"y,omitempty"`
-	Delta   int    `json:"delta,omitempty"`
-	KeyCode int    `json:"keyCode,omitempty"`
+	Type             string `json:"type"`
+	Action           string `json:"action,omitempty"`
+	Button           string `json:"button,omitempty"`
+	Text             string `json:"text,omitempty"`
+	X                int    `json:"x,omitempty"`
+	Y                int    `json:"y,omitempty"`
+	CoordinateWidth  int    `json:"coordinateWidth,omitempty"`
+	CoordinateHeight int    `json:"coordinateHeight,omitempty"`
+	Delta            int    `json:"delta,omitempty"`
+	KeyCode          int    `json:"keyCode,omitempty"`
 }
 
 func (s *server) authenticateDesktopAgent(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -800,6 +802,15 @@ func validDesktopInput(event desktopInputEvent) bool {
 	switch event.Type {
 	case "pointer":
 		if event.X < 0 || event.Y < 0 || event.X > 20000 || event.Y > 20000 {
+			return false
+		}
+		// Both dimensions form one atomic coordinate basis. Zero/zero keeps legacy
+		// clients compatible; partially supplied or implausibly large geometry is
+		// rejected rather than producing an unsafe pointer projection.
+		if (event.CoordinateWidth == 0) != (event.CoordinateHeight == 0) {
+			return false
+		}
+		if event.CoordinateWidth < 0 || event.CoordinateHeight < 0 || event.CoordinateWidth > 12000 || event.CoordinateHeight > 12000 {
 			return false
 		}
 		if event.Action == "move" {

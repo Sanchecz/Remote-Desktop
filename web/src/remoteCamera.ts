@@ -72,6 +72,22 @@ export function clampRemotePoint(point: Point, frame: Point): Point {
 	};
 }
 
+// JPEG dimensions may change while a session stays open: the Agent uses a
+// sharper idle profile and a lower-latency interaction profile, and Windows can
+// also change monitor geometry after RDP, docking or rotation. Keep the remote
+// cursor on the same normalized desktop point instead of interpreting its old
+// pixel coordinates in the new frame (which looked like a teleport on phones).
+export function reprojectRemotePoint(point: Point, fromFrame: Point, toFrame: Point): Point {
+	const fromWidth = Math.max(1, fromFrame.x);
+	const fromHeight = Math.max(1, fromFrame.y);
+	const toWidth = Math.max(1, toFrame.x);
+	const toHeight = Math.max(1, toFrame.y);
+	return {
+		x: Math.max(0, Math.min(toWidth - 1, point.x * toWidth / fromWidth)),
+		y: Math.max(0, Math.min(toHeight - 1, point.y * toHeight / fromHeight)),
+	};
+}
+
 // A phone touchpad receives fractional CSS-pixel deltas. Rounding after every
 // event discards those fractions and makes the remote cursor alternately stop
 // and jump, especially when a 1080p/2K/4K desktop is fitted into a phone. Keep

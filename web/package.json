@@ -1,16 +1,17 @@
 {
   "name": "remoteit-web",
   "private": true,
-  "version": "1.0.19",
+  "version": "1.0.20",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
-    "test": "pnpm run test:keyboard && pnpm run test:camera && pnpm run test:viewport && pnpm run test:reconnect && pnpm run test:codex",
+    "test": "pnpm run test:keyboard && pnpm run test:camera && pnpm run test:viewport && pnpm run test:reconnect && pnpm run test:files && pnpm run test:codex",
     "test:keyboard": "node --experimental-strip-types --test tests/remoteKeyboard.test.ts",
     "test:camera": "node --experimental-strip-types --test tests/remoteCamera.test.ts",
     "test:viewport": "node --experimental-strip-types --test tests/remoteViewport.test.ts",
     "test:reconnect": "node --experimental-strip-types --test tests/remoteReconnect.test.ts",
+    "test:files": "node --experimental-strip-types --test tests/fileTransfers.test.ts",
     "test:codex": "node --experimental-strip-types --test tests/codexSetup.test.ts",
     "check": "pnpm run test && pnpm run build"
   },

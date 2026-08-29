@@ -61,10 +61,11 @@ import {
   X
 } from "lucide-react";
 import { chunkRemoteText, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
-import { advanceRemotePinch, advanceRemoteTrackpadCursor, cameraFollowingRemotePoint, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient } from "./remoteCamera";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, cameraFollowingRemotePoint, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient, reprojectRemotePoint } from "./remoteCamera";
 import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
 import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, resolveRemoteViewport, shouldUseCompactRemoteControls, type RemoteViewport } from "./remoteViewport";
 import { isRecoverableRemoteStatusFailure, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
+import { abortableDelay, fileTransferProgress, isAbortError, uploadTransferChunk } from "./fileTransfers";
 
 type User = {
   id: string;
@@ -222,7 +223,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.19";
+const LATEST_AGENT_VERSION = "1.0.20";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1254,7 +1255,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const sasPendingInputID = useRef(0);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
   const lastPointerSent = useRef(0);
-  const trackpadCursor = useRef({ x: 0, y: 0, ready: false });
+  const trackpadCursor = useRef({ x: 0, y: 0, frameWidth: 0, frameHeight: 0, ready: false });
 	const trackpadGesture = useRef({ pointerId: -1, lastX: 0, lastY: 0, distance: 0, longPress: false, dragging: false, secondTap: false, timer: 0 });
 	const lastTrackpadTap = useRef({ at: 0, clientX: 0, clientY: 0 });
 	const directGesture = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number; moved: boolean; leftDown: boolean; longPress: boolean; timer: number }>({ pointerId: -1, startX: 0, startY: 0, x: 0, y: 0, moved: false, leftDown: false, longPress: false, timer: 0 });
@@ -1432,11 +1433,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	useEffect(() => {
 		if (!status?.frameWidth || !status?.frameHeight || trackpadCursor.current.ready) return;
-		trackpadCursor.current = { x: Math.round(status.frameWidth / 2), y: Math.round(status.frameHeight / 2), ready: true };
-		if (localCursorRef.current) {
-			localCursorRef.current.style.left = "50%";
-			localCursorRef.current.style.top = "50%";
-		}
+		trackpadCursor.current = { x: Math.round(status.frameWidth / 2), y: Math.round(status.frameHeight / 2), frameWidth: status.frameWidth, frameHeight: status.frameHeight, ready: true };
+		positionLocalCursor(trackpadCursor.current, { width: status.frameWidth, height: status.frameHeight });
 	}, [status?.frameWidth, status?.frameHeight]);
 
 	useEffect(() => {
@@ -1444,9 +1442,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const image = frameImageRef.current;
 		if (!image) return;
 		const size = frameSize(image);
-		if (!trackpadCursor.current.ready) {
-			trackpadCursor.current = { x: Math.round(size.width / 2), y: Math.round(size.height / 2), ready: true };
-		}
+		ensureTrackpadCursor(image);
 		window.requestAnimationFrame(() => positionLocalCursor(trackpadCursor.current, size));
 	}, [mobileTrackpadMode, frameURL, renderedFrameSize.width, renderedFrameSize.height]);
 
@@ -1790,10 +1786,25 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	const sendInput = useCallback((event: Record<string, unknown>, activatesControl = true) => {
 		if (!sessionId) return;
+		// Bind every pointer packet to the exact JPEG coordinate space used by the
+		// viewer when the event was produced. The Agent may switch capture profiles
+		// before this packet arrives; without this basis, 1920px input interpreted
+		// against a later 1600px frame moves the Windows pointer to the wrong place.
+		let queuedEvent = event;
+		if (event.type === "pointer") {
+			const image = frameImageRef.current;
+			const size = image ? frameSize(image) : {
+				width: Math.max(1, status?.frameWidth || 1),
+				height: Math.max(1, status?.frameHeight || 1),
+			};
+			const coordinateWidth = Number(event.coordinateWidth) > 0 ? Number(event.coordinateWidth) : size.width;
+			const coordinateHeight = Number(event.coordinateHeight) > 0 ? Number(event.coordinateHeight) : size.height;
+			queuedEvent = { ...event, coordinateWidth, coordinateHeight };
+		}
 		const enqueueOrdered = () => {
 			const last = inputQueue.current.at(-1);
-			if (event.type === "pointer" && event.action === "move" && last?.type === "pointer" && last?.action === "move") inputQueue.current[inputQueue.current.length - 1] = event;
-			else inputQueue.current.push(event);
+			if (queuedEvent.type === "pointer" && queuedEvent.action === "move" && last?.type === "pointer" && last?.action === "move") inputQueue.current[inputQueue.current.length - 1] = queuedEvent;
+			else inputQueue.current.push(queuedEvent);
 			window.clearTimeout(inputFlushTimer.current);
 			inputFlushTimer.current = window.setTimeout(() => flushInputQueueRef.current(), 0);
 		};
@@ -1801,7 +1812,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		if (!activatesControl) return;
 		void activateRemoteControl().then(enqueueOrdered).catch((reason) => setError(reason instanceof Error ? reason.message : "Не удалось включить управление — проверьте соединение."));
 		return;
-	}, [sessionId, activateRemoteControl]);
+	}, [sessionId, activateRemoteControl, status?.frameWidth, status?.frameHeight]);
 
 	const releaseRemoteModifiers = useCallback(() => {
 		textKeyboardKeys.current.clear();
@@ -1854,9 +1865,16 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	function ensureTrackpadCursor(element: HTMLImageElement) {
 		const size = frameSize(element);
 		if (!trackpadCursor.current.ready) {
-			trackpadCursor.current = { x: Math.round(size.width / 2), y: Math.round(size.height / 2), ready: true };
-			positionLocalCursor(trackpadCursor.current, size);
+			trackpadCursor.current = { x: Math.round(size.width / 2), y: Math.round(size.height / 2), frameWidth: size.width, frameHeight: size.height, ready: true };
+		} else if (trackpadCursor.current.frameWidth !== size.width || trackpadCursor.current.frameHeight !== size.height) {
+			const next = reprojectRemotePoint(
+				trackpadCursor.current,
+				{ x: trackpadCursor.current.frameWidth || size.width, y: trackpadCursor.current.frameHeight || size.height },
+				{ x: size.width, y: size.height },
+			);
+			trackpadCursor.current = { ...next, frameWidth: size.width, frameHeight: size.height, ready: true };
 		}
+		positionLocalCursor(trackpadCursor.current, size);
 		return size;
 	}
 
@@ -1866,28 +1884,41 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			width: Math.max(1, status?.frameWidth || 1),
 			height: Math.max(1, status?.frameHeight || 1),
 		};
-		return clampRemotePoint(trackpadCursor.current, { x: size.width, y: size.height });
+		if (image) ensureTrackpadCursor(image);
+		const position = clampRemotePoint(trackpadCursor.current, { x: size.width, y: size.height });
+		return { ...position, coordinateWidth: size.width, coordinateHeight: size.height };
 	}
 
 	function positionLocalCursor(position: { x: number; y: number }, size: { width: number; height: number }) {
 		const cursor = localCursorRef.current;
 		if (!cursor) return;
-		cursor.style.left = `${Math.max(0, Math.min(100, position.x * 100 / Math.max(1, size.width)))}%`;
-		cursor.style.top = `${Math.max(0, Math.min(100, position.y * 100 / Math.max(1, size.height)))}%`;
+		// Keep the cursor in the decoded frame's pixel coordinate space. Percentage
+		// layout caused a synchronous style/layout pass on every touch sample and
+		// rounded differently on 1366px/2256px/ultrawide frames, which looked like
+		// blinking or teleporting on Android. A compositor-only transform stays
+		// stable while the JPEG element is being replaced underneath it.
+		const x = Math.max(0, Math.min(Math.max(0, size.width - 1), Math.round(position.x)));
+		const y = Math.max(0, Math.min(Math.max(0, size.height - 1), Math.round(position.y)));
+		cursor.style.setProperty("--remote-cursor-x", `${x}px`);
+		cursor.style.setProperty("--remote-cursor-y", `${y}px`);
 	}
 
 	function pointerPosition(event: ReactPointerEvent<HTMLDivElement>) {
 		const image = frameImageRef.current;
-		if (!image) return { x: 0, y: 0 };
+		if (!image) {
+			const coordinateWidth = Math.max(1, status?.frameWidth || 1);
+			const coordinateHeight = Math.max(1, status?.frameHeight || 1);
+			return { x: 0, y: 0, coordinateWidth, coordinateHeight };
+		}
 		const { width: frameWidth, height: frameHeight } = frameSize(image);
 		const position = remotePointFromClient(
 			{ x: event.clientX, y: event.clientY },
 			image.getBoundingClientRect(),
 			{ x: frameWidth, y: frameHeight },
 		);
-		trackpadCursor.current = { ...position, ready: true };
+		trackpadCursor.current = { ...position, frameWidth, frameHeight, ready: true };
 		positionLocalCursor(position, { width: frameWidth, height: frameHeight });
-		return position;
+		return { ...position, coordinateWidth: frameWidth, coordinateHeight: frameHeight };
   }
 
 	function beginTouchGesture(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1910,7 +1941,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			rightClickSent: false,
 		};
 		if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
-		if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", x: directGesture.current.x, y: directGesture.current.y });
+		if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() });
 		if (trackpadGesture.current.timer) { window.clearTimeout(trackpadGesture.current.timer); trackpadGesture.current.timer = 0; }
 		if (trackpadGesture.current.dragging) sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() });
 		trackpadGesture.current.pointerId = -1;
@@ -2010,7 +2041,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				{ x: size.width, y: size.height },
 				{ x: rect.width, y: rect.height },
 			);
-			trackpadCursor.current = { ...next, ready: true };
+			trackpadCursor.current = { ...next, frameWidth: size.width, frameHeight: size.height, ready: true };
 			positionLocalCursor(next, size);
 			const followedCamera = cameraFollowingRemotePoint(
 				pendingCameraRef.current,
@@ -2027,7 +2058,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				// the first movement makes the cursor follow the finger immediately;
 				// previously only the later tap enabled control, so the first drag was
 				// silently discarded and subsequent clicks appeared offset.
-				sendInput({ type: "pointer", action: "move", ...clampRemotePoint(next, { x: size.width, y: size.height }) });
+				sendInput({ type: "pointer", action: "move", ...clampRemotePoint(next, { x: size.width, y: size.height }), coordinateWidth: size.width, coordinateHeight: size.height });
 			}
 			return;
 		}
@@ -2071,8 +2102,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				if (secondTap) {
 					lastTrackpadTap.current.at = 0;
 					const position = serialisedTrackpadPosition();
-					sendInput({ type: "pointer", action: "move", x: position.x, y: position.y });
-					sendInput({ type: "pointer", action: "down", button: "left", x: position.x, y: position.y });
+					sendInput({ type: "pointer", action: "move", ...position });
+					sendInput({ type: "pointer", action: "down", button: "left", ...position });
 					trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, distance: 0, longPress: false, dragging: true, secondTap: true, timer: 0 };
 					positionLocalCursor(trackpadCursor.current, size);
 					return;
@@ -2092,12 +2123,12 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
 			if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.dragging) {
 				const position = serialisedTrackpadPosition();
-				sendInput({ type: "pointer", action: "up", button: "left", x: position.x, y: position.y });
+				sendInput({ type: "pointer", action: "up", button: "left", ...position });
 			} else if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.distance < 10 && !trackpadGesture.current.longPress) {
 				const position = serialisedTrackpadPosition();
-				sendInput({ type: "pointer", action: "move", x: position.x, y: position.y });
-				sendInput({ type: "pointer", action: "down", button: "left", x: position.x, y: position.y });
-				sendInput({ type: "pointer", action: "up", button: "left", x: position.x, y: position.y });
+				sendInput({ type: "pointer", action: "move", ...position });
+				sendInput({ type: "pointer", action: "down", button: "left", ...position });
+				sendInput({ type: "pointer", action: "up", button: "left", ...position });
 				lastTrackpadTap.current = { at: performance.now(), clientX: event.clientX, clientY: event.clientY };
 			}
 			trackpadGesture.current.pointerId = -1;
@@ -2112,7 +2143,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				event.currentTarget.setPointerCapture(event.pointerId);
 				directGesture.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: position.x, y: position.y, moved: false, leftDown: false, longPress: false, timer: window.setTimeout(() => {
 					const gesture = directGesture.current; if (gesture.pointerId !== event.pointerId || gesture.moved) return;
-					gesture.longPress = true; sendInput({ type: "pointer", action: "move", x: gesture.x, y: gesture.y }); sendInput({ type: "pointer", action: "down", button: "right", x: gesture.x, y: gesture.y }); sendInput({ type: "pointer", action: "up", button: "right", x: gesture.x, y: gesture.y });
+					const current = serialisedTrackpadPosition();
+					gesture.longPress = true; sendInput({ type: "pointer", action: "move", ...current }); sendInput({ type: "pointer", action: "down", button: "right", ...current }); sendInput({ type: "pointer", action: "up", button: "right", ...current });
 				}, 2000) };
 				return;
 			}
@@ -2139,7 +2171,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
 		if (directGesture.current.pointerId === event.pointerId) {
 			if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
-			if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", x: directGesture.current.x, y: directGesture.current.y });
+			if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() });
 			directGesture.current.pointerId = -1; directGesture.current.timer = 0;
 		} else if (!mobileTrackpadMode) {
 			sendInput({ type: "pointer", action: "up", button: "left", ...pointerPosition(event) });
@@ -2472,12 +2504,14 @@ type RemoteFileList = {
 
 type LargeFileTransfer = { id: string; status: "uploading" | "queued" | "transferring" | "ready" | "completed" | "failed" | "cancelled" | "expired"; size: number; received: number; error: string };
 
-async function waitForLargeTransfer(id: string, onProgress: (transfer: LargeFileTransfer) => void, readyStatus: "ready" | "completed") {
+type ActiveFileTransfer = { id: string; direction: "to_device" | "from_device"; label: string; stage: string; received: number; size: number; startedAt: number };
+
+async function waitForLargeTransfer(id: string, onProgress: (transfer: LargeFileTransfer) => void, readyStatus: "ready" | "completed", signal?: AbortSignal) {
   for (;;) {
-    const transfer = await api<LargeFileTransfer>(`/api/file-transfers/${id}`); onProgress(transfer);
+    const transfer = await api<LargeFileTransfer>(`/api/file-transfers/${id}`, { signal }); onProgress(transfer);
     if (transfer.status === readyStatus || (readyStatus === "ready" && transfer.status === "completed")) return transfer;
     if (["failed", "cancelled", "expired"].includes(transfer.status)) throw new Error(transfer.error || "Передача файла прервана");
-    await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+    await abortableDelay(750, signal);
   }
 }
 
@@ -2501,8 +2535,13 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [dragging, setDragging] = useState(false);
-  const [transferProgress, setTransferProgress] = useState("");
+  const [activeTransfer, setActiveTransfer] = useState<ActiveFileTransfer | null>(null);
   const uploadInput = useRef<HTMLInputElement>(null);
+	const transferController = useRef<AbortController | null>(null);
+	const activeTransferRef = useRef<ActiveFileTransfer | null>(null);
+
+	useEffect(() => { activeTransferRef.current = activeTransfer; }, [activeTransfer]);
+	useEffect(() => () => transferController.current?.abort(), []);
 
 	useEffect(() => {
 		if (device.online) void openPath("");
@@ -2533,9 +2572,14 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
 		if (!supportsLargeTransfers) return setError("Обновите RemoteIt Agent до версии 0.6.0 для передачи файлов до 10 ГБ.");
     if (entry.size > 10 * 1024 * 1024 * 1024) return setError("Размер файла превышает 10 ГБ.");
     setLoading(true); setError("");
+    const controller = new AbortController(); transferController.current = controller;
+    const startedAt = Date.now(); let transferId = "";
     try {
       const created = await api<{ id: string }>(`/api/devices/${device.id}/file-transfers`, { method: "POST", body: JSON.stringify({ direction: "from_device", name: entry.name, remotePath: entry.path, size: entry.size }) }, csrf);
-      await waitForLargeTransfer(created.id, (transfer) => setTransferProgress(`Подготовка скачивания: ${formatBytes(transfer.received)} из ${formatBytes(transfer.size)}`), "ready");
+      transferId = created.id;
+      setActiveTransfer({ id: created.id, direction: "from_device", label: entry.name, stage: "Подготовка файла на удалённом компьютере", received: 0, size: entry.size, startedAt });
+      await waitForLargeTransfer(created.id, (transfer) => setActiveTransfer({ id: created.id, direction: "from_device", label: entry.name, stage: "Передача с удалённого компьютера", received: transfer.received, size: transfer.size, startedAt }), "ready", controller.signal);
+      setActiveTransfer({ id: created.id, direction: "from_device", label: entry.name, stage: "Передача в загрузки этого устройства", received: entry.size, size: entry.size, startedAt });
       const anchor = document.createElement("a");
 			anchor.href = `/api/file-transfers/${created.id}/download`;
 			anchor.download = entry.name;
@@ -2546,8 +2590,10 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
 			window.setTimeout(() => anchor.remove(), 1_000);
       setMessage(`Скачивание «${entry.name}» запущено`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Не удалось скачать файл");
-    } finally { setLoading(false); setTransferProgress(""); }
+      if (transferId) await api(`/api/file-transfers/${transferId}`, { method: "DELETE" }, csrf).catch(() => undefined);
+      if (isAbortError(reason)) setMessage("Передача отменена");
+      else setError(reason instanceof Error ? reason.message : "Не удалось скачать файл");
+    } finally { if (transferController.current === controller) transferController.current = null; setLoading(false); setActiveTransfer(null); }
   }
 
   async function uploadFiles(files: File[]) {
@@ -2557,43 +2603,68 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
     if (selected.length !== files.length) return setError("Размер каждого загружаемого файла не должен превышать 10 ГБ.");
     if (selected.length === 0) return;
     setLoading(true); setError(""); setMessage("");
+    const controller = new AbortController(); transferController.current = controller;
+    let transferId = "";
     try {
       for (const file of selected) {
+        const startedAt = Date.now();
         const created = await api<{ id: string }>(`/api/devices/${device.id}/file-transfers`, { method: "POST", body: JSON.stringify({ direction: "to_device", name: file.name, remotePath: path, size: file.size }) }, csrf);
-        let offset = 0; const chunkSize = 32 * 1024 * 1024;
+        transferId = created.id;
+        setActiveTransfer({ id: created.id, direction: "to_device", label: file.name, stage: "Отправка на сервер RemoteIt", received: 0, size: file.size, startedAt });
+        let offset = 0; const chunkSize = 64 * 1024 * 1024;
         while (offset < file.size) {
           const chunkOffset = offset; let uploaded = false; let lastError = "";
           for (let attempt = 0; attempt < 5 && !uploaded; attempt += 1) {
             try {
-              const response = await fetch(`/api/file-transfers/${created.id}/data?offset=${chunkOffset}`, { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/octet-stream", "X-CSRF-Token": csrf }, body: file.slice(chunkOffset, Math.min(file.size, chunkOffset + chunkSize)) });
-              if (!response.ok) { const detail = await response.json().catch(() => ({})) as { error?: string }; throw new Error(detail.error || `HTTP ${response.status}`); }
-              const progress = await response.json() as { received: number; size: number }; offset = progress.received; uploaded = offset > chunkOffset;
+              const chunk = file.slice(chunkOffset, Math.min(file.size, chunkOffset + chunkSize));
+              const progress = await uploadTransferChunk(
+                `/api/file-transfers/${created.id}/data?offset=${chunkOffset}`,
+                chunk,
+                csrf,
+                controller.signal,
+                (sent) => setActiveTransfer({ id: created.id, direction: "to_device", label: file.name, stage: "Отправка на сервер RemoteIt", received: chunkOffset + sent, size: file.size, startedAt })
+              );
+              offset = progress.received; uploaded = offset > chunkOffset;
             } catch (reason) {
+              if (isAbortError(reason)) throw reason;
               lastError = reason instanceof Error ? reason.message : "ошибка сети";
-              const checkpoint = await api<LargeFileTransfer>(`/api/file-transfers/${created.id}`).catch(() => null);
+              const checkpoint = await api<LargeFileTransfer>(`/api/file-transfers/${created.id}`, { signal: controller.signal }).catch(() => null);
               if (checkpoint && checkpoint.received > chunkOffset) { offset = checkpoint.received; uploaded = true; break; }
-              await new Promise((resolve) => window.setTimeout(resolve, 750 * (attempt + 1)));
+              await abortableDelay(750 * (attempt + 1), controller.signal);
             }
           }
           if (!uploaded) throw new Error(`Не удалось передать часть файла: ${lastError}`);
-          setTransferProgress(`Загрузка «${file.name}»: ${formatBytes(offset)} из ${formatBytes(file.size)} · ${Math.round(offset * 100 / Math.max(1, file.size))}%`);
+          setActiveTransfer({ id: created.id, direction: "to_device", label: file.name, stage: "Отправка на сервер RemoteIt", received: offset, size: file.size, startedAt });
         }
         await api(`/api/file-transfers/${created.id}/ready`, { method: "POST", body: "{}" }, csrf);
-        await waitForLargeTransfer(created.id, (transfer) => setTransferProgress(`Сохранение «${file.name}» на компьютере: ${Math.round(transfer.received * 100 / Math.max(1, transfer.size))}%`), "completed");
+        setActiveTransfer({ id: created.id, direction: "to_device", label: file.name, stage: "Сохранение на удалённом компьютере", received: file.size, size: file.size, startedAt });
+        await waitForLargeTransfer(created.id, () => undefined, "completed", controller.signal);
+        transferId = "";
       }
       setMessage(`Загружено файлов: ${selected.length}`);
       const output = await runFileJob("files_list", path);
       const result = JSON.parse(output) as RemoteFileList;
       setParent(result.parent || ""); setEntries(result.entries || []);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Не удалось загрузить файл");
-    } finally { setLoading(false); setTransferProgress(""); }
+      if (transferId) await api(`/api/file-transfers/${transferId}`, { method: "DELETE" }, csrf).catch(() => undefined);
+      if (isAbortError(reason)) setMessage("Передача отменена");
+      else setError(reason instanceof Error ? reason.message : "Не удалось загрузить файл");
+    } finally { if (transferController.current === controller) transferController.current = null; setLoading(false); setActiveTransfer(null); }
   }
+
+	async function cancelActiveTransfer() {
+		const transfer = activeTransferRef.current;
+		transferController.current?.abort();
+		if (transfer?.id) await api(`/api/file-transfers/${transfer.id}`, { method: "DELETE" }, csrf).catch(() => undefined);
+		setActiveTransfer(null); setLoading(false); setMessage("Передача отменена");
+	}
 
   function dropFiles(event: ReactDragEvent<HTMLButtonElement>) {
     event.preventDefault(); setDragging(false);
     void uploadFiles(Array.from(event.dataTransfer.files));
   }
+
+  const progress = activeTransfer ? fileTransferProgress(activeTransfer.received, activeTransfer.size, activeTransfer.startedAt) : null;
 
   return <section className="remote-files-card" aria-busy={loading}>
 		<div className="remote-files-head"><div><strong><FolderOpen size={19} /> Проводник удалённого компьютера</strong><small>Скачивайте файлы с компьютера и отправляйте на него файлы с этого устройства</small></div><span className="remote-files-cap"><ShieldCheck size={14} /> до 10 ГБ</span></div>
@@ -2608,10 +2679,14 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
 			<div className="remote-file-list">{entries.map((entry) => <div className="remote-file-row" key={entry.path}><span className="remote-file-icon">{entry.directory ? <Folder size={18} /> : <FileIcon size={18} />}</span><button className="remote-file-name" disabled={loading} onClick={() => entry.directory ? void openPath(entry.path) : void downloadRemoteFile(entry)}><strong>{entry.name}</strong><small>{entry.directory ? "Папка" : formatBytes(entry.size)} · {new Date(entry.modifiedAt).toLocaleString("ru-RU")}</small></button>{entry.directory ? <button className="remote-download" disabled={loading} title="Открыть папку" onClick={() => void openPath(entry.path)}><ChevronDown size={16} className="remote-open-folder-icon" /></button> : <button className="remote-download" disabled={loading || !supportsLargeTransfers || entry.size > 10 * 1024 * 1024 * 1024} title={!supportsLargeTransfers ? "Обновите Agent до 0.6.0" : entry.size > 10 * 1024 * 1024 * 1024 ? "Файл превышает 10 ГБ" : "Скачать"} onClick={() => void downloadRemoteFile(entry)}><Download size={16} /><span>Скачать</span></button>}</div>)}</div>
       {!loading && entries.length === 0 && !error && <div className="remote-files-empty">Папка пуста</div>}
     </>}
-    {loading && <div className="remote-files-loading"><RefreshCw className="spin" size={16} /> {transferProgress || "Ожидание ответа Agent…"}</div>}
+    {activeTransfer && progress ? <div className="remote-transfer-progress" role="status">
+		<div className="remote-transfer-summary"><span className="remote-transfer-direction">{activeTransfer.direction === "to_device" ? <Upload size={16} /> : <Download size={16} />}</span><span><strong>{activeTransfer.stage}</strong><small>{activeTransfer.label} · {formatBytes(progress.received)} из {formatBytes(progress.total)}</small></span><b>{Math.round(progress.percent)}%</b></div>
+		<div className="remote-transfer-bar" aria-label={`Передано ${Math.round(progress.percent)}%`}><span style={{ width: `${progress.percent}%` }} /></div>
+		<div className="remote-transfer-meta"><span>{progress.bytesPerSecond > 0 ? `${formatBytes(progress.bytesPerSecond)}/с` : "Расчёт скорости…"}</span><span>{progress.remainingSeconds != null ? `Осталось ≈ ${formatTransferDuration(progress.remainingSeconds)}` : "Завершение…"}</span><button type="button" onClick={() => void cancelActiveTransfer()}><X size={14} /> Отменить</button></div>
+	</div> : loading && <div className="remote-files-loading"><RefreshCw className="spin" size={16} /> Ожидание ответа Agent…</div>}
     {message && <div className="form-success">{message}</div>}
     {error && <div className="form-error">{error}</div>}
-		<small className="remote-files-limit"><ShieldCheck size={14} /> Передача идёт потоковыми частями по 32 МБ и автоматически продолжается после краткого обрыва. Файл до 10 ГБ не хранится целиком в памяти.</small>
+		<small className="remote-files-limit"><ShieldCheck size={14} /> Передача идёт потоковыми частями по 64 МБ, поддерживает отмену и автоматически продолжается после краткого обрыва. Файл до 10 ГБ не хранится целиком в памяти.</small>
   </section>;
 }
 
@@ -2907,6 +2982,15 @@ function CodexIntegrationPanel({ currentUser, csrf }: { currentUser: User; csrf:
       </article>}
     </div>
   </section>;
+}
+
+function formatTransferDuration(value: number) {
+	const seconds = Math.max(0, Math.round(value));
+	if (seconds < 60) return `${seconds} сек.`;
+	const minutes = Math.floor(seconds / 60);
+	const rest = seconds % 60;
+	if (minutes < 60) return `${minutes} мин. ${rest ? `${rest} сек.` : ""}`.trim();
+	return `${Math.floor(minutes / 60)} ч. ${minutes % 60} мин.`;
 }
 
 function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User; csrf: string; theme: Theme; onTheme: (theme: Theme) => void }) {
