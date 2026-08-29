@@ -1,6 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advanceRemotePinch, advanceRemoteTrackpadCursor, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remotePointFromClient, reprojectRemotePoint } from "../src/remoteCamera.ts";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remotePointFromClient, reprojectRemotePoint } from "../src/remoteCamera.ts";
+
+test("a frame source swap keeps the last decoded coordinate space", () => {
+	assert.deepEqual(
+		authoritativeRemoteFrameSize(
+			{ x: 0, y: 0 },
+			{ x: 2256, y: 1504 },
+			{ x: 1920, y: 1080 },
+			{ x: 390, y: 260 },
+		),
+		{ x: 2256, y: 1504 },
+	);
+	assert.deepEqual(
+		authoritativeRemoteFrameSize(
+			{ x: 1920, y: 1080 },
+			{ x: 2256, y: 1504 },
+			{ x: 2256, y: 1504 },
+			{ x: 390, y: 219 },
+		),
+		{ x: 1920, y: 1080 },
+	);
+});
 
 test("pinch zoom preserves the remote point below the moving finger midpoint", () => {
 	const center = { x: 540, y: 360 };
@@ -152,14 +173,40 @@ test("fit mode keeps the entire desktop visible in phone portrait and landscape"
 test("cursor remains on the same normalized desktop point when stream geometry changes", () => {
 	const original = { x: 1536, y: 864 };
 	const interactive = reprojectRemotePoint(original, { x: 1920, y: 1080 }, { x: 1600, y: 900 });
-	assert.deepEqual(interactive, { x: 1280, y: 720 });
+	assert.ok(Math.abs(interactive.x / 1599 - original.x / 1919) < 1e-12);
+	assert.ok(Math.abs(interactive.y / 899 - original.y / 1079) < 1e-12);
 	const restored = reprojectRemotePoint(interactive, { x: 1600, y: 900 }, { x: 3840, y: 2160 });
-	assert.deepEqual(restored, { x: 3072, y: 1728 });
+	assert.ok(Math.abs(restored.x / 3839 - original.x / 1919) < 1e-12);
+	assert.ok(Math.abs(restored.y / 2159 - original.y / 1079) < 1e-12);
 });
 
 test("coordinate reprojection is bounded for nonstandard and portrait frames", () => {
 	assert.deepEqual(reprojectRemotePoint({ x: -50, y: 9999 }, { x: 2256, y: 1504 }, { x: 1080, y: 1920 }), { x: 0, y: 1919 });
 	const ultrawide = reprojectRemotePoint({ x: 1720, y: 720 }, { x: 3440, y: 1440 }, { x: 1920, y: 804 });
-	assert.ok(Math.abs(ultrawide.x - 960) < 1e-9);
-	assert.ok(Math.abs(ultrawide.y - 402) < 1e-9);
+	assert.ok(Math.abs(ultrawide.x / 1919 - 1720 / 3439) < 1e-12);
+	assert.ok(Math.abs(ultrawide.y / 803 - 720 / 1439) < 1e-12);
+});
+
+test("cursor reprojection has no cumulative drift across repeated profile and orientation changes", () => {
+	const frames = [
+		{ x: 2256, y: 1504 },
+		{ x: 1600, y: 1067 },
+		{ x: 3440, y: 1440 },
+		{ x: 1080, y: 1920 },
+		{ x: 3840, y: 2160 },
+		{ x: 1366, y: 768 },
+	];
+	for (const normalized of [0, 0.001, 0.125, 0.5, 0.87321, 0.999, 1]) {
+		let frame = frames[0];
+		let point = { x: normalized * (frame.x - 1), y: (1 - normalized) * (frame.y - 1) };
+		for (let cycle = 0; cycle < 100; cycle += 1) {
+			const nextFrame = frames[(cycle + 1) % frames.length];
+			point = reprojectRemotePoint(point, frame, nextFrame);
+			frame = nextFrame;
+			assert.ok(point.x >= 0 && point.x <= frame.x - 1);
+			assert.ok(point.y >= 0 && point.y <= frame.y - 1);
+			assert.ok(Math.abs(point.x / Math.max(1, frame.x - 1) - normalized) < 1e-10);
+			assert.ok(Math.abs(point.y / Math.max(1, frame.y - 1) - (1 - normalized)) < 1e-10);
+		}
+	}
 });

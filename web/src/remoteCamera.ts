@@ -3,6 +3,19 @@ export type Point = { x: number; y: number };
 export type Rect = { left: number; top: number; width: number; height: number };
 export type RemoteTouchGestureMode = "pending" | "zoom" | "scroll";
 
+// Replacing an <img> source temporarily clears naturalWidth/naturalHeight in
+// several mobile browsers. Keep using the last fully decoded frame while that
+// happens; falling back straight to the rendered phone rectangle would move a
+// 1080p/2K cursor into CSS-pixel space for one paint and then move it back.
+export function authoritativeRemoteFrameSize(natural: Point, lastDecoded: Point, status: Point, rendered: Point): Point {
+	const axis = (naturalLength: number, decodedLength: number, statusLength: number, renderedLength: number) =>
+		Math.max(1, naturalLength || decodedLength || statusLength || Math.round(renderedLength));
+	return {
+		x: axis(natural.x, lastDecoded.x, status.x, rendered.x),
+		y: axis(natural.y, lastDecoded.y, status.y, rendered.y),
+	};
+}
+
 export function classifyRemoteTouchGesture(mode: RemoteTouchGestureMode, trackpad: boolean, scaleChange: number, midpointTravel: number): RemoteTouchGestureMode {
 	if (!trackpad) return "zoom";
 	// Lock the decision for the rest of the gesture. Finger spacing naturally
@@ -82,9 +95,18 @@ export function reprojectRemotePoint(point: Point, fromFrame: Point, toFrame: Po
 	const fromHeight = Math.max(1, fromFrame.y);
 	const toWidth = Math.max(1, toFrame.x);
 	const toHeight = Math.max(1, toFrame.y);
+	// Pixel coordinates have inclusive endpoints (0..width-1). Mapping by raw
+	// widths makes the far edge lose a fraction on every idle/interactive frame
+	// transition, so a cursor near an edge slowly drifts after repeated profile
+	// changes. Preserve the normalized inclusive pixel position instead.
+	const projectAxis = (value: number, fromLength: number, toLength: number) => {
+		if (toLength <= 1) return 0;
+		if (fromLength <= 1) return Math.max(0, Math.min(toLength - 1, value));
+		return Math.max(0, Math.min(toLength - 1, value * (toLength - 1) / (fromLength - 1)));
+	};
 	return {
-		x: Math.max(0, Math.min(toWidth - 1, point.x * toWidth / fromWidth)),
-		y: Math.max(0, Math.min(toHeight - 1, point.y * toHeight / fromHeight)),
+		x: projectAxis(point.x, fromWidth, toWidth),
+		y: projectAxis(point.y, fromHeight, toHeight),
 	};
 }
 

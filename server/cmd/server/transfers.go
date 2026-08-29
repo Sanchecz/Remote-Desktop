@@ -209,6 +209,18 @@ func appendTransferChunk(w http.ResponseWriter, r *http.Request, path string, ex
 	return expectedOffset + written, nil
 }
 
+func rollbackTransferChunk(path string, expectedOffset int64) error {
+	file, err := os.OpenFile(path, os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err = file.Truncate(expectedOffset); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
 func (s *server) uploadTransferChunk(w http.ResponseWriter, r *http.Request) {
 	t, err := s.loadUserTransfer(r)
 	if err != nil {
@@ -229,7 +241,12 @@ func (s *server) uploadTransferChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err = s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET received_bytes=$1,updated_at=now() WHERE id=$2 AND status='uploading'`, next, t.ID); err != nil {
+	result, updateErr := s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET received_bytes=$1,updated_at=now() WHERE id=$2 AND status='uploading'`, next, t.ID)
+	if updateErr != nil || result.RowsAffected() != 1 {
+		if rollbackErr := rollbackTransferChunk(s.transferDataPath(t.ID), offset); rollbackErr != nil {
+			writeError(w, http.StatusInternalServerError, "Не удалось откатить незавершённую часть")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "Не удалось сохранить прогресс")
 		return
 	}
@@ -399,8 +416,12 @@ func (s *server) agentUploadTransferChunk(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, err = s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET received_bytes=$1,updated_at=now() WHERE id=$2 AND status='transferring'`, next, t.ID)
-	if err != nil {
+	result, updateErr := s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET received_bytes=$1,updated_at=now() WHERE id=$2 AND status='transferring'`, next, t.ID)
+	if updateErr != nil || result.RowsAffected() != 1 {
+		if rollbackErr := rollbackTransferChunk(s.transferDataPath(t.ID), offset); rollbackErr != nil {
+			writeError(w, http.StatusInternalServerError, "Не удалось откатить незавершённую часть")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "Не удалось сохранить прогресс")
 		return
 	}

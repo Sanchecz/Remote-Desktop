@@ -225,7 +225,7 @@ func sendLargeFile(ctx context.Context, client *http.Client, cfg *config, transf
 					var progress struct {
 						Received int64 `json:"received"`
 					}
-					if json.Unmarshal(payload, &progress) == nil && progress.Received > chunkOffset {
+					if json.Unmarshal(payload, &progress) == nil && validTransferCheckpoint(progress.Received, chunkOffset, length, transfer.Size) {
 						offset = progress.Received
 						uploaded = true
 						break
@@ -234,7 +234,7 @@ func sendLargeFile(ctx context.Context, client *http.Client, cfg *config, transf
 				requestErr = fmt.Errorf("загрузка части: HTTP %d", response.StatusCode)
 			}
 			lastErr = requestErr
-			if checkpoint, checkpointErr := fetchFileTransferCheckpoint(ctx, client, cfg, transfer.ID); checkpointErr == nil && checkpoint > chunkOffset {
+			if checkpoint, checkpointErr := fetchFileTransferCheckpoint(ctx, client, cfg, transfer.ID); checkpointErr == nil && validTransferCheckpoint(checkpoint, chunkOffset, length, transfer.Size) {
 				offset = checkpoint
 				uploaded = true
 				break
@@ -248,6 +248,10 @@ func sendLargeFile(ctx context.Context, client *http.Client, cfg *config, transf
 		}
 	}
 	return completeFileTransfer(ctx, client, cfg, transfer.ID)
+}
+
+func validTransferCheckpoint(received, offset, chunkLength, total int64) bool {
+	return offset >= 0 && chunkLength >= 0 && total >= 0 && offset <= total && chunkLength <= total-offset && received == offset+chunkLength
 }
 
 func fetchFileTransferCheckpoint(ctx context.Context, client *http.Client, cfg *config, id string) (int64, error) {

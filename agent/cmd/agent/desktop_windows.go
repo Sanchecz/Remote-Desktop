@@ -1606,7 +1606,7 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 			}
 		}
 		scaleOK := false
-		if interactive {
+		if desktopUseRealtimeScaler(targetFPS, interactive) {
 			scaleOK = scaleDesktopBGRARealtime(framePixels, frameWidth, frameHeight, targetPixels, desiredWidth, desiredHeight, scaleX, scaleWeight)
 			captureBackend += "-realtime-scale"
 		} else {

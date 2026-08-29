@@ -90,3 +90,17 @@ func TestAppendTransferChunkRollsBackPartialReadFailure(t *testing.T) {
 		t.Fatalf("partial read was not rolled back: size=%d", info.Size())
 	}
 }
+
+func TestRollbackTransferChunkRestoresCommittedCheckpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transfer.data")
+	if err := os.WriteFile(path, []byte("committed-uncommitted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackTransferChunk(path, int64(len("committed"))); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "committed" {
+		t.Fatalf("rollback did not restore checkpoint: %q, err=%v", content, err)
+	}
+}

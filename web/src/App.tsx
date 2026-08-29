@@ -61,11 +61,11 @@ import {
   X
 } from "lucide-react";
 import { chunkRemoteText, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
-import { advanceRemotePinch, advanceRemoteTrackpadCursor, cameraFollowingRemotePoint, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient, reprojectRemotePoint } from "./remoteCamera";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient, reprojectRemotePoint } from "./remoteCamera";
 import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
 import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, resolveRemoteViewport, shouldUseCompactRemoteControls, type RemoteViewport } from "./remoteViewport";
 import { isRecoverableRemoteStatusFailure, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
-import { abortableDelay, fileTransferProgress, isAbortError, uploadTransferChunk } from "./fileTransfers";
+import { abortableDelay, fileTransferProgress, isAbortError, uploadTransferChunk, validateTransferCheckpoint } from "./fileTransfers";
 
 type User = {
   id: string;
@@ -223,7 +223,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.20";
+const LATEST_AGENT_VERSION = "1.0.21";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1258,7 +1258,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
   const trackpadCursor = useRef({ x: 0, y: 0, frameWidth: 0, frameHeight: 0, ready: false });
 	const trackpadGesture = useRef({ pointerId: -1, lastX: 0, lastY: 0, distance: 0, longPress: false, dragging: false, secondTap: false, timer: 0 });
 	const lastTrackpadTap = useRef({ at: 0, clientX: 0, clientY: 0 });
-	const directGesture = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number; moved: boolean; leftDown: boolean; longPress: boolean; timer: number }>({ pointerId: -1, startX: 0, startY: 0, x: 0, y: 0, moved: false, leftDown: false, longPress: false, timer: 0 });
+	const directGesture = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number; coordinateWidth: number; coordinateHeight: number; moved: boolean; leftDown: boolean; longPress: boolean; timer: number }>({ pointerId: -1, startX: 0, startY: 0, x: 0, y: 0, coordinateWidth: 1, coordinateHeight: 1, moved: false, leftDown: false, longPress: false, timer: 0 });
 	const controlEnabledRef = useRef(false);
 	const controlActivationRef = useRef<Promise<void> | null>(null);
 	const frameArrivalTimes = useRef<number[]>([]);
@@ -1444,7 +1444,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const size = frameSize(image);
 		ensureTrackpadCursor(image);
 		window.requestAnimationFrame(() => positionLocalCursor(trackpadCursor.current, size));
-	}, [mobileTrackpadMode, frameURL, renderedFrameSize.width, renderedFrameSize.height]);
+	// Do not depend on frameURL: assigning a new image URL briefly clears the
+	// intrinsic dimensions in mobile browsers. onLoad updates renderedFrameSize
+	// after decode and is the safe point at which to reproject the cursor.
+	}, [mobileTrackpadMode, renderedFrameSize.width, renderedFrameSize.height]);
 
 	useEffect(() => {
 		if (status?.controlEnabled) controlEnabledRef.current = true;
@@ -1853,12 +1856,15 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	function frameSize(element: HTMLImageElement) {
+		const size = authoritativeRemoteFrameSize(
+			{ x: element.naturalWidth, y: element.naturalHeight },
+			{ x: renderedFrameSize.width, y: renderedFrameSize.height },
+			{ x: status?.frameWidth || 0, y: status?.frameHeight || 0 },
+			{ x: element.getBoundingClientRect().width, y: element.getBoundingClientRect().height },
+		);
 		return {
-			// The image response is authoritative. Status is refreshed separately
-			// and may still describe the previous resolution immediately after a
-			// monitor/orientation change, which used to offset mobile taps.
-			width: Math.max(1, element.naturalWidth || status?.frameWidth || Math.round(element.getBoundingClientRect().width)),
-			height: Math.max(1, element.naturalHeight || status?.frameHeight || Math.round(element.getBoundingClientRect().height)),
+			width: size.x,
+			height: size.y,
 		};
 	}
 
@@ -1941,7 +1947,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			rightClickSent: false,
 		};
 		if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
-		if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() });
+		if (directGesture.current.leftDown) {
+			const direct = directGesture.current;
+			sendInput({ type: "pointer", action: "up", button: "left", x: direct.x, y: direct.y, coordinateWidth: direct.coordinateWidth, coordinateHeight: direct.coordinateHeight });
+		}
 		if (trackpadGesture.current.timer) { window.clearTimeout(trackpadGesture.current.timer); trackpadGesture.current.timer = 0; }
 		if (trackpadGesture.current.dragging) sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() });
 		trackpadGesture.current.pointerId = -1;
@@ -2066,6 +2075,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			const position = pointerPosition(event);
 			const distance = Math.abs(event.clientX-directGesture.current.startX)+Math.abs(event.clientY-directGesture.current.startY);
 			directGesture.current.x = position.x; directGesture.current.y = position.y;
+			directGesture.current.coordinateWidth = position.coordinateWidth;
+			directGesture.current.coordinateHeight = position.coordinateHeight;
 			if (distance > 10 && !directGesture.current.longPress) {
 				directGesture.current.moved = true;
 				if (directGesture.current.timer) { window.clearTimeout(directGesture.current.timer); directGesture.current.timer = 0; }
@@ -2141,9 +2152,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			const position = pointerPosition(event);
 			if (action === "down") {
 				event.currentTarget.setPointerCapture(event.pointerId);
-				directGesture.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: position.x, y: position.y, moved: false, leftDown: false, longPress: false, timer: window.setTimeout(() => {
+				directGesture.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: position.x, y: position.y, coordinateWidth: position.coordinateWidth, coordinateHeight: position.coordinateHeight, moved: false, leftDown: false, longPress: false, timer: window.setTimeout(() => {
 					const gesture = directGesture.current; if (gesture.pointerId !== event.pointerId || gesture.moved) return;
-					const current = serialisedTrackpadPosition();
+					const current = { x: gesture.x, y: gesture.y, coordinateWidth: gesture.coordinateWidth, coordinateHeight: gesture.coordinateHeight };
 					gesture.longPress = true; sendInput({ type: "pointer", action: "move", ...current }); sendInput({ type: "pointer", action: "down", button: "right", ...current }); sendInput({ type: "pointer", action: "up", button: "right", ...current });
 				}, 2000) };
 				return;
@@ -2171,7 +2182,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
 		if (directGesture.current.pointerId === event.pointerId) {
 			if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
-			if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() });
+			if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", x: directGesture.current.x, y: directGesture.current.y, coordinateWidth: directGesture.current.coordinateWidth, coordinateHeight: directGesture.current.coordinateHeight });
 			directGesture.current.pointerId = -1; directGesture.current.timer = 0;
 		} else if (!mobileTrackpadMode) {
 			sendInput({ type: "pointer", action: "up", button: "left", ...pointerPosition(event) });
@@ -2257,9 +2268,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	function sendPointerTap(button: "left" | "right") {
 		const position = serialisedTrackpadPosition();
-		sendInput({ type: "pointer", action: "move", x: position.x, y: position.y });
-		sendInput({ type: "pointer", action: "down", button, x: position.x, y: position.y });
-		sendInput({ type: "pointer", action: "up", button, x: position.x, y: position.y });
+		sendInput({ type: "pointer", action: "move", ...position });
+		sendInput({ type: "pointer", action: "down", button, ...position });
+		sendInput({ type: "pointer", action: "up", button, ...position });
 	}
 
 	function selectPointerMode(next: "direct" | "trackpad") {
@@ -2624,12 +2635,22 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
                 controller.signal,
                 (sent) => setActiveTransfer({ id: created.id, direction: "to_device", label: file.name, stage: "Отправка на сервер RemoteIt", received: chunkOffset + sent, size: file.size, startedAt })
               );
-              offset = progress.received; uploaded = offset > chunkOffset;
+              offset = validateTransferCheckpoint(progress, chunkOffset, chunk.size, file.size).received;
+              uploaded = true;
             } catch (reason) {
               if (isAbortError(reason)) throw reason;
               lastError = reason instanceof Error ? reason.message : "ошибка сети";
               const checkpoint = await api<LargeFileTransfer>(`/api/file-transfers/${created.id}`, { signal: controller.signal }).catch(() => null);
-              if (checkpoint && checkpoint.received > chunkOffset) { offset = checkpoint.received; uploaded = true; break; }
+              if (checkpoint) {
+								const expectedSize = Math.min(chunkSize, file.size - chunkOffset);
+								try {
+									offset = validateTransferCheckpoint(checkpoint, chunkOffset, expectedSize, file.size).received;
+									uploaded = true;
+									break;
+								} catch {
+									// The server still reports the previous committed checkpoint.
+								}
+							}
               await abortableDelay(750 * (attempt + 1), controller.signal);
             }
           }

@@ -37,3 +37,17 @@ func TestDesktopInteractionWidth(t *testing.T) {
 		t.Fatalf("60 FPS interaction width = %d", width)
 	}
 }
+
+func TestDesktopRealtimeScalerIsReservedForSixtyFPSMotion(t *testing.T) {
+	for _, fps := range []int{0, 15, 30} {
+		if desktopUseRealtimeScaler(fps, true) {
+			t.Fatalf("%d FPS must use the higher-quality scaler", fps)
+		}
+	}
+	if !desktopUseRealtimeScaler(60, true) {
+		t.Fatal("60 FPS interaction must retain the low-latency scaler")
+	}
+	if desktopUseRealtimeScaler(60, false) {
+		t.Fatal("idle frames must always use the higher-quality scaler")
+	}
+}

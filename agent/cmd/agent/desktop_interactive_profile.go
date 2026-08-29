@@ -52,3 +52,11 @@ func desktopInteractionWidth(targetFPS, profileWidth int) int {
 	}
 	return min(profileWidth, 1920)
 }
+
+// The realtime scaler deliberately trades sampling quality for the 16 ms
+// budget of 60 FPS. Auto/30 FPS has enough time for the bilinear scaler; using
+// the realtime path there made text and thin UI lines visibly pixelated during
+// every mouse movement even on a healthy connection.
+func desktopUseRealtimeScaler(targetFPS int, interactive bool) bool {
+	return interactive && targetFPS >= 60
+}

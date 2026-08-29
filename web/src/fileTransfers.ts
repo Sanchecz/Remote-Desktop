@@ -47,6 +47,31 @@ export type UploadedTransferChunk = {
   size: number;
 };
 
+export function validateTransferCheckpoint(
+  progress: UploadedTransferChunk,
+  offset: number,
+  chunkSize: number,
+  totalSize: number
+): UploadedTransferChunk {
+  const expected = offset + chunkSize;
+  if (
+    !Number.isSafeInteger(progress.received) ||
+    !Number.isSafeInteger(progress.size) ||
+    !Number.isSafeInteger(offset) ||
+    !Number.isSafeInteger(chunkSize) ||
+    !Number.isSafeInteger(totalSize) ||
+    offset < 0 ||
+    chunkSize < 0 ||
+    totalSize < 0 ||
+    progress.size !== totalSize ||
+    expected > totalSize ||
+    progress.received !== expected
+  ) {
+    throw new Error("Некорректная контрольная точка передачи");
+  }
+  return progress;
+}
+
 function transferError(xhr: XMLHttpRequest): Error {
   try {
     const payload = JSON.parse(xhr.responseText || "{}") as { error?: string };

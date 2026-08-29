@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { abortableDelay, fileTransferProgress, isAbortError, uploadTransferChunk } from "../src/fileTransfers.ts";
+import { abortableDelay, fileTransferProgress, isAbortError, uploadTransferChunk, validateTransferCheckpoint } from "../src/fileTransfers.ts";
 
 const nativeXMLHttpRequest = globalThis.XMLHttpRequest;
 
@@ -62,6 +62,13 @@ describe("abortable transfer waits", () => {
 });
 
 describe("resumable browser uploads", () => {
+	it("accepts only the exact committed chunk boundary", () => {
+		assert.deepEqual(validateTransferCheckpoint({ received: 68, size: 100 }, 4, 64, 100), { received: 68, size: 100 });
+		assert.throws(() => validateTransferCheckpoint({ received: 67, size: 100 }, 4, 64, 100), /контрольная точка/i);
+		assert.throws(() => validateTransferCheckpoint({ received: 101, size: 100 }, 68, 32, 100), /контрольная точка/i);
+		assert.throws(() => validateTransferCheckpoint({ received: 68, size: 99 }, 4, 64, 100), /контрольная точка/i);
+	});
+
   it("reports progress within a chunk and validates the checkpoint", async () => {
     installFakeXMLHttpRequest();
     const controller = new AbortController();
