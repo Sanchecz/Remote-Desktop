@@ -10,8 +10,8 @@ android {
         applicationId = "ru.supportgenesis.genesisit"
         minSdk = 26
         targetSdk = 36
-		versionCode = 99
-		versionName = "1.0.12"
+		versionCode = 100
+		versionName = "1.0.13"
     }
 
 	val releaseKeystore = System.getenv("GENESIS_ANDROID_KEYSTORE") ?: error("GENESIS_ANDROID_KEYSTORE is required")

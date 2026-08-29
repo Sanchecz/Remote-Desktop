@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advanceRemotePinch, cameraKeepingPointUnderFingers, clampRemoteCamera, classifyRemoteTouchGesture, isRemoteTwoFingerTap, pointUnderScreenCoordinate } from "../src/remoteCamera.ts";
+import { advanceRemotePinch, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, clampRemoteCamera, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remotePointFromClient } from "../src/remoteCamera.ts";
 
 test("pinch zoom preserves the remote point below the moving finger midpoint", () => {
 	const center = { x: 540, y: 360 };
@@ -90,4 +90,35 @@ test("mobile trackpad distinguishes zoom, scroll and two-finger right click", ()
 	assert.equal(isRemoteTwoFingerTap("zoom", true, false, 180, 3), false);
 	assert.equal(isRemoteTwoFingerTap("pending", true, true, 180, 3), false);
 	assert.equal(isRemoteTwoFingerTap("pending", true, false, 600, 3), false);
+});
+
+test("direct touch maps the transformed frame and clamps black letterbox areas", () => {
+	const frame = { x: 1920, y: 1080 };
+	const rect = { left: 20, top: 240, width: 350, height: 197 };
+	assert.deepEqual(remotePointFromClient({ x: 195, y: 338.5 }, rect, frame), { x: 960, y: 540 });
+	assert.deepEqual(remotePointFromClient({ x: 195, y: 80 }, rect, frame), { x: 960, y: 0 });
+	assert.deepEqual(remotePointFromClient({ x: 500, y: 700 }, rect, frame), { x: 1919, y: 1079 });
+});
+
+test("zoomed mobile cursor auto-pans only when it reaches a viewport edge", () => {
+	const frame = { x: 1920, y: 1080 };
+	const fitted = { x: 390, y: 219 };
+	const viewport = { x: 390, y: 760 };
+	const camera = { zoom: 2, panX: 0, panY: 0 };
+	const centre = cameraFollowingRemotePoint(camera, { x: 960, y: 540 }, frame, fitted, viewport);
+	assert.deepEqual(centre, camera);
+	const right = cameraFollowingRemotePoint(camera, { x: 1919, y: 540 }, frame, fitted, viewport);
+	assert.ok(right.panX < -200, "right-edge cursor must pan the zoomed desktop left");
+	assert.equal(right.panY, 0);
+});
+
+test("fit mode keeps the entire desktop visible in phone portrait and landscape", () => {
+	for (const frame of [{ x: 1920, y: 1080 }, { x: 2560, y: 1440 }, { x: 3840, y: 2160 }]) {
+		for (const viewport of [{ x: 390, y: 786 }, { x: 844, y: 342 }, { x: 360, y: 640 }, { x: 915, y: 364 }]) {
+			const fitted = fitRemoteFrame(frame, viewport);
+			assert.ok(fitted.x <= viewport.x, `${frame.x}x${frame.y} exceeds portrait/landscape width`);
+			assert.ok(fitted.y <= viewport.y, `${frame.x}x${frame.y} exceeds portrait/landscape height`);
+			assert.ok(Math.abs(fitted.x / fitted.y - frame.x / frame.y) < 0.02, "fit must preserve the desktop aspect ratio");
+		}
+	}
 });

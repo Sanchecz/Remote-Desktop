@@ -60,7 +60,7 @@ import {
   X
 } from "lucide-react";
 import { chunkRemoteText, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
-import { advanceRemotePinch, clampRemoteCamera, classifyRemoteTouchGesture, isRemoteTwoFingerTap } from "./remoteCamera";
+import { advanceRemotePinch, cameraFollowingRemotePoint, clampRemoteCamera, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient } from "./remoteCamera";
 import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
 
 type User = {
@@ -219,7 +219,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.12";
+const LATEST_AGENT_VERSION = "1.0.13";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -760,7 +760,7 @@ function RemoteControlPage({ devices, currentUser, csrf, initialDeviceId, onAcce
         })}</div>
       </aside>
       <main className="remote-control-stage">
-        {device && (!device.accessGranted ? <DeviceAccessPanel key={`access-${device.id}`} device={device} currentUser={currentUser} csrf={csrf} onChanged={onAccessChanged} gate /> : controlSessionId ? <RemoteDesktopModal key={`control-${device.id}-${controlSessionId}`} device={device} csrf={csrf} initialSessionId={controlSessionId} embedded onOpenFiles={() => onOpenDevice(device)} onClose={() => setControlSessionId("")} /> : <RemoteDesktopPreview key={`preview-${device.id}`} device={device} csrf={csrf} onConnect={setControlSessionId} />)}
+        {device && (!device.accessGranted ? <DeviceAccessPanel key={`access-${device.id}`} device={device} currentUser={currentUser} csrf={csrf} onChanged={onAccessChanged} gate /> : controlSessionId ? <RemoteDesktopModal key={`control-${device.id}-${controlSessionId}`} device={device} csrf={csrf} initialSessionId={controlSessionId} embedded onClose={() => setControlSessionId("")} /> : <RemoteDesktopPreview key={`preview-${device.id}`} device={device} csrf={csrf} onConnect={setControlSessionId} />)}
 		{!device && <div className="remote-control-placeholder"><span className="remote-control-placeholder-icon"><ScreenShare size={30} /></span><h2>Выберите компьютер</h2><p>Предпросмотр не запускается автоматически. Нажмите на компьютер слева, чтобы открыть живой экран; нажмите повторно, чтобы свернуть его.</p></div>}
 		{device && !controlSessionId && <div className="remote-control-help"><div><MousePointer2 size={18} /><span><strong>Мышь</strong><small>Нажмите на предпросмотр, затем управляйте курсором и колёсиком.</small></span></div><div><TerminalSquare size={18} /><span><strong>Клавиатура</strong><small>Физическая клавиатура работает сразу; на Android используйте кнопку клавиатуры в сеансе.</small></span></div><div><ShieldCheck size={18} /><span><strong>Контроль доступа</strong><small>Пассивный предпросмотр не беспокоит пользователя. При первом управляющем действии Agent покажет уведомление, а события сохранятся в журнале.</small></span></div></div>}
       </main>
@@ -1192,7 +1192,7 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
   return <section className="remote-preview-card"><header><div><span className="eyebrow">УДАЛЁННЫЙ ДОСТУП</span><strong><ScreenShare size={18} /> Живой экран</strong><small>{supported ? frameURL ? "Предпросмотр онлайн · управление выключено" : connected ? "Agent подключён · ожидаем первый кадр" : "Подключаем защищённый предпросмотр…" : unavailableReason}</small></div><span className={`preview-live ${connected && !!frameURL ? "active" : ""}`}><span />{connected && frameURL ? "LIVE" : "WAIT"}</span></header><button type="button" className="remote-preview-screen" disabled={!supported || !sessionId || !frameURL} onClick={() => { handedOff.current = true; onConnect(sessionId); }}>{frameURL ? <img ref={previewImageRef} src={frameURL} draggable={false} onError={() => { setFrameURL(""); setError("Получен повреждённый кадр — ожидаем следующий"); }} /> : <span><Monitor size={38} /><strong>{error || (supported ? "Ожидаем изображение от Agent" : unavailableReason)}</strong><small>{desktopCompatible ? "Диагностика обновляется автоматически" : "Скачайте новый агент из раздела токенов"}</small></span>}<b><MousePointer2 size={17} /> Открыть подключение</b></button><footer><ShieldCheck size={14} /> Пассивный предпросмотр журналируется, но не показывает всплывающее уведомление. Оно появится при первом управляющем действии.</footer></section>;
 }
 
-function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embedded = false, onOpenFiles }: { device: Device; csrf: string; initialSessionId?: string; onClose: () => void; embedded?: boolean; onOpenFiles?: () => void }) {
+function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embedded = false }: { device: Device; csrf: string; initialSessionId?: string; onClose: () => void; embedded?: boolean }) {
   const [sessionId, setSessionId] = useState("");
   const [status, setStatus] = useState<DesktopSession | null>(null);
   const [frameURL, setFrameURL] = useState("");
@@ -1215,7 +1215,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [sasFeedback, setSASFeedback] = useState("");
 	const [sasFeedbackError, setSASFeedbackError] = useState(false);
 	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
-	const [dragLock, setDragLock] = useState(false);
+	const [filesOpen, setFilesOpen] = useState(false);
 	// Phones start with an unobstructed full-screen canvas and a small floating
 	// handle. The complete control surface opens only when the user asks for it.
 	const [controlsCollapsed, setControlsCollapsed] = useState(coarsePointerClient);
@@ -1289,6 +1289,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	useEffect(() => {
 		const viewport = viewportRef.current;
 		if (!viewport) return;
+		const delayedUpdates = new Set<number>();
 		const update = () => {
 			const next = { width: viewport.clientWidth, height: viewport.clientHeight };
 			setViewportSize((current) => {
@@ -1299,11 +1300,28 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				return current.width === next.width && current.height === next.height ? current : next;
 			});
 		};
+		const updateAfterViewportSettles = () => {
+			update();
+			// Android WebView changes its visual viewport in two phases while rotating:
+			// first the orientation flips, then system bars/insets receive their final
+			// size. Measuring both phases prevents a stale portrait-sized fit in
+			// landscape (and the inverse when returning to portrait).
+			for (const delay of [0, 80, 240]) {
+				const id = window.setTimeout(() => { delayedUpdates.delete(id); update(); }, delay);
+				delayedUpdates.add(id);
+			}
+		};
 		update();
 		const observer = new ResizeObserver(update);
 		observer.observe(viewport);
-		window.addEventListener("orientationchange", update);
-		return () => { observer.disconnect(); window.removeEventListener("orientationchange", update); };
+		window.addEventListener("orientationchange", updateAfterViewportSettles);
+		window.visualViewport?.addEventListener("resize", update);
+		return () => {
+			observer.disconnect();
+			window.removeEventListener("orientationchange", updateAfterViewportSettles);
+			window.visualViewport?.removeEventListener("resize", update);
+			for (const id of delayedUpdates) window.clearTimeout(id);
+		};
 	}, [frameURL]);
 
 	useEffect(() => {
@@ -1705,19 +1723,21 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		cursor.style.top = `${Math.max(0, Math.min(100, position.y * 100 / Math.max(1, size.height)))}%`;
 	}
 
-  function pointerPosition(event: ReactPointerEvent<HTMLImageElement>) {
-    const rect = event.currentTarget.getBoundingClientRect();
-		const { width: frameWidth, height: frameHeight } = frameSize(event.currentTarget);
-		const position = {
-      x: Math.max(0, Math.min(frameWidth - 1, Math.round((event.clientX - rect.left) * frameWidth / rect.width))),
-      y: Math.max(0, Math.min(frameHeight - 1, Math.round((event.clientY - rect.top) * frameHeight / rect.height))),
-		};
+	function pointerPosition(event: ReactPointerEvent<HTMLDivElement>) {
+		const image = frameImageRef.current;
+		if (!image) return { x: 0, y: 0 };
+		const { width: frameWidth, height: frameHeight } = frameSize(image);
+		const position = remotePointFromClient(
+			{ x: event.clientX, y: event.clientY },
+			image.getBoundingClientRect(),
+			{ x: frameWidth, y: frameHeight },
+		);
 		trackpadCursor.current = { ...position, ready: true };
 		positionLocalCursor(position, { width: frameWidth, height: frameHeight });
 		return position;
   }
 
-	function beginTouchGesture(event: ReactPointerEvent<HTMLImageElement>) {
+	function beginTouchGesture(event: ReactPointerEvent<HTMLDivElement>) {
 		activeTouches.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
 		if (activeTouches.current.size < 2) return false;
 		const points = [...activeTouches.current.values()].slice(0, 2);
@@ -1746,7 +1766,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		return true;
 	}
 
-	function updateTouchGesture(event: ReactPointerEvent<HTMLImageElement>) {
+	function updateTouchGesture(event: ReactPointerEvent<HTMLDivElement>) {
 		if (!activeTouches.current.has(event.pointerId)) return false;
 		activeTouches.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
 		if (!pinchGesture.current.active || activeTouches.current.size < 2) return false;
@@ -1807,7 +1827,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		return wasPinching;
 	}
 
-  function movePointer(event: ReactPointerEvent<HTMLImageElement>) {
+	function movePointer(event: ReactPointerEvent<HTMLDivElement>) {
 	event.preventDefault();
 		if (event.pointerType !== "mouse") {
 			if (updateTouchGesture(event)) return;
@@ -1815,8 +1835,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		}
 		if (mobileTrackpadMode) {
 			if (trackpadGesture.current.pointerId !== event.pointerId) return;
-			const rect = event.currentTarget.getBoundingClientRect();
-			const size = ensureTrackpadCursor(event.currentTarget);
+			const image = frameImageRef.current;
+			if (!image) return;
+			const rect = image.getBoundingClientRect();
+			const size = ensureTrackpadCursor(image);
 			const deltaX = event.clientX - trackpadGesture.current.lastX;
 			const deltaY = event.clientY - trackpadGesture.current.lastY;
 			trackpadGesture.current.lastX = event.clientX;
@@ -1832,6 +1854,14 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			};
 			trackpadCursor.current = { ...next, ready: true };
 			positionLocalCursor(next, size);
+			const followedCamera = cameraFollowingRemotePoint(
+				pendingCameraRef.current,
+				{ x: next.x, y: next.y },
+				{ x: size.width, y: size.height },
+				{ x: fittedFrame.width, y: fittedFrame.height },
+				{ x: viewportSize.width, y: viewportSize.height },
+			);
+			if (followedCamera.panX !== pendingCameraRef.current.panX || followedCamera.panY !== pendingCameraRef.current.panY) scheduleCamera(followedCamera);
 			const now = performance.now();
 			if (now - lastPointerSent.current >= pointerSendInterval) {
 				lastPointerSent.current = now;
@@ -1859,7 +1889,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		sendInput({ type: "pointer", action: "move", ...pointerPosition(event) }, directGesture.current.leftDown);
   }
 
-  function pointerButton(event: ReactPointerEvent<HTMLImageElement>, action: "down" | "up") {
+	function pointerButton(event: ReactPointerEvent<HTMLDivElement>, action: "down" | "up") {
     event.preventDefault();
     viewportRef.current?.focus();
 		if (event.pointerType !== "mouse") {
@@ -1873,7 +1903,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			}
 		}
 		if (mobileTrackpadMode) {
-			const size = ensureTrackpadCursor(event.currentTarget);
+			const image = frameImageRef.current;
+			if (!image) return;
+			const size = ensureTrackpadCursor(image);
 			if (action === "down") {
 				event.currentTarget.setPointerCapture(event.pointerId);
 				const previousTap = lastTrackpadTap.current;
@@ -1893,7 +1925,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 					gesture.longPress = true;
 					lastTrackpadTap.current.at = 0;
 					sendPointerTap("right");
-				}, 650);
+				}, 2000);
 				trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, distance: 0, longPress: false, dragging: false, secondTap: false, timer };
 				positionLocalCursor(trackpadCursor.current, size);
 				return;
@@ -1903,7 +1935,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.dragging) {
 				const position = trackpadCursor.current;
 				sendInput({ type: "pointer", action: "up", button: "left", x: position.x, y: position.y });
-			} else if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.distance < 10 && !trackpadGesture.current.longPress && !dragLock) {
+			} else if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.distance < 10 && !trackpadGesture.current.longPress) {
 				const position = trackpadCursor.current;
 				sendInput({ type: "pointer", action: "move", x: position.x, y: position.y });
 				sendInput({ type: "pointer", action: "down", button: "left", x: position.x, y: position.y });
@@ -1923,7 +1955,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				directGesture.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: position.x, y: position.y, moved: false, leftDown: false, longPress: false, timer: window.setTimeout(() => {
 					const gesture = directGesture.current; if (gesture.pointerId !== event.pointerId || gesture.moved) return;
 					gesture.longPress = true; sendInput({ type: "pointer", action: "move", x: gesture.x, y: gesture.y }); sendInput({ type: "pointer", action: "down", button: "right", x: gesture.x, y: gesture.y }); sendInput({ type: "pointer", action: "up", button: "right", x: gesture.x, y: gesture.y });
-				}, 650) };
+				}, 2000) };
 				return;
 			}
 			const gesture = directGesture.current;
@@ -1943,7 +1975,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
     sendInput({ type: "pointer", action, button, ...pointerPosition(event) });
   }
 
-	function cancelPointer(event: ReactPointerEvent<HTMLImageElement>) {
+	function cancelPointer(event: ReactPointerEvent<HTMLDivElement>) {
 		event.preventDefault();
 		if (event.pointerType !== "mouse") endTouchGesture(event.pointerId, true);
 		if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
@@ -1961,7 +1993,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		trackpadGesture.current.timer = 0;
 	}
 
-  function wheel(event: ReactWheelEvent<HTMLImageElement>) {
+	function wheel(event: ReactWheelEvent<HTMLDivElement>) {
     event.preventDefault();
     sendInput({ type: "wheel", delta: event.deltaY > 0 ? -120 : 120 });
   }
@@ -2032,16 +2064,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		sendInput({ type: "pointer", action: "up", button, x: position.x, y: position.y });
 	}
 
-	function toggleDragLock() {
-		const position = trackpadCursor.current;
-		const next = !dragLock;
-		sendInput({ type: "pointer", action: next ? "down" : "up", button: "left", x: position.x, y: position.y });
-		setDragLock(next);
-	}
-
 	function selectPointerMode(next: "direct" | "trackpad") {
 		if (next === pointerMode) return;
-		if (next === "direct" && dragLock) toggleDragLock();
 		setPointerMode(next);
 		if (next !== "trackpad") return;
 		window.requestAnimationFrame(() => {
@@ -2053,11 +2077,13 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	function finishRemoteSession() {
-		if (dragLock) {
-			const position = trackpadCursor.current;
-			sendInput({ type: "pointer", action: "up", button: "left", x: position.x, y: position.y });
-		}
 		onClose();
+	}
+
+	function openRemoteFiles() {
+		if (keyboardOpen) setMobileKeyboardVisibility(false);
+		setControlsCollapsed(true);
+		setFilesOpen(true);
 	}
 
 	function setMobileKeyboardVisibility(open: boolean) {
@@ -2118,24 +2144,27 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		setControlsCollapsed(next);
 	}
 
-  async function pasteClipboard() {
+	async function pasteClipboard() {
 		try {
 			const text = await navigator.clipboard.readText();
 			if (!text) { setError("Буфер обмена пуст"); return; }
-			if (window.confirm(`Передать текст из буфера на «${device.name}»?`)) sendRemoteText(text);
+			sendRemoteText(text);
 		} catch {
 			setError("Браузер не разрешил прочитать буфер обмена");
 		}
 	}
 
 	const scalePercent = screenScale === "fit" ? 0 : Number(screenScale);
-	const sourceWidth = status?.frameWidth || renderedFrameSize.width;
-	const sourceHeight = status?.frameHeight || renderedFrameSize.height;
-	const fitRatio = sourceWidth > 0 && sourceHeight > 0 && viewportSize.width > 0 && viewportSize.height > 0 ? Math.min(viewportSize.width / sourceWidth, viewportSize.height / sourceHeight) : 1;
-	const fittedFrame = {
-		width: Math.max(1, Math.round(sourceWidth * (scalePercent > 0 ? scalePercent / 100 : fitRatio))),
-		height: Math.max(1, Math.round(sourceHeight * (scalePercent > 0 ? scalePercent / 100 : fitRatio))),
-	};
+	// The decoded image wins over the asynchronously refreshed status. This is
+	// essential when a VDI session changes monitor/resolution or a phone rotates:
+	// stale status dimensions previously produced a visibly cropped frame.
+	const sourceWidth = renderedFrameSize.width || status?.frameWidth || 0;
+	const sourceHeight = renderedFrameSize.height || status?.frameHeight || 0;
+	const autoFit = fitRemoteFrame({ x: sourceWidth, y: sourceHeight }, { x: viewportSize.width, y: viewportSize.height });
+	const fittedFrame = scalePercent > 0 ? {
+		width: Math.max(1, Math.round(sourceWidth * scalePercent / 100)),
+		height: Math.max(1, Math.round(sourceHeight * scalePercent / 100)),
+	} : { width: autoFit.x, height: autoFit.y };
 	const baseFrameScale = sourceWidth > 0 ? fittedFrame.width / sourceWidth : 1;
 	const totalFrameScale = Math.max(0.0001, baseFrameScale * camera.zoom);
 	const remoteImageLayerStyle = sourceWidth > 0 && sourceHeight > 0 ? {
@@ -2149,7 +2178,13 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		"--remote-camera-zoom": totalFrameScale,
 	} as CSSProperties : undefined;
 
-	const resetCamera = () => scheduleCamera({ zoom: 1, panX: 0, panY: 0 });
+	const resetCamera = () => {
+		// "По размеру" is the Remote Desktop-style home view: the complete remote
+		// frame is visible in both orientations, independent of the previous fixed
+		// scale or pinch zoom.
+		if (screenScale !== "fit") setScreenScale("fit");
+		scheduleCamera({ zoom: 1, panX: 0, panY: 0 });
+	};
 
 	const workspace = <section className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""} ${mobileDockHidden ? "remote-mobile-dock-hidden" : ""} ${keyboardOpen ? "remote-keyboard-open" : ""}`}>
 		<header>
@@ -2162,15 +2197,15 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button className="remote-header-tool" onClick={() => void sendCtrlAltDelete()} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>
 				<button className="remote-header-tool" onClick={() => void pasteClipboard()} title="Вставить текст из локального буфера"><Clipboard size={17} /><span>Буфер</span></button>
 				<button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>
-				{onOpenFiles && <button className="remote-header-tool" onClick={onOpenFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>}
+				<button className="remote-header-tool" onClick={openRemoteFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>
 				<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button>
 			</div>
 		</header>
-		<div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale === "fit" ? "fit" : "fixed"}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")}>
+		<div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale === "fit" ? "fit" : "fixed"}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onWheel={wheel} onContextMenu={(event) => event.preventDefault()}>
 			{frameURL ? <>
 				<div className="remote-screen-canvas">
 					<div className="remote-screen-image-layer" style={remoteImageLayerStyle}>
-				<img ref={frameImageRef} className="remote-screen-image" src={frameURL} draggable={false} onLoad={(event) => { const width = event.currentTarget.naturalWidth; const height = event.currentTarget.naturalHeight; setRenderedFrameSize((current) => current.width === width && current.height === height ? current : { width, height }); }} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onWheel={wheel} onContextMenu={(event) => event.preventDefault()} />
+				<img ref={frameImageRef} className="remote-screen-image" src={frameURL} draggable={false} onLoad={(event) => { const width = event.currentTarget.naturalWidth; const height = event.currentTarget.naturalHeight; setRenderedFrameSize((current) => current.width === width && current.height === height ? current : { width, height }); }} />
 						{localCursorVisible && <span ref={localCursorRef} className="remote-local-cursor" aria-hidden="true"><MousePointer2 size={22} strokeWidth={2.4} /></span>}
 					</div>
 				</div>
@@ -2189,17 +2224,15 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		{coarsePointerClient && !controlsCollapsed && <button type="button" className="remote-controls-scrim" aria-label="Скрыть панель управления" onClick={toggleControls} />}
 		<footer className="remote-session-footer">
 			<div className="remote-session-tools">
-				<span><MousePointer2 size={15} /> {pointerMode === "direct" ? "Касание — левый клик · удержание — правый" : "Ведите пальцем — перемещайте курсор; короткое касание — клик"}</span>
+				<span><MousePointer2 size={15} /> {pointerMode === "direct" ? "Касание — левый клик · удержание 2 секунды — правый" : "Ведите пальцем — перемещайте курсор; удержание 2 секунды — правый клик"}</span>
 				<div className="remote-pointer-modes">
 					<button type="button" className={`remote-tool-button ${pointerMode === "trackpad" ? "active" : ""}`} aria-pressed={pointerMode === "trackpad"} onClick={() => selectPointerMode("trackpad")}><MousePointer2 size={16} /> Курсор</button>
 					<button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => selectPointerMode("direct")}><Hand size={16} /> Касание</button>
 				</div>
-				<button type="button" className="remote-tool-button" onClick={() => sendPointerTap("right")}><MousePointer2 size={15} /> ПКМ</button>
 				<button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)}><Keyboard size={15} /> Клавиатура</button>
 				<button type="button" className="remote-tool-button" onClick={() => void sendCtrlAltDelete()}><Keyboard size={15} /> Ctrl+Alt+Del</button>
 				<button type="button" className="remote-tool-button" onClick={resetCamera}><Maximize2 size={15} /> По размеру</button>
-				<button type="button" className={`remote-tool-button ${dragLock ? "active" : ""}`} aria-pressed={dragLock} onClick={toggleDragLock}>Зажать</button>
-				{onOpenFiles && <button type="button" className="remote-tool-button" onClick={onOpenFiles}><Folder size={15} /> Файлы</button>}
+				<button type="button" className="remote-tool-button" onClick={openRemoteFiles}><Folder size={15} /> Файлы</button>
 				<button type="button" className="remote-tool-button" onClick={() => void pasteClipboard()}><Clipboard size={15} /> Буфер</button>
 				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
 			</div>
@@ -2210,6 +2243,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			<button type="button" className="remote-keyboard-enter" onClick={sendMobileEnter}>Enter</button>
 			<button type="button" className="remote-keyboard-close" onClick={() => setMobileKeyboardVisibility(false)} aria-label="Закрыть клавиатуру"><X size={17} /></button>
 		</div>}
+		{filesOpen && <section className="remote-files-overlay" aria-label="Файлы удалённого компьютера">
+			<header><div><span className="eyebrow">ФАЙЛЫ УСТРОЙСТВА</span><h2>{device.name}</h2></div><button type="button" className="icon-button" onClick={() => setFilesOpen(false)} aria-label="Закрыть файлы"><X size={20} /></button></header>
+			<div className="remote-files-overlay-body"><RemoteFiles device={device} csrf={csrf} /></div>
+		</section>}
 		{sasFeedback && <div className={`desktop-command-feedback ${sasFeedbackError ? "error" : ""}`} role="status">{sasFeedbackError ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}{sasFeedback}</div>}
 		{error && <div className="desktop-error">{error}</div>}
 	</section>;
@@ -2642,7 +2679,7 @@ function CodexIntegrationPanel({ currentUser, csrf }: { currentUser: User; csrf:
         <div className="codex-section-head"><div><h3>Подключить Codex</h3><p>Персональный установщик сам скачает MCP, проверит SHA-256 и зарегистрирует RemoteIt. Копировать команды или токен не потребуется.</p></div><span>{tokens.filter((item) => !item.revokedAt && new Date(item.expiresAt).getTime() > Date.now()).length} активных</span></div>
         <div className="codex-ready-setup"><span className="codex-ready-icon"><Sparkles size={22} /></span><div><strong>Готовое подключение для Windows</strong><small>Один файл · без ручной вставки · удаляет себя после успешной установки</small></div><button className="primary-button" type="button" disabled={Boolean(working)} onClick={() => void downloadReadyWindowsSetup()}>{working === "ready-windows" ? <RefreshCw size={16} className="spin" /> : <Download size={16} />} Скачать и подключить</button></div>
         <div className="codex-setup-options"><label><span>Название подключения</span><input value={tokenName} onChange={(event) => setTokenName(event.target.value)} maxLength={100} required /></label><label><span>Срок доступа, дней</span><input type="number" min={1} max={365} value={expiresDays} onChange={(event) => setExpiresDays(Number(event.target.value))} required /></label></div>
-        <div className="codex-guide-actions"><button className="secondary-button" type="button" onClick={downloadCodexInstruction}><FileCode2 size={15} /> Инструкция для другого Codex</button><a className="secondary-button" href="/downloads/RemoteIt-MCP.exe" download><Download size={15} /> MCP отдельно</a><a className="secondary-button" href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={15} /> SHA-256</a></div>
+		<div className="codex-guide-actions"><button className="secondary-button" type="button" onClick={downloadCodexInstruction}><FileCode2 size={15} /> Инструкция для другого Codex</button><a className="secondary-button" href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={15} /> SHA-256</a></div>
         <details className="codex-manual-setup"><summary>Ручная настройка и Linux</summary><form className="codex-token-form" onSubmit={createToken}><label><span>Название</span><input value={tokenName} onChange={(event) => setTokenName(event.target.value)} maxLength={100} required /></label><label><span>Срок, дней</span><input type="number" min={1} max={365} value={expiresDays} onChange={(event) => setExpiresDays(Number(event.target.value))} required /></label><button className="primary-button" disabled={working === "create-token"}>{working === "create-token" ? <RefreshCw size={16} className="spin" /> : <Plus size={16} />} Создать токен</button></form><div className="codex-downloads"><a href="/downloads/remoteit-mcp-linux-amd64" download><Download size={16} /> MCP для Linux</a></div></details>
         {newToken && <div className="codex-new-token"><div><span>РЕЗЕРВНАЯ РУЧНАЯ НАСТРОЙКА · ПОКАЗЫВАЕТСЯ ОДИН РАЗ</span><code>{newToken}</code></div><button className="secondary-button" onClick={() => void copyToken()}><Copy size={15} /> Копировать</button><details><summary>Показать команду</summary><code>{setupCommand}</code><p>Используйте только если готовый установщик не смог зарегистрировать MCP автоматически.</p></details></div>}
         <div className="integration-token-list">{loading && tokens.length === 0 ? <PanelLoader /> : tokens.map((item) => { const active = !item.revokedAt && new Date(item.expiresAt).getTime() > Date.now(); return <div className="integration-token-row" key={item.id}><span className={`integration-state ${active ? "active" : "revoked"}`}><Link2 size={15} /></span><div><strong>{item.name}</strong><small>до {new Date(item.expiresAt).toLocaleString("ru-RU")} · {item.lastUsedAt ? `использован ${formatRelative(item.lastUsedAt)}` : "ещё не использован"}</small></div><span className={`action-status ${active ? "success" : "muted"}`}>{active ? "Активен" : "Отозван"}</span>{active && <button className="danger-button compact-action" disabled={working === item.id} onClick={() => void revokeToken(item.id)}><Ban size={13} /> Отозвать</button>}</div>; })}</div>
@@ -2656,6 +2693,7 @@ function CodexIntegrationPanel({ currentUser, csrf }: { currentUser: User; csrf:
 }
 
 function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User; csrf: string; theme: Theme; onTheme: (theme: Theme) => void }) {
+	const [settingsTab, setSettingsTab] = useState<"profile" | "security" | "appearance" | "sessions">("profile");
   const [sessions, setSessions] = useState<AuthSession[]>([]);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -2710,16 +2748,23 @@ function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User
   const roleLabel = currentUser.role === "owner" ? "Владелец" : currentUser.role === "admin" ? "Администратор" : currentUser.role === "technician" ? "Техник" : "Наблюдатель";
   return <>
     <section className="page-heading"><div><span className="eyebrow">АККАУНТ И БЕЗОПАСНОСТЬ</span><h1>Настройки</h1><p>Пароль, оформление и активные входы аккаунта {currentUser.username}.</p></div></section>
-	<section className="settings-tabs" aria-label="Разделы настроек"><span className="active"><CircleUserRound size={15} /> Профиль</span><span><LockKeyhole size={15} /> Безопасность</span><span><Palette size={15} /> Внешний вид</span><span><Monitor size={15} /> Сессии</span></section>
+	<section className="settings-tabs" role="tablist" aria-label="Разделы настроек">
+		<button type="button" role="tab" aria-selected={settingsTab === "profile"} className={settingsTab === "profile" ? "active" : ""} onClick={() => setSettingsTab("profile")}><CircleUserRound size={15} /> Профиль</button>
+		<button type="button" role="tab" aria-selected={settingsTab === "security"} className={settingsTab === "security" ? "active" : ""} onClick={() => setSettingsTab("security")}><LockKeyhole size={15} /> Безопасность</button>
+		<button type="button" role="tab" aria-selected={settingsTab === "appearance"} className={settingsTab === "appearance" ? "active" : ""} onClick={() => setSettingsTab("appearance")}><Palette size={15} /> Внешний вид</button>
+		<button type="button" role="tab" aria-selected={settingsTab === "sessions"} className={settingsTab === "sessions" ? "active" : ""} onClick={() => setSettingsTab("sessions")}><Monitor size={15} /> Сессии</button>
+	</section>
     {(error || message) && <div className={error ? "panel-error settings-feedback" : "settings-success"}>{error || message}</div>}
     <CodexIntegrationPanel currentUser={currentUser} csrf={csrf} />
-    <section className="settings-grid">
-      <article className="settings-card account-card"><div className="settings-card-head"><span className="stat-icon blue"><CircleUserRound size={20} /></span><div><h2>Профиль аккаунта</h2><p>Ваши текущие права в RemoteIt</p></div></div><div className="account-summary"><span className="avatar">{currentUser.username.slice(0, 1).toUpperCase()}</span><div><strong>{currentUser.username}</strong><small>{roleLabel}</small></div></div><div className="account-facts"><span><small>Права доступа</small><strong>{roleLabel}</strong></span><span><small>Имя входа</small><strong>@{currentUser.username}</strong></span><span><small>Защита</small><strong><ShieldCheck size={13} /> Включена</strong></span></div></article>
-      <article className="settings-card"><div className="settings-card-head"><span className="stat-icon green"><KeyRound size={20} /></span><div><h2>Изменить пароль</h2><p>От 4 символов, без обязательных спецсимволов</p></div></div><form className="settings-form" onSubmit={changePassword}><label><span>Текущий пароль</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label><span>Новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label><label><span>Повторите новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label><button className="primary-button" disabled={loading}>{loading ? <RefreshCw size={17} className="spin" /> : <ShieldCheck size={17} />} Сохранить пароль</button></form></article>
-      <article className="settings-card appearance-card"><div className="settings-card-head"><span className="stat-icon violet"><Palette size={20} /></span><div><h2>Внешний вид</h2><p>Белая тема используется по умолчанию</p></div></div><div className="theme-setting"><span>Оформление панели</span><ThemeSwitcher theme={theme} onChange={onTheme} /></div><small className="appearance-note">Выбор сохраняется только для этого браузера и не меняет тему у других администраторов.</small></article>
-      <article className="settings-card sessions-card"><div className="settings-card-head"><span className="stat-icon violet"><Activity size={20} /></span><div><h2>Активные сессии</h2><p>{sessions.length} входов, срок каждой — 12 часов</p></div><button className="icon-button" onClick={() => void loadSessions()} aria-label="Обновить сессии"><RefreshCw size={17} className={sessionsLoading ? "spin" : ""} /></button></div><div className="sessions-list">{sessionsLoading && sessions.length === 0 ? <div className="session-placeholder">Загрузка…</div> : sessions.map((session) => <div className="session-row" key={session.id}><span className={`session-state ${session.current ? "current" : ""}`}><Monitor size={17} /></span><div><strong>{session.current ? "Текущая сессия" : session.userAgent || "Неизвестное устройство"}</strong><small>{session.ip || "IP неизвестен"} · активность {formatRelative(session.lastUsedAt)}</small></div>{session.current ? <span className="current-badge">эта сессия</span> : <button className="danger-button compact-action" onClick={() => void revokeSession(session.id)}><Ban size={14} /> Завершить</button>}</div>)}</div></article>
-      <article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android APK</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a>{(currentUser.role === "owner" || currentUser.role === "admin") && <><a href="/downloads/RemoteIt-MCP.exe" download><Sparkles size={16} /> MCP для Codex</a><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a></>}</div></article>
-	  <article className="settings-card creator-card"><div className="settings-card-head"><span className="stat-icon green"><Send size={20} /></span><div><h2>О RemoteIt</h2><p>Частная платформа удалённого администрирования</p></div></div><a className="creator-link" href="https://t.me/Sanchcz" target="_blank" rel="noreferrer"><span><small>Создатель</small><strong>@Sanchcz</strong></span><span>Telegram</span></a></article>
+    <section className="settings-grid" role="tabpanel">
+		{settingsTab === "profile" && <>
+			<article className="settings-card account-card"><div className="settings-card-head"><span className="stat-icon blue"><CircleUserRound size={20} /></span><div><h2>Профиль аккаунта</h2><p>Ваши текущие права в RemoteIt</p></div></div><div className="account-summary"><span className="avatar">{currentUser.username.slice(0, 1).toUpperCase()}</span><div><strong>{currentUser.username}</strong><small>{roleLabel}</small></div></div><div className="account-facts"><span><small>Права доступа</small><strong>{roleLabel}</strong></span><span><small>Имя входа</small><strong>@{currentUser.username}</strong></span><span><small>Защита</small><strong><ShieldCheck size={13} /> Включена</strong></span></div></article>
+			<article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android APK</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a>{(currentUser.role === "owner" || currentUser.role === "admin") && <a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a>}</div></article>
+			<article className="settings-card creator-card"><div className="settings-card-head"><span className="stat-icon green"><Send size={20} /></span><div><h2>О RemoteIt</h2><p>Частная платформа удалённого администрирования</p></div></div><a className="creator-link" href="https://t.me/Sanchcz" target="_blank" rel="noreferrer"><span><small>Создатель</small><strong>@Sanchcz</strong></span><span>Telegram</span></a></article>
+		</>}
+		{settingsTab === "security" && <article className="settings-card settings-card-wide"><div className="settings-card-head"><span className="stat-icon green"><KeyRound size={20} /></span><div><h2>Изменить пароль</h2><p>От 4 символов, без обязательных спецсимволов</p></div></div><form className="settings-form" onSubmit={changePassword}><label><span>Текущий пароль</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label><span>Новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label><label><span>Повторите новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label><button className="primary-button" disabled={loading}>{loading ? <RefreshCw size={17} className="spin" /> : <ShieldCheck size={17} />} Сохранить пароль</button></form></article>}
+		{settingsTab === "appearance" && <article className="settings-card appearance-card settings-card-wide"><div className="settings-card-head"><span className="stat-icon violet"><Palette size={20} /></span><div><h2>Внешний вид</h2><p>Белая тема используется по умолчанию</p></div></div><div className="theme-setting"><span>Оформление панели</span><ThemeSwitcher theme={theme} onChange={onTheme} /></div><small className="appearance-note">Выбор сохраняется только для этого браузера и не меняет тему у других администраторов.</small></article>}
+		{settingsTab === "sessions" && <article className="settings-card sessions-card settings-card-wide"><div className="settings-card-head"><span className="stat-icon violet"><Activity size={20} /></span><div><h2>Активные сессии</h2><p>{sessions.length} входов, срок каждой — 12 часов</p></div><button className="icon-button" onClick={() => void loadSessions()} aria-label="Обновить сессии"><RefreshCw size={17} className={sessionsLoading ? "spin" : ""} /></button></div><div className="sessions-list">{sessionsLoading && sessions.length === 0 ? <div className="session-placeholder">Загрузка…</div> : sessions.map((session) => <div className="session-row" key={session.id}><span className={`session-state ${session.current ? "current" : ""}`}><Monitor size={17} /></span><div><strong>{session.current ? "Текущая сессия" : session.userAgent || "Неизвестное устройство"}</strong><small>{session.ip || "IP неизвестен"} · активность {formatRelative(session.lastUsedAt)}</small></div>{session.current ? <span className="current-badge">эта сессия</span> : <button className="danger-button compact-action" onClick={() => void revokeSession(session.id)}><Ban size={14} /> Завершить</button>}</div>)}</div></article>}
     </section>
   </>;
 }
