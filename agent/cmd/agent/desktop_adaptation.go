@@ -3,8 +3,13 @@ package main
 import "time"
 
 const (
-	desktopAutoFastSample       = 20 * time.Millisecond
-	desktopAutoPromoteSamples   = 90
+	desktopAutoFastSample = 20 * time.Millisecond
+	// Sixty consecutive fast uploads are two seconds of evidence at the safe
+	// 30 FPS starting cadence. The previous 90-sample window made a healthy
+	// local/Wi-Fi session look artificially capped for about three seconds.
+	// Demotion still needs only eight slow 60 FPS samples, so a path that cannot
+	// sustain the promoted cadence falls back before a latency queue can form.
+	desktopAutoPromoteSamples   = 60
 	desktopAutoCongestedSample  = 110 * time.Millisecond
 	desktopAutoCongestedSamples = 20
 	desktopAutoSixtySlowSample  = 28 * time.Millisecond

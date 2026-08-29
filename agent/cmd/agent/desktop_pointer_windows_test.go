@@ -15,8 +15,10 @@ func TestDesktopPointerSupportsVirtualDesktopOffsetsAndNonstandardFrames(t *test
 	capture := desktopCapture{FrameWidth: 1920, FrameHeight: 804, ScreenX: -1920, ScreenY: -200, ScreenWidth: 5360, ScreenHeight: 1640}
 	event := desktopInput{Type: "pointer", X: 1720, Y: 720, CoordinateWidth: 3440, CoordinateHeight: 1440}
 	x, y := desktopPointerScreenPoint(event, capture)
-	if x != 759 || y != 620 {
-		t.Fatalf("virtual desktop point projected to %d,%d; want 759,620", x, y)
+	// The packet and physical desktop both use inclusive pixel endpoints:
+	// -1920 + floor(1720 * 5359 / 3439) = 760.
+	if x != 760 || y != 620 {
+		t.Fatalf("virtual desktop point projected to %d,%d; want 760,620", x, y)
 	}
 }
 

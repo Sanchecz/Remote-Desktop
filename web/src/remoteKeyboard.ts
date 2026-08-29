@@ -20,6 +20,11 @@ export type RemoteTextReconciliation = {
 	text: string;
 };
 
+export type RemoteBoundaryDeletion = {
+	handled: boolean;
+	keyCode?: 8 | 46;
+};
+
 // Browser `code` names describe physical keys, whereas Windows SendInput uses
 // virtual-key values. Keep this mapping for shortcuts, navigation and other
 // stateful keys. Printable input follows the Unicode path below so Shift
@@ -132,4 +137,24 @@ export function planRemoteTextReconciliation(previous: string, next: string): Re
 		backspaces: previousCodePoints.length - sharedPrefix,
 		text: nextCodePoints.slice(sharedPrefix).join(""),
 	};
+}
+
+// A controlled mobile input can only reconcile characters that it currently
+// mirrors. Once its local value is empty, Android still emits `beforeinput`
+// for Backspace but the value itself cannot change, so `input` never fires.
+// Intercept only that boundary case and send a real remote editing key. When
+// local text exists on the side being deleted, normal IME reconciliation must
+// remain authoritative to avoid sending the same deletion twice.
+export function planRemoteBoundaryDeletion(
+	inputType: string,
+	value: string,
+	selectionStart: number | null,
+	selectionEnd: number | null,
+): RemoteBoundaryDeletion {
+	const start = selectionStart ?? value.length;
+	const end = selectionEnd ?? start;
+	if (start !== end) return { handled: false };
+	if (inputType.endsWith("Backward") && start === 0) return { handled: true, keyCode: 8 };
+	if (inputType.endsWith("Forward") && end === value.length) return { handled: true, keyCode: 46 };
+	return { handled: false };
 }

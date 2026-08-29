@@ -4,6 +4,7 @@ import test from "node:test";
 import {
 	browserCodeToVirtualKey,
 	chunkRemoteText,
+	planRemoteBoundaryDeletion,
 	planRemoteKeyboardInput,
 	planRemoteTextReconciliation,
 } from "../src/remoteKeyboard.ts";
@@ -85,4 +86,20 @@ test("reconciles Android IME corrections using remote Backspace taps", () => {
 
 test("does not split emoji while reconciling mobile input", () => {
 	assert.deepEqual(planRemoteTextReconciliation("готов 👋", "готов ✅"), { backspaces: 1, text: "✅" });
+});
+
+test("sends a real remote Backspace when the mobile mirror is already empty", () => {
+	assert.deepEqual(planRemoteBoundaryDeletion("deleteContentBackward", "", 0, 0), { handled: true, keyCode: 8 });
+	assert.deepEqual(planRemoteBoundaryDeletion("deleteWordBackward", "", 0, 0), { handled: true, keyCode: 8 });
+});
+
+test("leaves deletions inside the mobile mirror to IME reconciliation", () => {
+	assert.deepEqual(planRemoteBoundaryDeletion("deleteContentBackward", "hello", 5, 5), { handled: false });
+	assert.deepEqual(planRemoteBoundaryDeletion("deleteContentForward", "hello", 0, 0), { handled: false });
+	assert.deepEqual(planRemoteBoundaryDeletion("deleteContentBackward", "hello", 1, 3), { handled: false });
+});
+
+test("sends remote Delete only at the forward boundary", () => {
+	assert.deepEqual(planRemoteBoundaryDeletion("deleteContentForward", "", 0, 0), { handled: true, keyCode: 46 });
+	assert.deepEqual(planRemoteBoundaryDeletion("deleteContentForward", "hello", 5, 5), { handled: true, keyCode: 46 });
 });

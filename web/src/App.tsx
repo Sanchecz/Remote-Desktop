@@ -60,7 +60,7 @@ import {
 	Power,
   X
 } from "lucide-react";
-import { chunkRemoteText, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
+import { chunkRemoteText, planRemoteBoundaryDeletion, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
 import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient, reprojectRemotePoint } from "./remoteCamera";
 import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
 import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, resolveRemoteViewport, shouldUseCompactRemoteControls, type RemoteViewport } from "./remoteViewport";
@@ -223,7 +223,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.21";
+const LATEST_AGENT_VERSION = "1.0.22";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1250,7 +1250,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const workspaceRef = useRef<HTMLElement>(null);
 	const mobileKeyboardRef = useRef<HTMLInputElement>(null);
 	const mobileTextSyncedRef = useRef("");
+	const mobileBoundaryDeleteAt = useRef(0);
 	const keyboardOpenRef = useRef(false);
+	const wheelRepeat = useRef({ delay: 0, interval: 0, pointerId: -1 });
 	const sasFeedbackTimer = useRef(0);
 	const sasPendingInputID = useRef(0);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
@@ -1280,9 +1282,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	// encoding a second cursor in JPEG created the duplicate/lagging pointer.
 	const encodedRemoteCursorVisible = false;
 	// Pointer input has its own WebSocket and must not be tied to the video FPS.
-	// 8 ms keeps a desktop mouse close to its native 125 Hz report cadence; touch
-	// stays at 60 Hz to avoid radio/battery churn while remaining immediate.
-	const pointerSendInterval = coarsePointerClient ? 16 : 8;
+	// 8 ms keeps both a desktop mouse and a mobile trackpad close to a 125 Hz
+	// input cadence. Pointer moves use a dedicated socket and latest-only
+	// coalescing, so this lowers perceived latency without building a queue.
+	const pointerSendInterval = 8;
 
 	useEffect(() => { cameraRef.current = camera; pendingCameraRef.current = camera; }, [camera]);
 	useEffect(() => { keyboardOpenRef.current = keyboardOpen; }, [keyboardOpen]);
@@ -1291,6 +1294,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	useEffect(() => () => {
 		window.clearTimeout(sasFeedbackTimer.current);
 		sasPendingInputID.current = 0;
+	}, []);
+	useEffect(() => () => {
+		window.clearTimeout(wheelRepeat.current.delay);
+		window.clearInterval(wheelRepeat.current.interval);
 	}, []);
 
 	function scheduleCamera(next: { zoom: number; panX: number; panY: number }) {
@@ -2346,6 +2353,43 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		if (keyboardOpen) window.requestAnimationFrame(() => mobileKeyboardRef.current?.focus({ preventScroll: true }));
 	}
 
+	function sendMobileBoundaryDelete(keyCode: 8 | 46) {
+		const now = performance.now();
+		// Some Android keyboards emit both keydown and beforeinput for one press.
+		// Keep the two paths as fallbacks while de-duplicating the same deletion.
+		if (now - mobileBoundaryDeleteAt.current < 36) return;
+		mobileBoundaryDeleteAt.current = now;
+		sendVirtualKeyTap(keyCode);
+	}
+
+	function stopWheelRepeat(pointerId?: number) {
+		const repeat = wheelRepeat.current;
+		if (pointerId !== undefined && repeat.pointerId !== -1 && repeat.pointerId !== pointerId) return;
+		window.clearTimeout(repeat.delay);
+		window.clearInterval(repeat.interval);
+		repeat.delay = 0;
+		repeat.interval = 0;
+		repeat.pointerId = -1;
+	}
+
+	function startWheelRepeat(event: ReactPointerEvent<HTMLButtonElement>, direction: 1 | -1) {
+		if (!event.isPrimary) return;
+		event.preventDefault();
+		stopWheelRepeat();
+		wheelRepeat.current.pointerId = event.pointerId;
+		try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* capture is optional in older WebViews */ }
+		sendInput({ type: "wheel", delta: direction * 240 });
+		wheelRepeat.current.delay = window.setTimeout(() => {
+			wheelRepeat.current.interval = window.setInterval(() => sendInput({ type: "wheel", delta: direction * 120 }), 80);
+		}, 240);
+	}
+
+	function wheelKeyboard(event: ReactKeyboardEvent<HTMLButtonElement>, direction: 1 | -1) {
+		if (event.key !== "Enter" && event.key !== " ") return;
+		event.preventDefault();
+		sendInput({ type: "wheel", delta: direction * 240 });
+	}
+
 	function toggleControls() {
 		const next = !controlsCollapsed;
 		if (next && keyboardOpen) setMobileKeyboardVisibility(false);
@@ -2462,8 +2506,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		{compactRemoteClient && controlsCollapsed && mobileDockHidden && <button type="button" className="remote-mobile-dock-reveal" onClick={() => setMobileDockHidden(false)} aria-label="Показать управление"><SlidersHorizontal size={18} /></button>}
 		{compactRemoteClient && controlsCollapsed && <button type="button" className="remote-mobile-fullscreen-fab" onClick={() => void toggleRemoteFullscreen()} aria-label={fullscreenActive ? "Выйти из полноэкранного режима" : "Открыть на весь экран"} title={fullscreenActive ? "Свернуть" : "На весь экран"}><Maximize2 size={19} /></button>}
 		{compactRemoteClient && controlsCollapsed && frameURL && <nav className="remote-mobile-scroll-rail" aria-label="Прокрутка удалённого экрана">
-			<button type="button" onClick={() => sendInput({ type: "wheel", delta: 360 })} aria-label="Прокрутить вверх" title="Прокрутить вверх"><ChevronUp size={18} /></button>
-			<button type="button" onClick={() => sendInput({ type: "wheel", delta: -360 })} aria-label="Прокрутить вниз" title="Прокрутить вниз"><ChevronDown size={18} /></button>
+			<button type="button" onPointerDown={(event) => startWheelRepeat(event, 1)} onPointerUp={(event) => stopWheelRepeat(event.pointerId)} onPointerCancel={(event) => stopWheelRepeat(event.pointerId)} onLostPointerCapture={(event) => stopWheelRepeat(event.pointerId)} onKeyDown={(event) => wheelKeyboard(event, 1)} aria-label="Прокрутить вверх; удерживайте для непрерывной прокрутки" title="Вверх · можно удерживать"><ChevronUp size={18} /></button>
+			<button type="button" onPointerDown={(event) => startWheelRepeat(event, -1)} onPointerUp={(event) => stopWheelRepeat(event.pointerId)} onPointerCancel={(event) => stopWheelRepeat(event.pointerId)} onLostPointerCapture={(event) => stopWheelRepeat(event.pointerId)} onKeyDown={(event) => wheelKeyboard(event, -1)} aria-label="Прокрутить вниз; удерживайте для непрерывной прокрутки" title="Вниз · можно удерживать"><ChevronDown size={18} /></button>
 		</nav>}
 		{compactRemoteClient && <button type="button" className={`remote-mobile-keyboard-fab ${keyboardOpen ? "active" : ""} ${controlsCollapsed && !mobileDockHidden ? "dock-visible" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} aria-label={keyboardOpen ? "Закрыть клавиатуру" : "Открыть клавиатуру"} title={keyboardOpen ? "Закрыть клавиатуру" : "Открыть клавиатуру"}><Keyboard size={20} /></button>}
 		{compactRemoteClient && !controlsCollapsed && <button type="button" className="remote-controls-scrim" aria-label="Скрыть панель управления" onClick={toggleControls} />}
@@ -2485,7 +2529,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button>
 		</footer>
 		{keyboardOpen && <div className="remote-mobile-keyboard" role="group" aria-label="Ввод на удалённом компьютере">
-			<input ref={mobileKeyboardRef} name="remoteit-live-input" autoComplete="off" value={mobileText} onInput={(event) => updateMobileText(event.currentTarget.value)} onCompositionEnd={(event) => updateMobileText(event.currentTarget.value)} onSelect={(event) => { const input = event.currentTarget; if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) window.requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length)); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); sendMobileEnter(); } }} placeholder="Ввод в реальном времени" enterKeyHint="send" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+			<input ref={mobileKeyboardRef} name="remoteit-live-input" autoComplete="off" value={mobileText} onBeforeInput={(event) => { const input = event.currentTarget; const plan = planRemoteBoundaryDeletion((event.nativeEvent as InputEvent).inputType || "", input.value, input.selectionStart, input.selectionEnd); if (plan.handled && plan.keyCode) { event.preventDefault(); sendMobileBoundaryDelete(plan.keyCode); } }} onInput={(event) => updateMobileText(event.currentTarget.value)} onCompositionEnd={(event) => updateMobileText(event.currentTarget.value)} onSelect={(event) => { const input = event.currentTarget; if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) window.requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length)); }} onKeyDown={(event) => { if ((event.key === "Backspace" || event.key === "Delete") && !event.nativeEvent.isComposing) { const inputType = event.key === "Backspace" ? "deleteContentBackward" : "deleteContentForward"; const plan = planRemoteBoundaryDeletion(inputType, event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd); if (plan.handled && plan.keyCode) { event.preventDefault(); sendMobileBoundaryDelete(plan.keyCode); return; } } if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); sendMobileEnter(); } }} placeholder="Ввод в реальном времени" enterKeyHint="send" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
 			<button type="button" className="remote-keyboard-enter" onClick={sendMobileEnter}>Enter</button>
 			<button type="button" className="remote-keyboard-close" onClick={() => setMobileKeyboardVisibility(false)} aria-label="Закрыть клавиатуру"><X size={17} /></button>
 		</div>}
