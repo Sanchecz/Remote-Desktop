@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, resolveRemoteViewport } from "../src/remoteViewport.ts";
+import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, resolveRemoteViewport, shouldUseCompactRemoteControls } from "../src/remoteViewport.ts";
 
 test("Chromium and Android use the visible viewport instead of the stale layout viewport", () => {
 	assert.deepEqual(resolveRemoteViewport({
@@ -46,4 +46,11 @@ test("invalid embedded viewport measurements never collapse the session", () => 
 		documentHeight: 640,
 		visualViewport: { offsetLeft: -4, offsetTop: -2, width: 0, height: Number.NaN },
 	}), { left: 0, top: 0, width: 360, height: 640, landscape: false });
+});
+
+test("phone-sized landscape sessions use compact controls even when a WebView reports a fine pointer", () => {
+	assert.equal(shouldUseCompactRemoteControls(false, { width: 915, height: 374 }), true);
+	assert.equal(shouldUseCompactRemoteControls(false, { width: 740, height: 328 }), true);
+	assert.equal(shouldUseCompactRemoteControls(false, { width: 1440, height: 900 }), false);
+	assert.equal(shouldUseCompactRemoteControls(true, { width: 1920, height: 1080 }), true);
 });

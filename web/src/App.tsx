@@ -63,7 +63,7 @@ import {
 import { chunkRemoteText, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
 import { advanceRemotePinch, advanceRemoteTrackpadCursor, cameraFollowingRemotePoint, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient } from "./remoteCamera";
 import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
-import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, resolveRemoteViewport, type RemoteViewport } from "./remoteViewport";
+import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, resolveRemoteViewport, shouldUseCompactRemoteControls, type RemoteViewport } from "./remoteViewport";
 import { isRecoverableRemoteStatusFailure, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
 
 type User = {
@@ -222,7 +222,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.18";
+const LATEST_AGENT_VERSION = "1.0.19";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1219,10 +1219,6 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [sasFeedbackError, setSASFeedbackError] = useState(false);
 	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
 	const [filesOpen, setFilesOpen] = useState(false);
-	// Phones start with an unobstructed full-screen canvas and a small floating
-	// handle. The complete control surface opens only when the user asks for it.
-	const [controlsCollapsed, setControlsCollapsed] = useState(coarsePointerClient);
-	const [mobileDockHidden, setMobileDockHidden] = useState(false);
 	const [screenScale, setScreenScale] = useState<"fit" | "50" | "75" | "100" | "125" | "150">("fit");
 	// Auto is the default on every client. The Agent starts Auto at 30 FPS,
 	// raises it to 60 on a consistently fast channel and falls back to 15 when
@@ -1237,6 +1233,13 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		documentHeight: typeof document === "undefined" ? 1 : document.documentElement.clientHeight,
 		visualViewport: typeof window === "undefined" || !window.visualViewport ? null : window.visualViewport,
 	}));
+	const compactRemoteClient = shouldUseCompactRemoteControls(coarsePointerClient, remoteViewport);
+	// Phones start with an unobstructed full-screen canvas and a small floating
+	// handle. The complete control surface opens only when the user asks for it.
+	// Use both pointer capabilities and the actual visible viewport: a number of
+	// Android WebViews incorrectly announce a fine pointer in landscape.
+	const [controlsCollapsed, setControlsCollapsed] = useState(() => compactRemoteClient);
+	const [mobileDockHidden, setMobileDockHidden] = useState(false);
 	const [fullscreenActive, setFullscreenActive] = useState(false);
 	const [camera, setCamera] = useState({ zoom: 1, panX: 0, panY: 0 });
 	const cameraRef = useRef(camera);
@@ -1315,7 +1318,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const applyOrientationState = (visible: RemoteViewport, force = false) => {
 			if (!force && visible.landscape === lastLandscape) return;
 			lastLandscape = visible.landscape;
-			if (!coarsePointerClient) return;
+			if (!compactRemoteClient) return;
 			// Browsers do not agree on whether rotating an already-open page emits
 			// orientationchange, resize, both, or only visualViewport.resize. Drive
 			// the compact controller from the measured rectangle so every engine
@@ -1368,7 +1371,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			applyOrientationState(readVisibleViewport(), true);
 			updateAfterViewportSettles();
 		};
-		if (coarsePointerClient && initialVisible.landscape) applyOrientationState(initialVisible, true);
+		if (compactRemoteClient && initialVisible.landscape) applyOrientationState(initialVisible, true);
 		update();
 		const observer = new ResizeObserver(update);
 		observer.observe(viewport);
@@ -1386,7 +1389,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			window.visualViewport?.removeEventListener("scroll", update);
 			for (const id of delayedUpdates) window.clearTimeout(id);
 		};
-	}, [frameURL, coarsePointerClient]);
+	}, [frameURL, compactRemoteClient]);
 
 	useEffect(() => {
 		const doc = document as Document & { webkitFullscreenElement?: Element | null };
@@ -2255,7 +2258,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		if (open) {
 			// The IME needs only a slim text bridge. Hide the large tool sheet and the
 			// compact dock so the remote desktop remains visible above the keyboard.
-			if (coarsePointerClient) {
+			if (compactRemoteClient) {
 				setMobileDockHidden(true);
 				setControlsCollapsed(true);
 			}
@@ -2373,7 +2376,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		}
 	}
 
-	const remoteViewportStyle = coarsePointerClient ? {
+	const remoteViewportStyle = compactRemoteClient ? {
 		"--remote-vv-left": `${remoteViewport.left}px`,
 		"--remote-vv-top": `${remoteViewport.top}px`,
 		"--remote-vv-width": `${remoteViewport.width}px`,
@@ -2406,17 +2409,21 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<span className="remote-stream-stats" title={status?.captureDiagnostics ? `${status.captureDiagnostics.captureBackend}: захват ${status.captureDiagnostics.captureMillis} мс, копирование ${status.captureDiagnostics.copyMillis} мс, масштаб ${status.captureDiagnostics.scaleMillis} мс, JPEG ${status.captureDiagnostics.encodeMillis} мс` : ""}><b>HD</b><span>{latencyMs || "—"} мс</span><em>{frameFPS || "—"} FPS</em><em>{camera.zoom > 1 ? `${Math.round(camera.zoom * 100)}%` : screenScale === "fit" ? "ПО РАЗМЕРУ" : `${screenScale}%`}</em></span>
 			</> : <div className="remote-screen-wait"><ScreenShare size={42} /><strong>{starting ? "Создаём сеанс…" : "Ожидаем первый кадр"}</strong><span>На удалённом компьютере должен быть запущен RemoteIt Agent 0.9.26 или новее.</span></div>}
 		</div>
-		{coarsePointerClient && controlsCollapsed && !mobileDockHidden && <nav className="remote-mobile-dock" aria-label="Быстрое управление удалённым компьютером">
+		{compactRemoteClient && controlsCollapsed && !mobileDockHidden && <nav className="remote-mobile-dock" aria-label="Быстрое управление удалённым компьютером">
 			<button type="button" className={pointerMode === "trackpad" ? "active" : ""} aria-pressed={pointerMode === "trackpad"} onClick={() => selectPointerMode("trackpad")}><MousePointer2 size={18} /><span>Курсор</span></button>
 			<button type="button" className={pointerMode === "direct" ? "active" : ""} aria-pressed={pointerMode === "direct"} onClick={() => selectPointerMode("direct")}><Hand size={18} /><span>Касание</span></button>
 			<button type="button" onClick={() => setMobileKeyboardVisibility(true)}><Keyboard size={18} /><span>Клавиатура</span></button>
 			<button type="button" onClick={() => { setMobileDockHidden(false); setControlsCollapsed(false); }}><SlidersHorizontal size={18} /><span>Ещё</span></button>
 			<button type="button" className="dock-hide" onClick={() => setMobileDockHidden(true)} aria-label="Скрыть все элементы управления"><X size={17} /></button>
 		</nav>}
-		{coarsePointerClient && controlsCollapsed && mobileDockHidden && <button type="button" className="remote-mobile-dock-reveal" onClick={() => setMobileDockHidden(false)} aria-label="Показать управление"><SlidersHorizontal size={18} /></button>}
-		{coarsePointerClient && controlsCollapsed && <button type="button" className="remote-mobile-fullscreen-fab" onClick={() => void toggleRemoteFullscreen()} aria-label={fullscreenActive ? "Выйти из полноэкранного режима" : "Открыть на весь экран"} title={fullscreenActive ? "Свернуть" : "На весь экран"}><Maximize2 size={19} /></button>}
-		{coarsePointerClient && <button type="button" className={`remote-mobile-keyboard-fab ${keyboardOpen ? "active" : ""} ${controlsCollapsed && !mobileDockHidden ? "dock-visible" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} aria-label={keyboardOpen ? "Закрыть клавиатуру" : "Открыть клавиатуру"} title={keyboardOpen ? "Закрыть клавиатуру" : "Открыть клавиатуру"}><Keyboard size={20} /></button>}
-		{coarsePointerClient && !controlsCollapsed && <button type="button" className="remote-controls-scrim" aria-label="Скрыть панель управления" onClick={toggleControls} />}
+		{compactRemoteClient && controlsCollapsed && mobileDockHidden && <button type="button" className="remote-mobile-dock-reveal" onClick={() => setMobileDockHidden(false)} aria-label="Показать управление"><SlidersHorizontal size={18} /></button>}
+		{compactRemoteClient && controlsCollapsed && <button type="button" className="remote-mobile-fullscreen-fab" onClick={() => void toggleRemoteFullscreen()} aria-label={fullscreenActive ? "Выйти из полноэкранного режима" : "Открыть на весь экран"} title={fullscreenActive ? "Свернуть" : "На весь экран"}><Maximize2 size={19} /></button>}
+		{compactRemoteClient && controlsCollapsed && frameURL && <nav className="remote-mobile-scroll-rail" aria-label="Прокрутка удалённого экрана">
+			<button type="button" onClick={() => sendInput({ type: "wheel", delta: 360 })} aria-label="Прокрутить вверх" title="Прокрутить вверх"><ChevronUp size={18} /></button>
+			<button type="button" onClick={() => sendInput({ type: "wheel", delta: -360 })} aria-label="Прокрутить вниз" title="Прокрутить вниз"><ChevronDown size={18} /></button>
+		</nav>}
+		{compactRemoteClient && <button type="button" className={`remote-mobile-keyboard-fab ${keyboardOpen ? "active" : ""} ${controlsCollapsed && !mobileDockHidden ? "dock-visible" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} aria-label={keyboardOpen ? "Закрыть клавиатуру" : "Открыть клавиатуру"} title={keyboardOpen ? "Закрыть клавиатуру" : "Открыть клавиатуру"}><Keyboard size={20} /></button>}
+		{compactRemoteClient && !controlsCollapsed && <button type="button" className="remote-controls-scrim" aria-label="Скрыть панель управления" onClick={toggleControls} />}
 		<footer className="remote-session-footer">
 			<div className="remote-session-tools">
 				<span><MousePointer2 size={15} /> {pointerMode === "direct" ? "Касание — левый клик · удержание 2 секунды — правый" : "Ведите пальцем — перемещайте курсор; удержание 2 секунды — правый клик"}</span>
@@ -2428,8 +2435,6 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button type="button" className="remote-tool-button" onClick={() => void sendCtrlAltDelete()}><Keyboard size={15} /> Ctrl+Alt+Del</button>
 				<button type="button" className="remote-tool-button" onClick={() => void toggleRemoteFullscreen()}><Maximize2 size={15} /> {fullscreenActive ? "Свернуть" : "Полный экран"}</button>
 				<button type="button" className="remote-tool-button" onClick={resetCamera}><Maximize2 size={15} /> По размеру</button>
-				<button type="button" className="remote-tool-button" onClick={() => sendInput({ type: "wheel", delta: 360 })}><ChevronUp size={16} /> Прокрутить вверх</button>
-				<button type="button" className="remote-tool-button" onClick={() => sendInput({ type: "wheel", delta: -360 })}><ChevronDown size={16} /> Прокрутить вниз</button>
 				<button type="button" className="remote-tool-button" onClick={openRemoteFiles}><Folder size={15} /> Файлы</button>
 				<button type="button" className="remote-tool-button" onClick={() => void pasteClipboard()}><Clipboard size={15} /> Буфер</button>
 				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
@@ -2555,7 +2560,7 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
     try {
       for (const file of selected) {
         const created = await api<{ id: string }>(`/api/devices/${device.id}/file-transfers`, { method: "POST", body: JSON.stringify({ direction: "to_device", name: file.name, remotePath: path, size: file.size }) }, csrf);
-        let offset = 0; const chunkSize = 8 * 1024 * 1024;
+        let offset = 0; const chunkSize = 32 * 1024 * 1024;
         while (offset < file.size) {
           const chunkOffset = offset; let uploaded = false; let lastError = "";
           for (let attempt = 0; attempt < 5 && !uploaded; attempt += 1) {
@@ -2591,14 +2596,14 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
   }
 
   return <section className="remote-files-card" aria-busy={loading}>
-		<div className="remote-files-head"><div><strong><FolderOpen size={19} /> Проводник удалённого компьютера</strong><small>Открывайте папки, скачивайте файлы и загружайте их перетаскиванием</small></div><span className="remote-files-cap"><ShieldCheck size={14} /> до 10 ГБ</span></div>
+		<div className="remote-files-head"><div><strong><FolderOpen size={19} /> Проводник удалённого компьютера</strong><small>Скачивайте файлы с компьютера и отправляйте на него файлы с этого устройства</small></div><span className="remote-files-cap"><ShieldCheck size={14} /> до 10 ГБ</span></div>
     {!started ? <button className="secondary-button remote-files-open" disabled={!device.online || loading} onClick={() => void openPath("")}><FolderOpen size={17} /> {device.online ? "Открыть файлы" : "Агент не в сети"}</button> : <>
 			<div className="remote-files-toolbar">
 				<button type="button" className="secondary-button remote-parent" disabled={loading || !parent} onClick={() => void openPath(parent)}><ChevronUp size={16} /> Выше</button>
 				<form className="remote-path" onSubmit={(event) => { event.preventDefault(); void openPath(path); }}><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="C:\\ или /home" aria-label="Путь на удалённом компьютере" /><button className="secondary-button" disabled={loading}>Перейти</button></form>
 				<button type="button" className="secondary-button remote-refresh-folder" disabled={loading} onClick={() => void openPath(path)}><RefreshCw size={16} className={loading ? "spin" : ""} /><span>Обновить</span></button>
 			</div>
-      {path && <><input ref={uploadInput} className="remote-upload-input" type="file" multiple onChange={(event) => { void uploadFiles(Array.from(event.target.files || [])); event.target.value = ""; }} /><button type="button" className={`remote-upload-zone ${dragging ? "dragging" : ""}`} disabled={loading || !supportsLargeTransfers} onClick={() => uploadInput.current?.click()} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={dropFiles}><Upload size={17} /><span><strong>{supportsLargeTransfers ? "Перетащите файлы сюда" : "Обновите Agent до 0.6.0"}</strong><small>потоковая передача с прогрессом · до 10 ГБ на файл</small></span></button></>}
+      {path && <><input ref={uploadInput} className="remote-upload-input" type="file" multiple onChange={(event) => { void uploadFiles(Array.from(event.target.files || [])); event.target.value = ""; }} /><button type="button" className={`remote-upload-zone ${dragging ? "dragging" : ""}`} disabled={loading || !supportsLargeTransfers} onClick={() => uploadInput.current?.click()} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={dropFiles}><span className="remote-upload-icon"><Upload size={19} /></span><span><strong>{supportsLargeTransfers ? "Выбрать файлы на этом устройстве" : "Обновите Agent до 0.6.0"}</strong><small>Телефон, планшет или компьютер → текущая папка на удалённом ПК</small><em>На компьютере файлы можно также перетащить в эту область · до 10 ГБ каждый</em></span><span className="remote-upload-action">Выбрать</span></button></>}
 			<div className="remote-file-list-head"><span>Содержимое папки</span><small>{entries.length} объектов</small></div>
 			<div className="remote-file-list">{entries.map((entry) => <div className="remote-file-row" key={entry.path}><span className="remote-file-icon">{entry.directory ? <Folder size={18} /> : <FileIcon size={18} />}</span><button className="remote-file-name" disabled={loading} onClick={() => entry.directory ? void openPath(entry.path) : void downloadRemoteFile(entry)}><strong>{entry.name}</strong><small>{entry.directory ? "Папка" : formatBytes(entry.size)} · {new Date(entry.modifiedAt).toLocaleString("ru-RU")}</small></button>{entry.directory ? <button className="remote-download" disabled={loading} title="Открыть папку" onClick={() => void openPath(entry.path)}><ChevronDown size={16} className="remote-open-folder-icon" /></button> : <button className="remote-download" disabled={loading || !supportsLargeTransfers || entry.size > 10 * 1024 * 1024 * 1024} title={!supportsLargeTransfers ? "Обновите Agent до 0.6.0" : entry.size > 10 * 1024 * 1024 * 1024 ? "Файл превышает 10 ГБ" : "Скачать"} onClick={() => void downloadRemoteFile(entry)}><Download size={16} /><span>Скачать</span></button>}</div>)}</div>
       {!loading && entries.length === 0 && !error && <div className="remote-files-empty">Папка пуста</div>}
@@ -2606,7 +2611,7 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
     {loading && <div className="remote-files-loading"><RefreshCw className="spin" size={16} /> {transferProgress || "Ожидание ответа Agent…"}</div>}
     {message && <div className="form-success">{message}</div>}
     {error && <div className="form-error">{error}</div>}
-		<small className="remote-files-limit"><ShieldCheck size={14} /> Передача идёт частями по 8 МБ и автоматически продолжается после краткого обрыва. Файл до 10 ГБ не хранится целиком в памяти.</small>
+		<small className="remote-files-limit"><ShieldCheck size={14} /> Передача идёт потоковыми частями по 32 МБ и автоматически продолжается после краткого обрыва. Файл до 10 ГБ не хранится целиком в памяти.</small>
   </section>;
 }
 
@@ -2959,20 +2964,20 @@ function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User
 
   const roleLabel = currentUser.role === "owner" ? "Владелец" : currentUser.role === "admin" ? "Администратор" : currentUser.role === "technician" ? "Техник" : "Наблюдатель";
   return <>
-    <section className="page-heading"><div><span className="eyebrow">АККАУНТ И БЕЗОПАСНОСТЬ</span><h1>Настройки</h1><p>Пароль, оформление и активные входы аккаунта {currentUser.username}.</p></div></section>
+    <section className="page-heading settings-page-heading"><div><span className="eyebrow">АККАУНТ И БЕЗОПАСНОСТЬ</span><h1>Настройки</h1><p>Управляйте профилем, защитой, оформлением и активными входами аккаунта {currentUser.username}.</p></div><span className="settings-heading-badge"><ShieldCheck size={17} /><span><strong>{roleLabel}</strong><small>защищённый аккаунт</small></span></span></section>
 	<section className="settings-tabs" role="tablist" aria-label="Разделы настроек">
-		<button type="button" role="tab" aria-selected={settingsTab === "profile"} className={settingsTab === "profile" ? "active" : ""} onClick={() => setSettingsTab("profile")}><CircleUserRound size={15} /> Профиль</button>
-		<button type="button" role="tab" aria-selected={settingsTab === "security"} className={settingsTab === "security" ? "active" : ""} onClick={() => setSettingsTab("security")}><LockKeyhole size={15} /> Безопасность</button>
-		<button type="button" role="tab" aria-selected={settingsTab === "appearance"} className={settingsTab === "appearance" ? "active" : ""} onClick={() => setSettingsTab("appearance")}><Palette size={15} /> Внешний вид</button>
-		<button type="button" role="tab" aria-selected={settingsTab === "sessions"} className={settingsTab === "sessions" ? "active" : ""} onClick={() => setSettingsTab("sessions")}><Monitor size={15} /> Сессии</button>
+		<button id="settings-tab-profile" type="button" role="tab" aria-controls="settings-panel-profile" aria-selected={settingsTab === "profile"} className={settingsTab === "profile" ? "active" : ""} onClick={() => setSettingsTab("profile")}><span className="settings-tab-icon"><CircleUserRound size={18} /></span><span className="settings-tab-copy"><strong>Профиль</strong><small>Аккаунт и приложения</small></span></button>
+		<button id="settings-tab-security" type="button" role="tab" aria-controls="settings-panel-security" aria-selected={settingsTab === "security"} className={settingsTab === "security" ? "active" : ""} onClick={() => setSettingsTab("security")}><span className="settings-tab-icon"><LockKeyhole size={18} /></span><span className="settings-tab-copy"><strong>Безопасность</strong><small>Пароль и защита</small></span></button>
+		<button id="settings-tab-appearance" type="button" role="tab" aria-controls="settings-panel-appearance" aria-selected={settingsTab === "appearance"} className={settingsTab === "appearance" ? "active" : ""} onClick={() => setSettingsTab("appearance")}><span className="settings-tab-icon"><Palette size={18} /></span><span className="settings-tab-copy"><strong>Внешний вид</strong><small>Тема интерфейса</small></span></button>
+		<button id="settings-tab-sessions" type="button" role="tab" aria-controls="settings-panel-sessions" aria-selected={settingsTab === "sessions"} className={settingsTab === "sessions" ? "active" : ""} onClick={() => setSettingsTab("sessions")}><span className="settings-tab-icon"><Monitor size={18} /></span><span className="settings-tab-copy"><strong>Сессии</strong><small>Активные входы</small></span></button>
 	</section>
     {(error || message) && <div className={error ? "panel-error settings-feedback" : "settings-success"}>{error || message}</div>}
-    <CodexIntegrationPanel currentUser={currentUser} csrf={csrf} />
-    <section className="settings-grid" role="tabpanel">
+    <section id={`settings-panel-${settingsTab}`} className="settings-grid" role="tabpanel" aria-labelledby={`settings-tab-${settingsTab}`}>
 		{settingsTab === "profile" && <>
 			<article className="settings-card account-card"><div className="settings-card-head"><span className="stat-icon blue"><CircleUserRound size={20} /></span><div><h2>Профиль аккаунта</h2><p>Ваши текущие права в RemoteIt</p></div></div><div className="account-summary"><span className="avatar">{currentUser.username.slice(0, 1).toUpperCase()}</span><div><strong>{currentUser.username}</strong><small>{roleLabel}</small></div></div><div className="account-facts"><span><small>Права доступа</small><strong>{roleLabel}</strong></span><span><small>Имя входа</small><strong>@{currentUser.username}</strong></span><span><small>Защита</small><strong><ShieldCheck size={13} /> Включена</strong></span></div></article>
 			<article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android APK</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a>{(currentUser.role === "owner" || currentUser.role === "admin") && <a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a>}</div></article>
 			<article className="settings-card creator-card"><div className="settings-card-head"><span className="stat-icon green"><Send size={20} /></span><div><h2>О RemoteIt</h2><p>Частная платформа удалённого администрирования</p></div></div><a className="creator-link" href="https://t.me/Sanchcz" target="_blank" rel="noreferrer"><span><small>Создатель</small><strong>@Sanchcz</strong></span><span>Telegram</span></a></article>
+			<div className="settings-codex-slot"><CodexIntegrationPanel currentUser={currentUser} csrf={csrf} /></div>
 		</>}
 		{settingsTab === "security" && <article className="settings-card settings-card-wide"><div className="settings-card-head"><span className="stat-icon green"><KeyRound size={20} /></span><div><h2>Изменить пароль</h2><p>От 4 символов, без обязательных спецсимволов</p></div></div><form className="settings-form" onSubmit={changePassword}><label><span>Текущий пароль</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label><span>Новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label><label><span>Повторите новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label><button className="primary-button" disabled={loading}>{loading ? <RefreshCw size={17} className="spin" /> : <ShieldCheck size={17} />} Сохранить пароль</button></form></article>}
 		{settingsTab === "appearance" && <article className="settings-card appearance-card settings-card-wide"><div className="settings-card-head"><span className="stat-icon violet"><Palette size={20} /></span><div><h2>Внешний вид</h2><p>Белая тема используется по умолчанию</p></div></div><div className="theme-setting"><span>Оформление панели</span><ThemeSwitcher theme={theme} onChange={onTheme} /></div><small className="appearance-note">Выбор сохраняется только для этого браузера и не меняет тему у других администраторов.</small></article>}

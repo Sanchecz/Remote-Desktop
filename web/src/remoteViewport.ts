@@ -48,3 +48,12 @@ export const REMOTE_VIEWPORT_SETTLE_DELAYS = [0, 60, 180, 360, 700] as const;
 export function remoteViewportChanged(previous: RemoteViewport, next: RemoteViewport): boolean {
 	return previous.left !== next.left || previous.top !== next.top || previous.width !== next.width || previous.height !== next.height;
 }
+
+// Some Android WebViews and mobile browsers expose a fine pointer even though
+// the page is running on a phone. The visible viewport is therefore a second,
+// deterministic signal for the compact remote controller. A real desktop
+// keeps the full toolbar unless its window has deliberately been reduced to a
+// phone/tablet-sized workspace, where the responsive controller is preferable.
+export function shouldUseCompactRemoteControls(coarsePointer: boolean, viewport: Pick<RemoteViewport, "width" | "height">): boolean {
+	return coarsePointer || (viewport.width <= 1024 && viewport.height <= 1024);
+}

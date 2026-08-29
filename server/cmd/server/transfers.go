@@ -20,7 +20,7 @@ import (
 
 const (
 	maxTransferSize   int64 = 10 * 1024 * 1024 * 1024
-	transferChunkSize int64 = 8 * 1024 * 1024
+	transferChunkSize int64 = 32 * 1024 * 1024
 	maxStagedSize     int64 = 20 * 1024 * 1024 * 1024
 )
 
