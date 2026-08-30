@@ -32,12 +32,12 @@ if (releaseTaskRequested && !releaseSigningConfigured) {
 
 android {
     namespace = "ru.supportgenesis.genesisit"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "ru.supportgenesis.genesisit"
         minSdk = 26
-        targetSdk = 37
+        targetSdk = 36
 		versionCode = 110
 		versionName = "1.0.23"
     }

@@ -69,7 +69,7 @@ RUN mkdir -p ${ANDROID_SDK_ROOT}/cmdline-tools && \
     rm /tmp/android-tools.zip
 ENV PATH=${PATH}:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT}/platform-tools
 RUN yes | sdkmanager --licenses >/dev/null || true && \
-    sdkmanager "platforms;android-37" "build-tools;36.0.0" "platform-tools"
+    sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 RUN wget -q https://services.gradle.org/distributions/gradle-9.5.0-bin.zip -O /tmp/gradle.zip && \
     wget -q https://services.gradle.org/distributions/gradle-9.5.0-bin.zip.sha256 -O /tmp/gradle.sha256 && \
     echo "$(cat /tmp/gradle.sha256)  /tmp/gradle.zip" | sha256sum -c - && \
