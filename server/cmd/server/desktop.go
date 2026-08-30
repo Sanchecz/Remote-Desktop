@@ -19,13 +19,17 @@ import (
 )
 
 const (
-	desktopMaxFrame         = 8 << 20
+	// Native 4K q92 4:4:4 administration frames can legitimately exceed 8 MiB.
+	// The Agent still re-encodes pathological frames and this 16 MiB bound keeps
+	// WebSocket and HTTP memory usage finite.
+	desktopMaxFrame         = 16 << 20
 	desktopMaxFrameEnvelope = desktopMaxFrame + 80
 	desktopVideoLaneCount   = 6
 )
 
 type desktopFrameState struct {
 	Frame            []byte
+	ViewerPayload    []byte
 	Width            int
 	Height           int
 	At               time.Time
@@ -75,15 +79,39 @@ func desktopViewerLaneCarriesFrames(lane int) bool {
 	return lane != -2
 }
 
+func desktopViewerLaneOwnsKeepalive(lane int) bool {
+	// A modern viewer assigns lane 0 as its single session lease owner. The
+	// negative legacy lane remains compatible, while the dedicated input lane
+	// and auxiliary video lanes never duplicate the database write.
+	return lane == -1 || lane == 0
+}
+
 func desktopViewerPayload(frame desktopFrameState, lane int) []byte {
 	if lane < 0 {
 		return frame.Frame
+	}
+	if len(frame.ViewerPayload) == 12+len(frame.Frame) &&
+		frame.ViewerPayload[0] == 'R' && frame.ViewerPayload[1] == 'T' &&
+		frame.ViewerPayload[2] == 'V' && frame.ViewerPayload[3] == '1' {
+		return frame.ViewerPayload
 	}
 	payload := make([]byte, 12+len(frame.Frame))
 	copy(payload[:4], "RTV1")
 	binary.BigEndian.PutUint64(payload[4:12], frame.ProducerSequence)
 	copy(payload[12:], frame.Frame)
 	return payload
+}
+
+// immutableDesktopFrame creates the raw JPEG view used by legacy viewers and
+// the sequence envelope used by modern multi-lane viewers in one allocation.
+// Keeping both slices over the same immutable backing array avoids copying an
+// entire 2K/4K JPEG again on every browser WebSocket write.
+func immutableDesktopFrame(frame []byte, producerSequence uint64) (rawJPEG, viewerPayload []byte) {
+	viewerPayload = make([]byte, 12+len(frame))
+	copy(viewerPayload[:4], "RTV1")
+	binary.BigEndian.PutUint64(viewerPayload[4:12], producerSequence)
+	copy(viewerPayload[12:], frame)
+	return viewerPayload[12:], viewerPayload
 }
 
 func parseDesktopFrameMessage(payload []byte) (parsedDesktopFrameMessage, error) {
@@ -162,37 +190,96 @@ type desktopInputAck struct {
 }
 
 type desktopInputQueue struct {
-	mu        sync.Mutex
-	events    []queuedDesktopInput
-	nextID    int64
-	touchedAt time.Time
-	notify    chan struct{}
+	mu                sync.Mutex
+	events            []queuedDesktopInput
+	nextID            int64
+	clientInputIDs    map[string]int64
+	clientInputOrder  []string
+	touchedAt         time.Time
+	notify            chan struct{}
+	inputDeliveryMu   sync.Mutex
+	inputOwnerVersion uint64
 }
 
+const (
+	desktopInputQueueSoftLimit  = 512
+	desktopInputDedupHistoryMax = 2048
+)
+
 func newDesktopInputQueue() *desktopInputQueue {
-	return &desktopInputQueue{notify: make(chan struct{}, 1), touchedAt: time.Now().UTC()}
+	return &desktopInputQueue{
+		notify:         make(chan struct{}, 1),
+		clientInputIDs: make(map[string]int64),
+		touchedAt:      time.Now().UTC(),
+	}
+}
+
+// claimInputOwner makes the newest Agent input WebSocket authoritative. A
+// reconnect can briefly overlap the previous TCP connection; without an owner
+// generation both writers could drain the queue concurrently and deliver a
+// newer batch before an older one. The Agent deliberately ignores input IDs it
+// has already passed, so that inversion looked like a lost click or a cursor
+// jump. Delivery itself is serialized separately so an already-started write
+// finishes (or restores its batch) before the replacement begins.
+func (queue *desktopInputQueue) claimInputOwner() uint64 {
+	queue.mu.Lock()
+	queue.inputOwnerVersion++
+	version := queue.inputOwnerVersion
+	queue.mu.Unlock()
+	select {
+	case queue.notify <- struct{}{}:
+	default:
+	}
+	return version
+}
+
+func (queue *desktopInputQueue) lockInputDelivery(version uint64) bool {
+	queue.inputDeliveryMu.Lock()
+	queue.mu.Lock()
+	current := queue.inputOwnerVersion == version
+	queue.mu.Unlock()
+	if !current {
+		queue.inputDeliveryMu.Unlock()
+	}
+	return current
+}
+
+func (queue *desktopInputQueue) unlockInputDelivery() {
+	queue.inputDeliveryMu.Unlock()
 }
 
 func (queue *desktopInputQueue) enqueue(events []desktopInputEvent) int64 {
 	queue.mu.Lock()
 	lastID := queue.nextID
 	for _, event := range events {
-		if event.Type == "pointer" && event.Action == "move" {
-			filtered := queue.events[:0]
-			for _, queued := range queue.events {
-				if queued.Event.Type != "pointer" || queued.Event.Action != "move" {
-					filtered = append(filtered, queued)
-				}
+		if event.ClientInputID != "" {
+			if existingID, duplicate := queue.clientInputIDs[event.ClientInputID]; duplicate {
+				lastID = existingID
+				continue
 			}
-			queue.events = filtered
 		}
 		queue.nextID++
 		lastID = queue.nextID
-		queue.events = append(queue.events, queuedDesktopInput{ID: queue.nextID, Event: event})
+		if event.ClientInputID != "" {
+			queue.clientInputIDs[event.ClientInputID] = queue.nextID
+			queue.clientInputOrder = append(queue.clientInputOrder, event.ClientInputID)
+			if len(queue.clientInputOrder) > desktopInputDedupHistoryMax {
+				oldest := queue.clientInputOrder[0]
+				queue.clientInputOrder = queue.clientInputOrder[1:]
+				delete(queue.clientInputIDs, oldest)
+			}
+		}
+		queued := queuedDesktopInput{ID: queue.nextID, Event: event}
+		if event.Type == "pointer" && event.Action == "move" && len(queue.events) > 0 {
+			last := len(queue.events) - 1
+			if queue.events[last].Event.Type == "pointer" && queue.events[last].Event.Action == "move" {
+				queue.events[last] = queued
+				continue
+			}
+		}
+		queue.events = append(queue.events, queued)
 	}
-	if len(queue.events) > 120 {
-		queue.events = append([]queuedDesktopInput(nil), queue.events[len(queue.events)-120:]...)
-	}
+	queue.events = trimQueuedDesktopInputs(queue.events, desktopInputQueueSoftLimit)
 	queue.touchedAt = time.Now().UTC()
 	queue.mu.Unlock()
 	select {
@@ -216,6 +303,65 @@ func (queue *desktopInputQueue) drain(limit int) []queuedDesktopInput {
 	queue.events = append([]queuedDesktopInput(nil), queue.events[limit:]...)
 	queue.touchedAt = time.Now().UTC()
 	return result
+}
+
+// restore puts a batch back at the head of the queue when the primary Agent
+// WebSocket closes while the server is writing it. Queue IDs are intentionally
+// preserved: the Agent uses them to suppress the ambiguous duplicate case where
+// a complete WebSocket message reached Windows but the final transport write
+// still returned an error. Free pointer moves are latest-only both before and
+// after a restore, while clicks, wheel, keyboard and text retain their order.
+func (queue *desktopInputQueue) restore(items []queuedDesktopInput) {
+	if len(items) == 0 {
+		return
+	}
+	queue.mu.Lock()
+	combined := append(append(make([]queuedDesktopInput, 0, len(items)+len(queue.events)), items...), queue.events...)
+	restored := coalesceQueuedDesktopInputs(combined)
+	queue.events = append([]queuedDesktopInput(nil), trimQueuedDesktopInputs(restored, desktopInputQueueSoftLimit)...)
+	queue.touchedAt = time.Now().UTC()
+	queue.mu.Unlock()
+	select {
+	case queue.notify <- struct{}{}:
+	default:
+	}
+}
+
+func coalesceQueuedDesktopInputs(items []queuedDesktopInput) []queuedDesktopInput {
+	result := make([]queuedDesktopInput, 0, len(items))
+	for _, item := range items {
+		if item.Event.Type == "pointer" && item.Event.Action == "move" && len(result) > 0 {
+			last := len(result) - 1
+			if result[last].Event.Type == "pointer" && result[last].Event.Action == "move" {
+				result[last] = item
+				continue
+			}
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+// trimQueuedDesktopInputs is a soft memory bound, not a lossy FIFO. Under a
+// pointer storm only superseded free movement samples may be discarded. Button
+// and key boundaries, text, wheel and SAS events are deliberately retained even
+// when they temporarily exceed the soft limit: dropping an old key-up or
+// pointer-up is substantially worse than carrying a few additional tiny input
+// records until the Agent catches up.
+func trimQueuedDesktopInputs(items []queuedDesktopInput, limit int) []queuedDesktopInput {
+	if limit <= 0 || len(items) <= limit {
+		return items
+	}
+	toDrop := len(items) - limit
+	trimmed := make([]queuedDesktopInput, 0, len(items)-toDrop)
+	for _, item := range items {
+		if toDrop > 0 && item.Event.Type == "pointer" && item.Event.Action == "move" {
+			toDrop--
+			continue
+		}
+		trimmed = append(trimmed, item)
+	}
+	return trimmed
 }
 
 func (queue *desktopInputQueue) hasEvents() bool {
@@ -264,10 +410,13 @@ func (s *server) desktopFrameSignal(sessionID string) chan struct{} {
 	return actual.(chan struct{})
 }
 
-func (s *server) signalDesktopFrame(sessionID string) {
+func (s *server) signalDesktopFrame(sessionID string, frameLane int) {
+	// The legacy single-socket viewer listens on the session key. Modern
+	// viewers have one signal per video lane, so waking all six lanes for one
+	// new JPEG creates needless scheduler churn at 30/60 FPS.
 	keys := []string{sessionID}
-	for lane := 0; lane < desktopVideoLaneCount; lane++ {
-		keys = append(keys, sessionID+"\x00viewer"+strconv.Itoa(lane))
+	if frameLane >= 0 && frameLane < desktopVideoLaneCount {
+		keys = append(keys, sessionID+"\x00viewer"+strconv.Itoa(frameLane))
 	}
 	for _, key := range keys {
 		select {
@@ -313,6 +462,18 @@ func (s *server) desktopFrameLock(sessionID string) *sync.Mutex {
 	lock := &sync.Mutex{}
 	actual, _ := s.desktopFrameLocks.LoadOrStore(sessionID, lock)
 	return actual.(*sync.Mutex)
+}
+
+func (s *server) resetDesktopFrameDatabaseTouch(sessionID string, attemptedAt time.Time) {
+	lock := s.desktopFrameLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+	current, ok := s.loadDesktopFrame(sessionID)
+	if !ok || !current.DatabaseTouchAt.Equal(attemptedAt) {
+		return
+	}
+	current.DatabaseTouchAt = time.Time{}
+	s.desktopFrames.Store(sessionID, current)
 }
 
 func (s *server) deleteDesktopFramesForDevice(deviceID string) {
@@ -423,6 +584,7 @@ func (s *server) pruneDesktopRuntimeState(cutoff time.Time) {
 
 type desktopInputEvent struct {
 	Type             string `json:"type"`
+	ClientInputID    string `json:"clientInputId,omitempty"`
 	Action           string `json:"action,omitempty"`
 	Button           string `json:"button,omitempty"`
 	Text             string `json:"text,omitempty"`
@@ -432,6 +594,11 @@ type desktopInputEvent struct {
 	CoordinateHeight int    `json:"coordinateHeight,omitempty"`
 	Delta            int    `json:"delta,omitempty"`
 	KeyCode          int    `json:"keyCode,omitempty"`
+}
+
+type desktopViewerInputBatch struct {
+	BatchID string
+	Events  []desktopInputEvent
 }
 
 func (s *server) authenticateDesktopAgent(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -799,6 +966,9 @@ func (s *server) desktopSessionInput(w http.ResponseWriter, r *http.Request) {
 }
 
 func validDesktopInput(event desktopInputEvent) bool {
+	if !validDesktopClientInputID(event.ClientInputID) {
+		return false
+	}
 	switch event.Type {
 	case "pointer":
 		if event.X < 0 || event.Y < 0 || event.X > 20000 || event.Y > 20000 {
@@ -833,27 +1003,52 @@ func validDesktopInput(event desktopInputEvent) bool {
 	}
 }
 
-func desktopInputEventsFromJSON(payload []byte) ([]desktopInputEvent, error) {
+func validDesktopClientInputID(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > 96 {
+		return false
+	}
+	for _, candidate := range value {
+		if (candidate >= 'a' && candidate <= 'z') || (candidate >= 'A' && candidate <= 'Z') || (candidate >= '0' && candidate <= '9') || candidate == '-' || candidate == '_' || candidate == ':' || candidate == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func desktopInputBatchFromJSON(payload []byte) (desktopViewerInputBatch, error) {
 	var input struct {
 		desktopInputEvent
-		Events []desktopInputEvent `json:"events"`
+		BatchID string              `json:"batchId"`
+		Events  []desktopInputEvent `json:"events"`
 	}
 	if len(payload) == 0 || len(payload) > 64<<10 || json.Unmarshal(payload, &input) != nil {
-		return nil, errors.New("invalid remote input payload")
+		return desktopViewerInputBatch{}, errors.New("invalid remote input payload")
+	}
+	if !validDesktopClientInputID(input.BatchID) {
+		return desktopViewerInputBatch{}, errors.New("invalid remote input batch id")
 	}
 	events := input.Events
 	if len(events) == 0 {
 		events = []desktopInputEvent{input.desktopInputEvent}
 	}
 	if len(events) == 0 || len(events) > 64 {
-		return nil, errors.New("invalid remote input batch size")
+		return desktopViewerInputBatch{}, errors.New("invalid remote input batch size")
 	}
 	for _, candidate := range events {
 		if !validDesktopInput(candidate) {
-			return nil, errors.New("invalid remote input event")
+			return desktopViewerInputBatch{}, errors.New("invalid remote input event")
 		}
 	}
-	return events, nil
+	return desktopViewerInputBatch{BatchID: input.BatchID, Events: events}, nil
+}
+
+func desktopInputEventsFromJSON(payload []byte) ([]desktopInputEvent, error) {
+	batch, err := desktopInputBatchFromJSON(payload)
+	return batch.Events, err
 }
 
 func (s *server) endDesktopSession(w http.ResponseWriter, r *http.Request) {
@@ -930,7 +1125,6 @@ func (s *server) storeDesktopFrameSequenced(ctx context.Context, sessionID, devi
 	}
 	lock := s.desktopFrameLock(sessionID)
 	lock.Lock()
-	defer lock.Unlock()
 	previous, hasPrevious := s.loadDesktopFrame(sessionID)
 	frameLane := 0
 	if producerSequence > 0 {
@@ -938,6 +1132,7 @@ func (s *server) storeDesktopFrameSequenced(ctx context.Context, sessionID, devi
 	}
 	lanePrevious, hasLanePrevious := s.loadDesktopFrameLane(sessionID, frameLane)
 	if producerSequence > 0 && hasLanePrevious && lanePrevious.ProducerSequence >= producerSequence {
+		lock.Unlock()
 		return false, nil
 	}
 	if producerSequence > 0 && hasPrevious && previous.ProducerSequence > 0 && producerSequence <= previous.ProducerSequence {
@@ -945,31 +1140,25 @@ func (s *server) storeDesktopFrameSequenced(ctx context.Context, sessionID, devi
 		// the global newest frame, but it may still be the newest unread frame for
 		// its parity lane. Publish it only to that lane so the viewer can merge it
 		// by producer sequence without introducing a stale global state.
-		immutableFrame := append([]byte(nil), frame...)
-		lateFrame := desktopFrameState{Frame: immutableFrame, Width: width, Height: height, At: now, Sequence: producerSequence, ProducerSequence: producerSequence, DeviceID: deviceID, DatabaseTouchAt: previous.DatabaseTouchAt}
+		immutableFrame, viewerPayload := immutableDesktopFrame(frame, producerSequence)
+		lateFrame := desktopFrameState{Frame: immutableFrame, ViewerPayload: viewerPayload, Width: width, Height: height, At: now, Sequence: producerSequence, ProducerSequence: producerSequence, DeviceID: deviceID, DatabaseTouchAt: previous.DatabaseTouchAt}
 		s.desktopFrameLanes.Store(sessionID+"\x00"+strconv.Itoa(frameLane), lateFrame)
 		s.desktopAgentSeen.Store(sessionID, now)
-		s.signalDesktopFrame(sessionID)
+		lock.Unlock()
+		s.signalDesktopFrame(sessionID, frameLane)
 		return true, nil
 	}
 	databaseTouchAt := previous.DatabaseTouchAt
-	if !hasPrevious || now.Sub(databaseTouchAt) >= time.Second {
-		result, touchErr := s.db.Exec(ctx, `UPDATE remote_desktop_sessions SET frame=NULL,frame_width=$1,frame_height=$2,frame_at=$3,agent_seen_at=$3,agent_error='' WHERE id=$4 AND device_id=$5 AND status='active' AND expires_at>now() AND viewer_seen_at>now()-interval '45 seconds'`, width, height, now, sessionID, deviceID)
-		if touchErr != nil {
-			return false, touchErr
-		}
-		if result.RowsAffected() == 0 {
-			s.deleteDesktopFrame(sessionID)
-			return false, errDesktopSessionInactive
-		}
+	touchDatabase := !hasPrevious || now.Sub(databaseTouchAt) >= time.Second
+	if touchDatabase {
 		databaseTouchAt = now
 	}
-	immutableFrame := append([]byte(nil), frame...)
+	immutableFrame, viewerPayload := immutableDesktopFrame(frame, producerSequence)
 	sequence := uint64(1)
 	if hasPrevious {
 		sequence = previous.Sequence + 1
 	}
-	storedFrame := desktopFrameState{Frame: immutableFrame, Width: width, Height: height, At: now, Sequence: sequence, ProducerSequence: producerSequence, DeviceID: deviceID, DatabaseTouchAt: databaseTouchAt}
+	storedFrame := desktopFrameState{Frame: immutableFrame, ViewerPayload: viewerPayload, Width: width, Height: height, At: now, Sequence: sequence, ProducerSequence: producerSequence, DeviceID: deviceID, DatabaseTouchAt: databaseTouchAt}
 	s.desktopFrames.Store(sessionID, storedFrame)
 	// Each viewer lane keeps its own newest frame. Sharing the immutable JPEG
 	// slice costs only a small state object, while preventing an even frame from
@@ -980,7 +1169,22 @@ func (s *server) storeDesktopFrameSequenced(ctx context.Context, sessionID, devi
 	}
 	s.desktopFrameLanes.Store(sessionID+"\x00"+strconv.Itoa(frameLane), laneFrame)
 	s.desktopAgentSeen.Store(sessionID, now)
-	s.signalDesktopFrame(sessionID)
+	lock.Unlock()
+	s.signalDesktopFrame(sessionID, frameLane)
+	if touchDatabase {
+		// A slow database heartbeat must not hold the per-session frame lock. The
+		// other upload lanes can keep publishing while this one performs the
+		// once-per-second persistence check.
+		result, touchErr := s.db.Exec(ctx, `UPDATE remote_desktop_sessions SET frame=NULL,frame_width=$1,frame_height=$2,frame_at=$3,agent_seen_at=$3,agent_error='' WHERE id=$4 AND device_id=$5 AND status='active' AND expires_at>now() AND viewer_seen_at>now()-interval '45 seconds'`, width, height, now, sessionID, deviceID)
+		if touchErr != nil {
+			s.resetDesktopFrameDatabaseTouch(sessionID, now)
+			return true, touchErr
+		}
+		if result.RowsAffected() == 0 {
+			s.deleteDesktopFrame(sessionID)
+			return true, errDesktopSessionInactive
+		}
+	}
 	return true, nil
 }
 
@@ -1029,6 +1233,27 @@ func (s *server) desktopAgentFrame(w http.ResponseWriter, r *http.Request) {
 // a compact diagnostics trailer after the fixed geometry fields so production
 // measurements can distinguish DXGI, secure-desktop GDI, encoder and network
 // bottlenecks without logging or persisting image content.
+func desktopAgentStreamLane(rawLane string, videoOnly bool) (int, bool, error) {
+	rawLane = strings.TrimSpace(rawLane)
+	switch rawLane {
+	case "input":
+		// Current Agents keep input on a dedicated, low-bandwidth WebSocket. It
+		// stays usable while any of the six independent JPEG upload connections
+		// is blocked, reconnecting or being replaced after a quality change.
+		return -1, true, nil
+	case "":
+		// Legacy single-lane Agents omit lane altogether.
+		return 0, true, nil
+	}
+	parsedLane, err := strconv.Atoi(rawLane)
+	if err != nil || parsedLane < 0 || parsedLane >= desktopVideoLaneCount {
+		return 0, false, errors.New("invalid stream lane")
+	}
+	// A missing videoOnly flag identifies the rolling-upgrade client whose
+	// primary video lane still carries input. New Agents explicitly opt out.
+	return parsedLane, parsedLane == 0 && !videoOnly, nil
+}
+
 func (s *server) desktopAgentFrameStream(w http.ResponseWriter, r *http.Request) {
 	deviceID, ok := s.authenticateDesktopAgent(w, r)
 	if !ok {
@@ -1053,14 +1278,10 @@ func (s *server) desktopAgentFrameStream(w http.ResponseWriter, r *http.Request)
 	streamCtx, cancelStream := context.WithCancel(r.Context())
 	defer cancelStream()
 	queue := s.desktopQueue(sessionID)
-	agentLane := 0
-	if rawLane := strings.TrimSpace(r.URL.Query().Get("lane")); rawLane != "" {
-		parsedLane, parseErr := strconv.Atoi(rawLane)
-		if parseErr != nil || parsedLane < 0 || parsedLane >= desktopVideoLaneCount {
-			_ = connection.Close(websocket.StatusPolicyViolation, "invalid stream lane")
-			return
-		}
-		agentLane = parsedLane
+	agentLane, inputOwner, laneErr := desktopAgentStreamLane(r.URL.Query().Get("lane"), r.URL.Query().Get("videoOnly") == "1")
+	if laneErr != nil {
+		_ = connection.Close(websocket.StatusPolicyViolation, "invalid stream lane")
+		return
 	}
 	// Input belongs to the primary duplex connection only. Earlier every video
 	// lane raced to drain the same queue, so an auxiliary lane could consume a
@@ -1068,8 +1289,13 @@ func (s *server) desktopAgentFrameStream(w http.ResponseWriter, r *http.Request)
 	// expose. Besides losing clicks, that made the Agent leave its interactive
 	// capture profile and send oversized sharp frames in the middle of 60 FPS
 	// motion. Legacy Agents omit the parameter and remain primary-lane clients.
-	if agentLane == 0 {
+	if inputOwner {
+		inputOwnerVersion := queue.claimInputOwner()
 		go func() {
+			// A failed input writer must stop the handler's blocking read as well;
+			// otherwise a dead dedicated socket can remain registered until the
+			// outer request happens to time out.
+			defer cancelStream()
 			validationTicker := time.NewTicker(500 * time.Millisecond)
 			defer validationTicker.Stop()
 			for {
@@ -1087,17 +1313,31 @@ func (s *server) desktopAgentFrameStream(w http.ResponseWriter, r *http.Request)
 				if !runtime.Control || !queue.hasEvents() {
 					continue
 				}
+				if !queue.lockInputDelivery(inputOwnerVersion) {
+					return
+				}
+				// The queue may have been emptied between the wake-up and acquiring
+				// the delivery lane. Keep the critical section small when idle.
+				if !queue.hasEvents() {
+					queue.unlockInputDelivery()
+					continue
+				}
 				items := queue.drain(64)
 				payload, marshalErr := json.Marshal(map[string]any{"events": items})
 				if marshalErr != nil {
+					queue.restore(items)
+					queue.unlockInputDelivery()
 					continue
 				}
 				writeCtx, cancel := context.WithTimeout(streamCtx, 3*time.Second)
 				writeErr := connection.Write(writeCtx, websocket.MessageText, payload)
 				cancel()
 				if writeErr != nil {
+					queue.restore(items)
+					queue.unlockInputDelivery()
 					return
 				}
+				queue.unlockInputDelivery()
 				s.desktopAgentSeen.Store(sessionID, time.Now().UTC())
 			}
 		}()
@@ -1106,6 +1346,12 @@ func (s *server) desktopAgentFrameStream(w http.ResponseWriter, r *http.Request)
 		messageType, payload, readErr := connection.Read(streamCtx)
 		if readErr != nil {
 			return
+		}
+		if agentLane < 0 {
+			// The dedicated input socket is receive-only from the Agent's point of
+			// view. Ignore harmless client pings/text, but never interpret them as
+			// video and never let them disturb the input queue.
+			continue
 		}
 		if messageType != websocket.MessageBinary {
 			_ = connection.Close(websocket.StatusUnsupportedData, "invalid frame")
@@ -1189,8 +1435,38 @@ func (s *server) desktopSessionStream(w http.ResponseWriter, r *http.Request) {
 		signalKey += "\x00viewerinput"
 	}
 	signal := s.desktopFrameSignal(signalKey)
-	viewerTicker := time.NewTicker(time.Second)
-	defer viewerTicker.Stop()
+	keepaliveErrors := make(chan error, 1)
+	if desktopViewerLaneOwnsKeepalive(lane) {
+		go func() {
+			// Session lease renewal must not run inline with JPEG delivery. A normal
+			// PostgreSQL fsync or pool wait can take tens of milliseconds; doing that
+			// once per second on lane 0 produced a recurring frame gap even though the
+			// other five lanes and the Agent were healthy.
+			viewerTicker := time.NewTicker(time.Second)
+			defer viewerTicker.Stop()
+			a := currentAuth(r)
+			privileged := a.Role == "owner" || a.Role == "admin"
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-viewerTicker.C:
+					result, touchErr := s.db.Exec(ctx, `UPDATE remote_desktop_sessions SET viewer_seen_at=now(),expires_at=now()+interval '30 minutes' WHERE id=$1 AND (created_by=$2 OR $3) AND status='active'`, sessionID, a.UserID, privileged)
+					if touchErr == nil && result.RowsAffected() > 0 {
+						continue
+					}
+					if touchErr == nil {
+						touchErr = errDesktopSessionInactive
+					}
+					select {
+					case keepaliveErrors <- touchErr:
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
 	var afterSequence uint64
 	for {
 		if desktopViewerLaneCarriesFrames(lane) {
@@ -1219,13 +1495,15 @@ func (s *server) desktopSessionStream(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-readErrors:
 			return
+		case <-keepaliveErrors:
+			return
 		case payload := <-inputPayloads:
 			a := currentAuth(r)
 			if a.Role == "viewer" {
 				_ = connection.Close(websocket.StatusPolicyViolation, "input is not permitted")
 				return
 			}
-			events, parseErr := desktopInputEventsFromJSON(payload)
+			batch, parseErr := desktopInputBatchFromJSON(payload)
 			if parseErr != nil {
 				_ = connection.Close(websocket.StatusUnsupportedData, "invalid input")
 				return
@@ -1234,24 +1512,20 @@ func (s *server) desktopSessionStream(w http.ResponseWriter, r *http.Request) {
 			if runtimeErr != nil || !active || !runtime.Control {
 				continue
 			}
-			s.desktopQueue(sessionID).enqueue(events)
+			s.desktopQueue(sessionID).enqueue(batch.Events)
+			if batch.BatchID != "" {
+				acknowledgement, marshalErr := json.Marshal(map[string]string{"inputAck": batch.BatchID})
+				if marshalErr != nil {
+					return
+				}
+				writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				writeErr := connection.Write(writeCtx, websocket.MessageText, acknowledgement)
+				cancel()
+				if writeErr != nil {
+					return
+				}
+			}
 		case <-signal:
-		case <-viewerTicker.C:
-			// One browser opens six video lanes plus a dedicated input lane. Only
-			// lane 0 owns the database keepalive; letting every lane execute the same
-			// UPDATE created multiple synchronous PostgreSQL writes per second and a
-			// visible 31-80 ms hitch in an otherwise 4-8 ms capture path. The other
-			// lanes are still authenticated and close with lane 0, but never compete
-			// with frame delivery for a database connection.
-			if lane > 0 || lane == -2 {
-				continue
-			}
-			a := currentAuth(r)
-			privileged := a.Role == "owner" || a.Role == "admin"
-			result, touchErr := s.db.Exec(ctx, `UPDATE remote_desktop_sessions SET viewer_seen_at=now(),expires_at=now()+interval '30 minutes' WHERE id=$1 AND (created_by=$2 OR $3) AND status='active'`, sessionID, a.UserID, privileged)
-			if touchErr != nil || result.RowsAffected() == 0 {
-				return
-			}
 		}
 	}
 }

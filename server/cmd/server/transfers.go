@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,7 +28,49 @@ const (
 type fileTransfer struct {
 	ID, DeviceID, Direction, Name, RemotePath, Status, Error string
 	Size, Received                                           int64
+	SourceReady                                              bool
 	CreatedAt, ExpiresAt                                     time.Time
+}
+
+// transferProgressSignal provides an in-process wake-up for the Agent that is
+// streaming a browser upload before the complete source has reached the VDS.
+// PostgreSQL remains the source of truth and the download handler still polls
+// periodically for multi-process compatibility, but a newly committed 64 MiB
+// checkpoint no longer waits for the old 250 ms polling interval.
+func (s *server) transferProgressSignal(id string) chan struct{} {
+	if value, ok := s.transferProgressSignals.Load(id); ok {
+		if signal, valid := value.(chan struct{}); valid {
+			return signal
+		}
+	}
+	signal := make(chan struct{}, 1)
+	actual, _ := s.transferProgressSignals.LoadOrStore(id, signal)
+	return actual.(chan struct{})
+}
+
+func (s *server) signalTransferProgress(id string) {
+	select {
+	case s.transferProgressSignal(id) <- struct{}{}:
+	default:
+	}
+}
+
+func (s *server) deleteTransferProgressSignal(id string) {
+	s.transferProgressSignals.Delete(id)
+}
+
+func (s *server) finishTransferProgressSignal(id string) {
+	// Wake an already-waiting request before dropping the registry entry. The
+	// waiter retains its channel reference and immediately re-reads terminal
+	// state from PostgreSQL; a later request still has the periodic DB fallback.
+	s.signalTransferProgress(id)
+	s.deleteTransferProgressSignal(id)
+}
+
+func (s *server) transferChunkLock(id string) *sync.Mutex {
+	lock := &sync.Mutex{}
+	actual, _ := s.transferChunkLocks.LoadOrStore(id, lock)
+	return actual.(*sync.Mutex)
 }
 
 func (s *server) transferDataPath(id string) string {
@@ -110,10 +153,12 @@ func (s *server) createFileTransfer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInsufficientStorage, "На сервере уже выполняются крупные передачи. Завершите их и повторите попытку")
 		return
 	}
+	// A to-device transfer is visible to the agent immediately. The agent can
+	// consume each committed browser chunk while the next one is still being
+	// uploaded, instead of waiting for the complete file to make a second pass
+	// through the VDS. source_ready is set only after the browser has committed
+	// the complete source, so completion remains integrity-checked.
 	status := "queued"
-	if in.Direction == "to_device" {
-		status = "uploading"
-	}
 	var transfer fileTransfer
 	err := s.db.QueryRow(r.Context(), `INSERT INTO remote_file_transfers(device_id,created_by,direction,file_name,remote_path,size_bytes,status) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,created_at,expires_at`, deviceID, a.UserID, in.Direction, in.Name, in.RemotePath, in.Size, status).Scan(&transfer.ID, &transfer.CreatedAt, &transfer.ExpiresAt)
 	if err != nil {
@@ -128,7 +173,7 @@ func (s *server) loadUserTransfer(r *http.Request) (fileTransfer, error) {
 	a := currentAuth(r)
 	privileged := a.Role == "owner" || a.Role == "admin"
 	var t fileTransfer
-	err := s.db.QueryRow(r.Context(), `SELECT id,device_id,direction,file_name,remote_path,size_bytes,received_bytes,status,error_text,created_at,expires_at FROM remote_file_transfers WHERE id=$1 AND (created_by=$2 OR $3)`, chi.URLParam(r, "id"), a.UserID, privileged).Scan(&t.ID, &t.DeviceID, &t.Direction, &t.Name, &t.RemotePath, &t.Size, &t.Received, &t.Status, &t.Error, &t.CreatedAt, &t.ExpiresAt)
+	err := s.db.QueryRow(r.Context(), `SELECT id,device_id,direction,file_name,remote_path,size_bytes,received_bytes,status,error_text,source_ready,created_at,expires_at FROM remote_file_transfers WHERE id=$1 AND (created_by=$2 OR $3)`, chi.URLParam(r, "id"), a.UserID, privileged).Scan(&t.ID, &t.DeviceID, &t.Direction, &t.Name, &t.RemotePath, &t.Size, &t.Received, &t.Status, &t.Error, &t.SourceReady, &t.CreatedAt, &t.ExpiresAt)
 	if err == nil {
 		allowed, accessErr := s.deviceAccessAllowed(r, t.DeviceID)
 		if accessErr != nil {
@@ -159,7 +204,7 @@ func (s *server) fileTransferStatus(w http.ResponseWriter, r *http.Request) {
 		writeUserTransferLoadError(w, t, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": t.ID, "deviceId": t.DeviceID, "direction": t.Direction, "name": t.Name, "remotePath": t.RemotePath, "size": t.Size, "received": t.Received, "status": t.Status, "error": t.Error, "createdAt": t.CreatedAt, "expiresAt": t.ExpiresAt})
+	writeJSON(w, http.StatusOK, map[string]any{"id": t.ID, "deviceId": t.DeviceID, "direction": t.Direction, "name": t.Name, "remotePath": t.RemotePath, "size": t.Size, "received": t.Received, "status": t.Status, "sourceReady": t.SourceReady, "error": t.Error, "createdAt": t.CreatedAt, "expiresAt": t.ExpiresAt})
 }
 
 func requestOffset(r *http.Request) (int64, error) {
@@ -227,7 +272,19 @@ func (s *server) uploadTransferChunk(w http.ResponseWriter, r *http.Request) {
 		writeUserTransferLoadError(w, t, err)
 		return
 	}
-	if t.Direction != "to_device" || t.Status != "uploading" {
+	// A browser may retry a chunk while the previous request is still being
+	// committed after a route change. Serialize writes for this transfer and
+	// then reload the checkpoint, otherwise two bodies can write the same file
+	// offset concurrently and the last writer silently wins.
+	chunkLock := s.transferChunkLock(t.ID)
+	chunkLock.Lock()
+	defer chunkLock.Unlock()
+	t, err = s.loadUserTransfer(r)
+	if err != nil {
+		writeUserTransferLoadError(w, t, err)
+		return
+	}
+	if t.Direction != "to_device" || t.SourceReady || (t.Status != "uploading" && t.Status != "queued" && t.Status != "transferring") {
 		writeError(w, http.StatusConflict, "Передача не принимает данные")
 		return
 	}
@@ -241,7 +298,7 @@ func (s *server) uploadTransferChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, updateErr := s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET received_bytes=$1,updated_at=now() WHERE id=$2 AND status='uploading'`, next, t.ID)
+	result, updateErr := s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET received_bytes=$1,updated_at=now() WHERE id=$2 AND source_ready=false AND status IN ('uploading','queued','transferring')`, next, t.ID)
 	if updateErr != nil || result.RowsAffected() != 1 {
 		if rollbackErr := rollbackTransferChunk(s.transferDataPath(t.ID), offset); rollbackErr != nil {
 			writeError(w, http.StatusInternalServerError, "Не удалось откатить незавершённую часть")
@@ -250,6 +307,7 @@ func (s *server) uploadTransferChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Не удалось сохранить прогресс")
 		return
 	}
+	s.signalTransferProgress(t.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"received": next, "size": t.Size})
 }
 
@@ -259,7 +317,11 @@ func (s *server) readyFileTransfer(w http.ResponseWriter, r *http.Request) {
 		writeUserTransferLoadError(w, t, err)
 		return
 	}
-	if t.Direction == "to_device" && t.Status == "uploading" && t.Size == 0 {
+	if t.Direction == "to_device" && t.Status == "completed" && t.SourceReady {
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	if t.Direction == "to_device" && (t.Status == "uploading" || t.Status == "queued" || t.Status == "transferring") && t.Size == 0 {
 		file, createErr := os.OpenFile(s.transferDataPath(t.ID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 		if createErr == nil {
 			createErr = file.Close()
@@ -270,15 +332,16 @@ func (s *server) readyFileTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	info, statErr := os.Stat(s.transferDataPath(t.ID))
-	if t.Direction != "to_device" || t.Status != "uploading" || statErr != nil || info.Size() != t.Size {
+	if t.Direction != "to_device" || (t.Status != "uploading" && t.Status != "queued" && t.Status != "transferring") || statErr != nil || info.Size() != t.Size {
 		writeError(w, http.StatusConflict, "Файл загружен не полностью")
 		return
 	}
-	_, err = s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET status='queued',received_bytes=size_bytes,updated_at=now() WHERE id=$1`, t.ID)
-	if err != nil {
+	result, updateErr := s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET status=CASE WHEN status='uploading' THEN 'queued' ELSE status END,source_ready=true,received_bytes=size_bytes,updated_at=now() WHERE id=$1 AND status IN ('uploading','queued','transferring')`, t.ID)
+	if updateErr != nil || result.RowsAffected() != 1 {
 		writeError(w, http.StatusInternalServerError, "Не удалось отправить файл агенту")
 		return
 	}
+	s.signalTransferProgress(t.ID)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -318,10 +381,15 @@ func (s *server) cancelFileTransfer(w http.ResponseWriter, r *http.Request) {
 			writeDeviceAccessLocked(w, t.DeviceID)
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
+		if errors.Is(err, pgx.ErrNoRows) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "Не удалось отменить передачу")
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET status='cancelled',completed_at=now(),updated_at=now() WHERE id=$1 AND status NOT IN ('completed','cancelled','expired')`, t.ID)
+	s.finishTransferProgressSignal(t.ID)
 	_ = os.Remove(s.transferDataPath(t.ID))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -333,7 +401,7 @@ func (s *server) agentNextFileTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET status='queued',updated_at=now() WHERE device_id=$1 AND status='transferring' AND updated_at<now()-interval '5 minutes'`, deviceID)
 	var t fileTransfer
-	err := s.db.QueryRow(r.Context(), `UPDATE remote_file_transfers SET status='transferring',started_at=COALESCE(started_at,now()),updated_at=now() WHERE id=(SELECT id FROM remote_file_transfers WHERE device_id=$1 AND status='queued' AND expires_at>now() ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id,direction,file_name,remote_path,size_bytes,received_bytes,status`, deviceID).Scan(&t.ID, &t.Direction, &t.Name, &t.RemotePath, &t.Size, &t.Received, &t.Status)
+	err := s.db.QueryRow(r.Context(), `UPDATE remote_file_transfers SET status='transferring',started_at=COALESCE(started_at,now()),updated_at=now() WHERE id=(SELECT id FROM remote_file_transfers WHERE device_id=$1 AND status='queued' AND expires_at>now() AND (direction<>'to_device' OR received_bytes>0 OR source_ready=true) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id,direction,file_name,remote_path,size_bytes,received_bytes,status`, deviceID).Scan(&t.ID, &t.Direction, &t.Name, &t.RemotePath, &t.Size, &t.Received, &t.Status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -347,7 +415,7 @@ func (s *server) agentNextFileTransfer(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) loadAgentTransfer(r *http.Request, deviceID string) (fileTransfer, error) {
 	var t fileTransfer
-	err := s.db.QueryRow(r.Context(), `SELECT id,device_id,direction,file_name,remote_path,size_bytes,received_bytes,status,error_text,created_at,expires_at FROM remote_file_transfers WHERE id=$1 AND device_id=$2`, chi.URLParam(r, "id"), deviceID).Scan(&t.ID, &t.DeviceID, &t.Direction, &t.Name, &t.RemotePath, &t.Size, &t.Received, &t.Status, &t.Error, &t.CreatedAt, &t.ExpiresAt)
+	err := s.db.QueryRow(r.Context(), `SELECT id,device_id,direction,file_name,remote_path,size_bytes,received_bytes,status,error_text,source_ready,created_at,expires_at FROM remote_file_transfers WHERE id=$1 AND device_id=$2`, chi.URLParam(r, "id"), deviceID).Scan(&t.ID, &t.DeviceID, &t.Direction, &t.Name, &t.RemotePath, &t.Size, &t.Received, &t.Status, &t.Error, &t.SourceReady, &t.CreatedAt, &t.ExpiresAt)
 	return t, err
 }
 
@@ -361,7 +429,26 @@ func (s *server) agentFileTransferStatus(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "Передача не найдена")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": t.ID, "status": t.Status, "size": t.Size, "received": t.Received, "error": t.Error})
+	writeJSON(w, http.StatusOK, map[string]any{"id": t.ID, "status": t.Status, "size": t.Size, "received": t.Received, "sourceReady": t.SourceReady, "error": t.Error})
+}
+
+func availableAgentDownloadLength(offset, total, committed int64, sourceReady bool, status string) (int64, bool, error) {
+	if offset < 0 || total < 0 || committed < 0 || offset > total || committed > total {
+		return 0, false, errors.New("некорректная контрольная точка передачи")
+	}
+	if status != "transferring" {
+		return 0, false, errors.New("передача недоступна")
+	}
+	if offset < committed {
+		return min(transferChunkSize, committed-offset), false, nil
+	}
+	if sourceReady {
+		if committed != total {
+			return 0, false, errors.New("источник передачи повреждён")
+		}
+		return 0, false, nil
+	}
+	return 0, true, nil
 }
 
 func (s *server) agentDownloadTransferChunk(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +466,49 @@ func (s *server) agentDownloadTransferChunk(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "Некорректное смещение")
 		return
 	}
+	var length int64
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		length, _, err = availableAgentDownloadLength(offset, t.Size, t.Received, t.SourceReady, t.Status)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if length > 0 || (offset == t.Size && t.SourceReady) {
+			break
+		}
+		if time.Now().After(deadline) {
+			writeError(w, http.StatusTooEarly, "Следующая часть файла ещё загружается")
+			return
+		}
+		pollTimer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-r.Context().Done():
+			if !pollTimer.Stop() {
+				select {
+				case <-pollTimer.C:
+				default:
+				}
+			}
+			return
+		case <-s.transferProgressSignal(t.ID):
+			if !pollTimer.Stop() {
+				select {
+				case <-pollTimer.C:
+				default:
+				}
+			}
+		case <-pollTimer.C:
+			// The periodic database read is intentional: it preserves correctness if
+			// a later deployment runs multiple server processes and another process
+			// commits the browser checkpoint.
+		}
+		t, err = s.loadAgentTransfer(r, deviceID)
+		if err != nil || t.Direction != "to_device" {
+			writeError(w, http.StatusConflict, "Передача недоступна")
+			return
+		}
+	}
 	file, err := os.Open(s.transferDataPath(t.ID))
 	if err != nil {
 		writeError(w, http.StatusGone, "Файл отсутствует")
@@ -386,8 +516,6 @@ func (s *server) agentDownloadTransferChunk(w http.ResponseWriter, r *http.Reque
 	}
 	defer file.Close()
 	_, _ = file.Seek(offset, io.SeekStart)
-	remaining := t.Size - offset
-	length := min(transferChunkSize, remaining)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	w.Header().Set("X-RemoteIt-Total", strconv.FormatInt(t.Size, 10))
@@ -402,6 +530,14 @@ func (s *server) agentUploadTransferChunk(w http.ResponseWriter, r *http.Request
 		return
 	}
 	t, err := s.loadAgentTransfer(r, deviceID)
+	if err != nil || t.Direction != "from_device" || t.Status != "transferring" {
+		writeError(w, http.StatusConflict, "Передача недоступна")
+		return
+	}
+	chunkLock := s.transferChunkLock(t.ID)
+	chunkLock.Lock()
+	defer chunkLock.Unlock()
+	t, err = s.loadAgentTransfer(r, deviceID)
 	if err != nil || t.Direction != "from_device" || t.Status != "transferring" {
 		writeError(w, http.StatusConflict, "Передача недоступна")
 		return
@@ -452,6 +588,10 @@ func (s *server) agentCompleteFileTransfer(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusConflict, "Передача недоступна")
 		return
 	}
+	if t.Direction == "to_device" && !t.SourceReady {
+		writeError(w, http.StatusTooEarly, "Источник файла ещё загружается")
+		return
+	}
 	if t.Direction == "from_device" {
 		info, statErr := os.Stat(s.transferDataPath(t.ID))
 		if statErr != nil || info.Size() != t.Size {
@@ -476,6 +616,7 @@ func (s *server) agentCompleteFileTransfer(w http.ResponseWriter, r *http.Reques
 	if t.Direction == "to_device" {
 		_ = os.Remove(s.transferDataPath(t.ID))
 	}
+	s.finishTransferProgressSignal(t.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": expectedStatus})
 }
 
@@ -505,6 +646,7 @@ func (s *server) agentCompleteFileTransferLegacy(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "Не удалось завершить передачу")
 		return
 	}
+	s.finishTransferProgressSignal(t.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": status})
 }
 
@@ -524,6 +666,7 @@ func (s *server) agentFailFileTransfer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "Передача недоступна")
 		return
 	}
+	s.finishTransferProgressSignal(chi.URLParam(r, "id"))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -533,6 +676,7 @@ func (s *server) removeExpiredTransferFiles() {
 		for rows.Next() {
 			var id string
 			if rows.Scan(&id) == nil && validTransferID(id) {
+				s.finishTransferProgressSignal(id)
 				_ = os.Remove(s.transferDataPath(id))
 			}
 		}
@@ -543,6 +687,8 @@ func (s *server) removeExpiredTransferFiles() {
 		for rows.Next() {
 			var id string
 			if rows.Scan(&id) == nil && validTransferID(id) {
+				s.deleteTransferProgressSignal(id)
+				s.transferChunkLocks.Delete(id)
 				_ = os.Remove(s.transferDataPath(id))
 			}
 		}
@@ -559,6 +705,8 @@ func (s *server) removeDeviceTransferFiles(deviceID string) {
 	for rows.Next() {
 		var id string
 		if rows.Scan(&id) == nil && validTransferID(id) {
+			s.finishTransferProgressSignal(id)
+			s.transferChunkLocks.Delete(id)
 			_ = os.Remove(s.transferDataPath(id))
 		}
 	}

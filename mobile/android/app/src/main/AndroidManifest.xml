@@ -6,19 +6,20 @@
 
     <application
         android:allowBackup="false"
-        android:fullBackupContent="false"
-        android:icon="@drawable/app_icon"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
         android:label="RemoteIt"
+        android:roundIcon="@mipmap/ic_launcher"
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
         android:theme="@style/Theme.GenesisIt"
         android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"
-			android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
             android:exported="true"
-			android:resizeableActivity="true"
-            android:screenOrientation="unspecified">
+            android:resizeableActivity="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

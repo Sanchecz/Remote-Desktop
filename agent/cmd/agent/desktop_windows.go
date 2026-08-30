@@ -34,7 +34,13 @@ var desktopSessionControl atomic.Bool
 var desktopLastFrameUnix atomic.Int64
 var desktopSessionIdentifier atomic.Value
 
-const desktopMaximumFrameBytes = 8 << 20
+const (
+	// A detailed or high-entropy native 4K desktop can legitimately exceed the
+	// former 8 MiB ceiling at q92 4:4:4. Keep a bounded 16 MiB wire limit and
+	// re-encode only those exceptional frames using compact fallbacks.
+	desktopMaximumFrameBytes      = 16 << 20
+	desktopOversizeProfileBackoff = 5 * time.Second
+)
 
 type desktopPublishedState struct {
 	Active    bool      `json:"active"`
@@ -142,10 +148,13 @@ func releaseDesktopFrameUpload(upload *desktopFrameUpload) {
 }
 
 type desktopFrameUploadResult struct {
-	sessionID string
-	capture   desktopCapture
-	duration  time.Duration
-	err       error
+	sessionID   string
+	lane        int
+	capture     desktopCapture
+	duration    time.Duration
+	completedAt time.Time
+	dropped     bool
+	err         error
 }
 
 type desktopWaitTimer struct {
@@ -180,9 +189,20 @@ type desktopInput struct {
 	KeyCode          int    `json:"keyCode,omitempty"`
 }
 
+type desktopInputBatch struct {
+	SessionID string
+	Events    []desktopInput
+}
+
+type desktopInputStreamTarget struct {
+	access    desktopAgentAccess
+	sessionID string
+}
+
 type desktopInputTask struct {
-	events  []desktopInput
-	capture desktopCapture
+	sessionID string
+	events    []desktopInput
+	capture   desktopCapture
 }
 
 type desktopInputTaskResult struct {
@@ -195,7 +215,7 @@ type desktopSASResult struct {
 	err     error
 }
 
-func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, results chan<- desktopInputTaskResult) {
+func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, results chan<- desktopInputTaskResult, activeSession *atomic.Value) {
 	// SendInput must follow the currently visible Windows desktop, but it does
 	// not need to occupy the capture/encode cadence thread. A dedicated locked
 	// OS thread prevents dense 60 Hz pointer batches from stealing the next
@@ -208,10 +228,37 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 		case <-ctx.Done():
 			return
 		case task := <-tasks:
+			currentSessionID := desktopAtomicString(activeSession)
+			if task.sessionID == "" || task.sessionID != currentSessionID {
+				continue
+			}
+			// A secure-desktop transition can make SyncIfStale take noticeably
+			// longer than a normal SendInput call. Collapse everything that arrived
+			// while this worker was busy before touching Windows again. This keeps
+			// the newest free cursor position and preserves every click, key, wheel,
+			// text and SAS barrier in order instead of replaying several old cursor
+			// positions one task at a time after the desktop becomes available.
+			for len(task.events) < 256 {
+				select {
+				case more := <-tasks:
+					if more.sessionID != currentSessionID {
+						continue
+					}
+					task.events = append(task.events, more.events...)
+					task.capture = more.capture
+				default:
+					goto executeTask
+				}
+			}
+		executeTask:
+			task.events = coalesceDesktopInput(task.events)
 			result := desktopInputTaskResult{}
 			var surfaceErr error
 			surfaceReady := false
 			for _, event := range task.events {
+				if task.sessionID != desktopAtomicString(activeSession) {
+					break
+				}
 				// The Secure Attention Sequence is handled by the SCM service and
 				// must not depend on attaching this worker thread to the interactive
 				// desktop. In particular, OpenInputDesktop may be unavailable while
@@ -454,7 +501,14 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 	}()
 	setDesktopProcessDPIAwareness()
 	controlClient := newDesktopHTTPClient(15 * time.Second)
-	frameClient := newDesktopHTTPClient(8 * time.Second)
+	// Six independent WebSocket lanes carry video. The generic client is
+	// intentionally limited to two connections, which is appropriate for
+	// control/input HTTP but can serialize or stall four video handshakes on
+	// transports that keep upgraded connections in the per-host accounting.
+	// Reserve one connection for every lane plus two short-lived HTTP fallback
+	// requests so 30/60 FPS is not silently reduced to the capacity of two TCP
+	// flows.
+	frameClient := newDesktopHTTPClientWithLimit(8*time.Second, desktopAutoVideoLaneCount+2)
 	inputClient := newDesktopHTTPClient(3 * time.Second)
 	defer controlClient.CloseIdleConnections()
 	defer frameClient.CloseIdleConnections()
@@ -477,21 +531,50 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 	var inputFetchInFlight atomic.Bool
 	latestCapture := atomic.Value{}
 	latestCapture.Store(desktopCapture{})
+	activeInputSession := atomic.Value{}
+	activeInputSession.Store("")
+	defer activeInputSession.Store("")
 	inputTasks := make(chan desktopInputTask, 8)
 	inputResults := make(chan desktopInputTaskResult, 1)
-	go runDesktopInputWorker(ctx, inputTasks, inputResults)
+	go runDesktopInputWorker(ctx, inputTasks, inputResults, &activeInputSession)
 	inputErrors := make(chan error, 1)
-	streamInputBatches := make(chan []desktopInput, 16)
-	var inputStreamActive atomic.Bool
+	streamInputBatches := make(chan desktopInputBatch, 16)
+	inputStreamTargets := make(chan desktopInputStreamTarget, 1)
+	var dedicatedInputStreamActive atomic.Bool
+	var legacyInputStreamActive atomic.Bool
 	var latestInputNanos atomic.Int64
 	frameUploads := make(chan desktopFrameUpload, 1)
 	frameUploadResults := make(chan desktopFrameUploadResult, 8)
-	go runDesktopFrameUploader(ctx, frameClient, frameUploads, frameUploadResults, streamInputBatches, &inputStreamActive)
-	go runDesktopStreamInputDispatcher(ctx, streamInputBatches, inputTasks, &latestCapture, &latestInputNanos)
+	go runDesktopFrameUploader(ctx, frameClient, frameUploads, frameUploadResults, streamInputBatches, &legacyInputStreamActive)
+	go runDesktopInputStream(ctx, inputClient, inputStreamTargets, streamInputBatches, &dedicatedInputStreamActive)
+	go runDesktopStreamInputDispatcher(ctx, streamInputBatches, inputTasks, &latestCapture, &latestInputNanos, &activeInputSession)
 	autoCadence := newDesktopAutoCadence()
 	access := desktopAgentAccess{}
 	accessLoadedAt := time.Time{}
 	var frameSequence uint64
+	lastInputStreamTargetKey := ""
+	publishInputStreamTarget := func(target desktopInputStreamTarget) {
+		key := target.sessionID + "\x00" + target.access.ServerURL + "\x00" + target.access.DeviceID + "\x00" + target.access.DesktopSecret
+		if target.sessionID == "" {
+			key = ""
+		}
+		if key == lastInputStreamTargetKey {
+			return
+		}
+		lastInputStreamTargetKey = key
+		select {
+		case inputStreamTargets <- target:
+		default:
+			select {
+			case <-inputStreamTargets:
+			default:
+			}
+			select {
+			case inputStreamTargets <- target:
+			default:
+			}
+		}
+	}
 	for ctx.Err() == nil {
 		var err error
 		if access.ServerURL == "" || time.Since(accessLoadedAt) >= 5*time.Second {
@@ -501,7 +584,9 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			}
 		}
 		if err != nil {
+			publishInputStreamTarget(desktopInputStreamTarget{})
 			offerActive = false
+			activeInputSession.Store("")
 			setDesktopSessionState(false, false, "")
 			if !desktopWait(ctx, 2*time.Second, &waitTimer) {
 				return
@@ -517,7 +602,9 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			case refreshed := <-offerResults:
 				offerFetchInFlight.Store(false)
 				if refreshed.err != nil || !refreshed.active {
+					publishInputStreamTarget(desktopInputStreamTarget{})
 					offerActive = false
+					activeInputSession.Store("")
 					setDesktopSessionState(false, false, "")
 					lastReportedError = ""
 					lastReportedAt = time.Time{}
@@ -537,7 +624,9 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			offer, active, offerErr := fetchDesktopOffer(ctx, controlClient, access)
 			lastOfferAt = time.Now()
 			if offerErr != nil || !active {
+				publishInputStreamTarget(desktopInputStreamTarget{})
 				offerActive = false
+				activeInputSession.Store("")
 				setDesktopSessionState(false, false, "")
 				lastReportedError = ""
 				lastReportedAt = time.Time{}
@@ -560,6 +649,8 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			}()
 		}
 		offer := currentOffer
+		publishInputStreamTarget(desktopInputStreamTarget{access: access, sessionID: offer.ID})
+		activeInputSession.Store(offer.ID)
 		setDesktopSessionState(true, offer.ControlEnabled, offer.ID)
 		if offer.ID != lastSessionID {
 			lastSessionID = offer.ID
@@ -606,7 +697,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 		}
 		// Restrictive proxies and older servers still use the HTTP long-poll
 		// fallback. Its goroutine only performs I/O; input is executed above.
-		if offer.ControlEnabled && !inputStreamActive.Load() && len(lastCapture.JPEG) > 0 && inputFetchInFlight.CompareAndSwap(false, true) {
+		if offer.ControlEnabled && !dedicatedInputStreamActive.Load() && !legacyInputStreamActive.Load() && len(lastCapture.JPEG) > 0 && inputFetchInFlight.CompareAndSwap(false, true) {
 			accessCopy, sessionID := access, offer.ID
 			go func() {
 				defer inputFetchInFlight.Store(false)
@@ -616,7 +707,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 				}
 				if inputErr == nil && len(events) > 0 {
 					select {
-					case streamInputBatches <- events:
+					case streamInputBatches <- desktopInputBatch{SessionID: sessionID, Events: events}:
 					case <-ctx.Done():
 					}
 				}
@@ -642,7 +733,12 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 		select {
 		case uploaded := <-frameUploadResults:
 			if uploaded.sessionID == offer.ID {
-				if uploaded.err != nil {
+				if uploaded.dropped {
+					if offer.TargetFPS == 0 {
+						processing := time.Duration(uploaded.capture.CaptureMillis+uploaded.capture.EncodeMillis) * time.Millisecond
+						autoCadence.ObserveDropped(processing, uploaded.completedAt)
+					}
+				} else if uploaded.err != nil {
 					message := uploaded.err.Error()
 					if message != lastReportedError || time.Since(lastReportedAt) >= 10*time.Second {
 						if reportDesktopStatus(ctx, controlClient, access, offer.ID, message) == nil {
@@ -659,7 +755,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 						// CPU or the link is persistently congested, and only promotes
 						// it to 60 after both stages prove fast.
 						processing := time.Duration(uploaded.capture.CaptureMillis+uploaded.capture.EncodeMillis) * time.Millisecond
-						autoCadence.Observe(max(uploaded.duration, processing))
+						autoCadence.Observe(uploaded.duration, processing, uploaded.lane, uploaded.completedAt)
 					}
 					desktopLastFrameUnix.Store(time.Now().Unix())
 					if lastReportedError != "" {
@@ -676,6 +772,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 		// after the channel stays comfortably fast.
 		effectiveFPS := offer.TargetFPS
 		if effectiveFPS == 0 {
+			autoCadence.SetMaximumFPS(desktopAutoMaximumFPS(capturer.screenWidth))
 			effectiveFPS = autoCadence.FPS
 		}
 		if effectiveFPS != 15 && effectiveFPS != 30 && effectiveFPS != 60 {
@@ -718,13 +815,18 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			}
 			// Auto begins with the same 30 FPS profile as explicit 30. It changes
 			// geometry only after the cadence controller has accumulated sustained
-			// evidence (20 slow or 300 fast samples), so an occasional network spike
+			// evidence (20 slow or 60 fast samples), so an occasional network spike
 			// cannot trigger the old 15/30/60 resource-rebuild loop.
 			captureProfileFPS := effectiveFPS
 			capture := desktopCapture{}
 			if captureErr == nil {
-				interactive := offer.ControlEnabled && time.Since(lastInputAt) < 350*time.Millisecond
-				capture, captureErr = capturer.CaptureJPEG(captureProfileFPS, interactive, offer.CursorVisible, desktopRequiresSecureCapture(inputSurface.name))
+				interactive := desktopInteractionIsActive(offer.ControlEnabled, lastInputAt, time.Now())
+				constrained := offer.TargetFPS == 0 && autoCadence.Constrained
+				// Auto preserves its 30 FPS control cadence under sustained CPU/link
+				// pressure by reusing the bounded high-quality motion surface. The old
+				// 15 FPS fallback selected an even heavier 4K profile and could trap a
+				// slow VDI host at only a few real frames per second.
+				capture, captureErr = capturer.CaptureJPEG(captureProfileFPS, interactive, constrained, offer.CursorVisible, desktopRequiresSecureCapture(inputSurface.name))
 			}
 			if captureErr == nil {
 				// Desktop Duplication reports when the surface did not change. Do not
@@ -843,10 +945,17 @@ func publishedDesktopSessionState() (active, control bool, sessionID string) {
 }
 
 func newDesktopHTTPClient(timeout time.Duration) *http.Client {
+	return newDesktopHTTPClientWithLimit(timeout, 2)
+}
+
+func newDesktopHTTPClientWithLimit(timeout time.Duration, maxConnectionsPerHost int) *http.Client {
+	if maxConnectionsPerHost < 1 {
+		maxConnectionsPerHost = 1
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConns = 8
-	transport.MaxIdleConnsPerHost = 2
-	transport.MaxConnsPerHost = 2
+	transport.MaxIdleConns = max(8, maxConnectionsPerHost)
+	transport.MaxIdleConnsPerHost = maxConnectionsPerHost
+	transport.MaxConnsPerHost = maxConnectionsPerHost
 	transport.IdleConnTimeout = 30 * time.Second
 	return &http.Client{Timeout: timeout, Transport: transport}
 }
@@ -990,17 +1099,62 @@ func uploadDesktopFrame(ctx context.Context, client *http.Client, access desktop
 }
 
 type desktopFrameStreamClient struct {
-	connection *websocket.Conn
-	sessionID  string
-	accessKey  string
-	lane       int
-	retryAfter time.Time
-	readCancel context.CancelFunc
-	inputs     chan<- []desktopInput
-	active     *atomic.Bool
+	connection     *websocket.Conn
+	sessionID      string
+	accessKey      string
+	lane           int
+	retryAfter     time.Time
+	retryDelay     time.Duration
+	retrySessionID string
+	retryAccessKey string
+	readCancel     context.CancelFunc
+	inputs         chan<- desktopInputBatch
+	active         *atomic.Bool
+	readGeneration atomic.Uint64
+}
+
+const (
+	desktopStreamRetryInitial = 250 * time.Millisecond
+	desktopStreamRetryMaximum = 4 * time.Second
+)
+
+func nextDesktopStreamRetry(current time.Duration, hadConnection bool) time.Duration {
+	if hadConnection || current <= 0 {
+		return desktopStreamRetryInitial
+	}
+	next := current * 2
+	if next > desktopStreamRetryMaximum {
+		return desktopStreamRetryMaximum
+	}
+	return next
+}
+
+func desktopStreamRetryWait(retryAfter, now time.Time) time.Duration {
+	if retryAfter.IsZero() || !now.Before(retryAfter) {
+		return 0
+	}
+	return retryAfter.Sub(now)
+}
+
+func (stream *desktopFrameStreamClient) resetRetry() {
+	stream.retryAfter = time.Time{}
+	stream.retryDelay = 0
+	stream.retrySessionID = ""
+	stream.retryAccessKey = ""
+}
+
+func (stream *desktopFrameStreamClient) recordRetryFailure(sessionID, accessKey string, hadConnection bool) {
+	if stream.retrySessionID != sessionID || stream.retryAccessKey != accessKey {
+		stream.retryDelay = 0
+	}
+	stream.retrySessionID = sessionID
+	stream.retryAccessKey = accessKey
+	stream.retryDelay = nextDesktopStreamRetry(stream.retryDelay, hadConnection)
+	stream.retryAfter = time.Now().Add(stream.retryDelay)
 }
 
 func (stream *desktopFrameStreamClient) Close() {
+	stream.readGeneration.Add(1)
 	if stream.readCancel != nil {
 		stream.readCancel()
 		stream.readCancel = nil
@@ -1032,8 +1186,34 @@ func desktopWebSocketURL(serverURL, path string) (string, error) {
 	return parsed.String(), nil
 }
 
+func desktopFrameStreamHeader(upload desktopFrameUpload) []byte {
+	backend := []byte(upload.capture.CaptureBackend)
+	if len(backend) > 48 {
+		backend = backend[:48]
+	}
+	header := make([]byte, 26+len(backend))
+	copy(header[:4], "RIT3")
+	binary.BigEndian.PutUint32(header[4:8], uint32(upload.capture.FrameWidth))
+	binary.BigEndian.PutUint32(header[8:12], uint32(upload.capture.FrameHeight))
+	header[12] = byte(min(255, max(0, upload.capture.CaptureMillis)))
+	header[13] = byte(min(255, max(0, upload.capture.CopyMillis)))
+	header[14] = byte(min(255, max(0, upload.capture.ScaleMillis)))
+	header[15] = byte(min(255, max(0, upload.capture.EncodeMillis)))
+	header[16] = 0 // reserved for future transport diagnostics
+	header[17] = byte(len(backend))
+	binary.BigEndian.PutUint64(header[18:26], upload.sequence)
+	copy(header[26:], backend)
+	return header
+}
+
 func (stream *desktopFrameStreamClient) send(ctx context.Context, client *http.Client, upload desktopFrameUpload) error {
 	key := upload.access.ServerURL + "\x00" + upload.access.DeviceID + "\x00" + upload.access.DesktopSecret
+	if stream.retrySessionID != "" && (stream.retrySessionID != upload.sessionID || stream.retryAccessKey != key) {
+		// A failed old session or pre-VPN endpoint must not hold a newly selected
+		// session behind its backoff window. New connection identities always get
+		// an immediate first attempt.
+		stream.resetRetry()
+	}
 	if stream.connection != nil && stream.active != nil && !stream.active.Load() {
 		stream.Close()
 	}
@@ -1044,9 +1224,9 @@ func (stream *desktopFrameStreamClient) send(ctx context.Context, client *http.C
 		if time.Now().Before(stream.retryAfter) {
 			return errors.New("desktop websocket temporarily unavailable")
 		}
-		endpoint, err := desktopWebSocketURL(upload.access.ServerURL, "/api/desktop/agent/sessions/"+upload.sessionID+"/stream?lane="+strconv.Itoa(stream.lane))
+		endpoint, err := desktopWebSocketURL(upload.access.ServerURL, "/api/desktop/agent/sessions/"+upload.sessionID+"/stream?lane="+strconv.Itoa(stream.lane)+"&videoOnly=1")
 		if err != nil {
-			stream.retryAfter = time.Now().Add(15 * time.Second)
+			stream.recordRetryFailure(upload.sessionID, key, false)
 			return err
 		}
 		headers := http.Header{}
@@ -1058,50 +1238,47 @@ func (stream *desktopFrameStreamClient) send(ctx context.Context, client *http.C
 			_ = response.Body.Close()
 		}
 		if err != nil {
-			stream.retryAfter = time.Now().Add(15 * time.Second)
+			stream.recordRetryFailure(upload.sessionID, key, false)
 			return err
 		}
 		stream.connection = connection
 		stream.sessionID = upload.sessionID
 		stream.accessKey = key
-		stream.retryAfter = time.Time{}
-		readCtx, cancel := context.WithCancel(ctx)
-		stream.readCancel = cancel
-		if stream.active != nil {
-			stream.active.Store(true)
+		stream.resetRetry()
+		if stream.inputs != nil {
+			readCtx, cancel := context.WithCancel(ctx)
+			stream.readCancel = cancel
+			generation := stream.readGeneration.Add(1)
+			go stream.readInputs(readCtx, connection, upload.sessionID, generation)
 		}
-		go stream.readInputs(readCtx, connection)
 	}
-	backend := []byte(upload.capture.CaptureBackend)
-	if len(backend) > 48 {
-		backend = backend[:48]
-	}
-	payload := make([]byte, 26+len(backend)+len(upload.capture.JPEG))
-	copy(payload[:4], "RIT3")
-	binary.BigEndian.PutUint32(payload[4:8], uint32(upload.capture.FrameWidth))
-	binary.BigEndian.PutUint32(payload[8:12], uint32(upload.capture.FrameHeight))
-	payload[12] = byte(min(255, max(0, upload.capture.CaptureMillis)))
-	payload[13] = byte(min(255, max(0, upload.capture.CopyMillis)))
-	payload[14] = byte(min(255, max(0, upload.capture.ScaleMillis)))
-	payload[15] = byte(min(255, max(0, upload.capture.EncodeMillis)))
-	payload[16] = 0 // reserved for future transport diagnostics
-	payload[17] = byte(len(backend))
-	binary.BigEndian.PutUint64(payload[18:26], upload.sequence)
-	copy(payload[26:], backend)
-	copy(payload[26+len(backend):], upload.capture.JPEG)
+	header := desktopFrameStreamHeader(upload)
 	writeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	err := stream.connection.Write(writeCtx, websocket.MessageBinary, payload)
+	writer, err := stream.connection.Writer(writeCtx, websocket.MessageBinary)
+	if err == nil {
+		_, err = writer.Write(header)
+	}
+	if err == nil {
+		_, err = writer.Write(upload.capture.JPEG)
+	}
+	if writer != nil {
+		if closeErr := writer.Close(); err == nil {
+			err = closeErr
+		}
+	}
 	cancel()
 	if err != nil {
 		stream.Close()
-		stream.retryAfter = time.Now().Add(2 * time.Second)
+		// A previously established stream should reconnect quickly; repeated dial
+		// failures then back off exponentially to protect the server during outages.
+		stream.recordRetryFailure(upload.sessionID, key, true)
 	}
 	return err
 }
 
-func (stream *desktopFrameStreamClient) readInputs(ctx context.Context, connection *websocket.Conn) {
+func (stream *desktopFrameStreamClient) readInputs(ctx context.Context, connection *websocket.Conn, sessionID string, generation uint64) {
 	defer func() {
-		if stream.active != nil {
+		if stream.active != nil && stream.readGeneration.Load() == generation {
 			stream.active.Store(false)
 		}
 	}()
@@ -1117,10 +1294,137 @@ func (stream *desktopFrameStreamClient) readInputs(ctx context.Context, connecti
 		if decodeErr != nil {
 			continue
 		}
+		if stream.active != nil && stream.readGeneration.Load() == generation {
+			// Old servers ignore videoOnly=1 and still deliver control through lane
+			// zero. Mark the compatibility channel usable only after a real batch;
+			// otherwise it could suppress HTTP fallback while a new server correctly
+			// keeps this video connection input-free.
+			stream.active.Store(true)
+		}
 		select {
-		case stream.inputs <- events:
+		case stream.inputs <- desktopInputBatch{SessionID: sessionID, Events: events}:
 		case <-ctx.Done():
 			return
+		}
+	}
+}
+
+func dialDesktopInputStream(ctx context.Context, client *http.Client, target desktopInputStreamTarget) (*websocket.Conn, error) {
+	endpoint, err := desktopWebSocketURL(target.access.ServerURL, "/api/desktop/agent/sessions/"+target.sessionID+"/stream?lane=input")
+	if err != nil {
+		return nil, err
+	}
+	headers := http.Header{}
+	headers.Set("X-Genesis-Device-Id", target.access.DeviceID)
+	headers.Set("Authorization", "Desktop "+target.access.DesktopSecret)
+	headers.Set("User-Agent", "RemoteIt-Desktop/"+version)
+	connection, response, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPClient: client, HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	return connection, err
+}
+
+func receiveDesktopInputStream(ctx context.Context, connection *websocket.Conn, target desktopInputStreamTarget, inputs chan<- desktopInputBatch) error {
+	for {
+		messageType, payload, err := connection.Read(ctx)
+		if err != nil {
+			return err
+		}
+		if messageType != websocket.MessageText || len(payload) == 0 || len(payload) > 64<<10 {
+			continue
+		}
+		events, decodeErr := decodeDesktopInputStreamMessage(payload)
+		if decodeErr != nil {
+			continue
+		}
+		select {
+		case inputs <- desktopInputBatch{SessionID: target.sessionID, Events: events}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+const (
+	desktopInputStreamRetryInitial = 150 * time.Millisecond
+	desktopInputStreamRetryMaximum = 2 * time.Second
+)
+
+func nextDesktopInputStreamRetry(current time.Duration, connected bool) time.Duration {
+	if connected || current <= 0 {
+		return desktopInputStreamRetryInitial
+	}
+	next := current * 2
+	if next > desktopInputStreamRetryMaximum {
+		return desktopInputStreamRetryMaximum
+	}
+	return next
+}
+
+func runDesktopInputStream(ctx context.Context, client *http.Client, targets <-chan desktopInputStreamTarget, inputs chan<- desktopInputBatch, active *atomic.Bool) {
+	var cancelCurrent context.CancelFunc
+	var generation atomic.Uint64
+	for {
+		select {
+		case <-ctx.Done():
+			generation.Add(1)
+			if cancelCurrent != nil {
+				cancelCurrent()
+			}
+			active.Store(false)
+			return
+		case target, ok := <-targets:
+			if !ok {
+				generation.Add(1)
+				if cancelCurrent != nil {
+					cancelCurrent()
+				}
+				active.Store(false)
+				return
+			}
+			currentGeneration := generation.Add(1)
+			if cancelCurrent != nil {
+				cancelCurrent()
+			}
+			active.Store(false)
+			if target.sessionID == "" {
+				cancelCurrent = nil
+				continue
+			}
+			streamCtx, cancel := context.WithCancel(ctx)
+			cancelCurrent = cancel
+			go func(target desktopInputStreamTarget, currentGeneration uint64) {
+				retry := desktopInputStreamRetryInitial
+				for streamCtx.Err() == nil {
+					connection, err := dialDesktopInputStream(streamCtx, client, target)
+					if err == nil {
+						// A connection that completed its handshake proves the route is back.
+						// If it later drops (VPN switch, Wi-Fi roam, proxy restart), retry from
+						// 150 ms instead of retaining the outage's multi-second backoff.
+						retry = nextDesktopInputStreamRetry(retry, true)
+						if generation.Load() == currentGeneration {
+							active.Store(true)
+						}
+						err = receiveDesktopInputStream(streamCtx, connection, target, inputs)
+						_ = connection.Close(websocket.StatusNormalClosure, "")
+					}
+					if generation.Load() == currentGeneration {
+						active.Store(false)
+					}
+					if streamCtx.Err() != nil {
+						return
+					}
+					timer := time.NewTimer(retry)
+					select {
+					case <-streamCtx.Done():
+						timer.Stop()
+						return
+					case <-timer.C:
+					}
+					retry = nextDesktopInputStreamRetry(retry, false)
+				}
+			}(target, currentGeneration)
 		}
 	}
 }
@@ -1143,24 +1447,32 @@ func decodeDesktopInputStreamMessage(payload []byte) ([]desktopInput, error) {
 	return events, nil
 }
 
-// coalesceDesktopInput drops obsolete cursor positions without ever removing
-// click, wheel, keyboard or text actions. Button events contain their own
-// coordinates, so retaining only the newest free pointer move cannot change a
-// click target and prevents a high-refresh viewer from building input latency.
+// coalesceDesktopInput replaces only consecutive pointer positions. Pointer
+// button and wheel actions are barriers: preserving the newest move on each
+// side of down/up is required for drag-and-drop and keeps the wheel target
+// deterministic. This still removes high-refresh cursor noise without moving a
+// drag sample past the matching button release.
 func coalesceDesktopInput(events []desktopInput) []desktopInput {
 	result := make([]desktopInput, 0, len(events))
 	for _, event := range events {
-		if event.Type == "pointer" && event.Action == "move" {
-			filtered := result[:0]
-			for _, pending := range result {
-				if pending.Type != "pointer" || pending.Action != "move" {
-					filtered = append(filtered, pending)
-				}
+		if event.Type == "pointer" && event.Action == "move" && len(result) > 0 {
+			last := len(result) - 1
+			if result[last].Type == "pointer" && result[last].Action == "move" {
+				result[last] = event
+				continue
 			}
-			result = filtered
 		}
 		result = append(result, event)
 	}
+	return result
+}
+
+func desktopAtomicString(value *atomic.Value) string {
+	if value == nil {
+		return ""
+	}
+	loaded := value.Load()
+	result, _ := loaded.(string)
 	return result
 }
 
@@ -1171,45 +1483,112 @@ func coalesceDesktopInput(events []desktopInput) []desktopInput {
 // coalesces only obsolete free pointer positions; clicks, keys and wheel events
 // retain their order and are handed to the dedicated locked Windows input
 // thread immediately.
-func runDesktopStreamInputDispatcher(ctx context.Context, batches <-chan []desktopInput, tasks chan desktopInputTask, latestCapture *atomic.Value, latestInputNanos *atomic.Int64) {
+func runDesktopStreamInputDispatcher(ctx context.Context, batches <-chan desktopInputBatch, tasks chan desktopInputTask, latestCapture *atomic.Value, latestInputNanos *atomic.Int64, activeSession *atomic.Value) {
+	var carry *desktopInputBatch
+	lastSessionID := ""
+	var lastDispatchedID int64
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case events := <-batches:
-			if len(events) == 0 {
-				continue
-			}
-			pending := append([]desktopInput(nil), events...)
-			for len(pending) < 64 {
-				select {
-				case more := <-batches:
-					pending = append(pending, more...)
-				default:
-					goto dispatch
-				}
-			}
-		dispatch:
-			pending = coalesceDesktopInput(pending)
-			if len(pending) == 0 {
-				continue
-			}
-			latestInputNanos.Store(time.Now().UnixNano())
-			capture, _ := latestCapture.Load().(desktopCapture)
-			task := desktopInputTask{events: pending, capture: capture}
+		var batch desktopInputBatch
+		if carry != nil {
+			batch = *carry
+			carry = nil
+		} else {
 			select {
-			case tasks <- task:
 			case <-ctx.Done():
 				return
+			case batch = <-batches:
 			}
+		}
+		activeSessionID := desktopAtomicString(activeSession)
+		if batch.SessionID == "" || batch.SessionID != activeSessionID || len(batch.Events) == 0 {
+			continue
+		}
+		if batch.SessionID != lastSessionID {
+			lastSessionID = batch.SessionID
+			lastDispatchedID = 0
+		}
+		pending := append([]desktopInput(nil), batch.Events...)
+		for len(pending) < 64 {
+			select {
+			case more := <-batches:
+				currentSessionID := desktopAtomicString(activeSession)
+				if more.SessionID == "" || more.SessionID != currentSessionID || len(more.Events) == 0 {
+					continue
+				}
+				if more.SessionID != batch.SessionID {
+					copy := more
+					carry = &copy
+					goto dispatch
+				}
+				pending = append(pending, more.Events...)
+			default:
+				goto dispatch
+			}
+		}
+	dispatch:
+		if batch.SessionID != desktopAtomicString(activeSession) {
+			continue
+		}
+		pending = coalesceDesktopInput(pending)
+		// The server restores an input batch if an Agent WebSocket write fails.
+		// A complete message can nevertheless have reached this process before the
+		// close became visible to the sender, so IDs make reconnect delivery
+		// idempotent without adding an acknowledgement round trip to every click.
+		filtered := pending[:0]
+		for _, event := range pending {
+			if event.ID > 0 && event.ID <= lastDispatchedID {
+				continue
+			}
+			filtered = append(filtered, event)
+		}
+		pending = filtered
+		if len(pending) == 0 {
+			continue
+		}
+		for _, event := range pending {
+			if event.ID > lastDispatchedID {
+				lastDispatchedID = event.ID
+			}
+		}
+		latestInputNanos.Store(time.Now().UnixNano())
+		capture, _ := latestCapture.Load().(desktopCapture)
+		task := desktopInputTask{sessionID: batch.SessionID, events: pending, capture: capture}
+		select {
+		case tasks <- task:
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
-func runDesktopFrameUploadLane(ctx context.Context, client *http.Client, lane int, uploads <-chan desktopFrameUpload, results chan<- desktopFrameUploadResult, inputs chan<- []desktopInput, active *atomic.Bool, httpFallback bool) {
+func runDesktopFrameUploadLane(ctx context.Context, client *http.Client, lane int, uploads <-chan desktopFrameUpload, results chan<- desktopFrameUploadResult, inputs chan<- desktopInputBatch, active *atomic.Bool, httpFallback bool) {
 	stream := &desktopFrameStreamClient{lane: lane, inputs: inputs, active: active}
 	defer stream.Close()
 	for {
+		// An auxiliary lane in exponential reconnect backoff must stop advertising
+		// itself as an immediately available writer. Previously its unbuffered
+		// channel still had a receiver, so the dispatcher handed it every sixth
+		// frame; send() rejected that frame before dial and the lane silently
+		// discarded a stable share of otherwise healthy 30/60 FPS output. The
+		// primary lane remains available because it can use the HTTP compatibility
+		// path while its websocket reconnects.
+		if !httpFallback {
+			if wait := desktopStreamRetryWait(stream.retryAfter, time.Now()); wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					return
+				case <-timer.C:
+				}
+				continue
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -1226,12 +1605,28 @@ func runDesktopFrameUploadLane(ctx context.Context, client *http.Client, lane in
 				// The second lane is an acceleration path. The primary lane continues
 				// to provide both video and the HTTP compatibility fallback while this
 				// lane reconnects, so do not surface a false session error to the user.
+				// Still report a dropped sample to Auto: otherwise a failed auxiliary
+				// lane looks healthy for the freshness window and repeated first-attempt
+				// failures can lower delivered FPS without any adaptation signal.
+				resultCapture := upload.capture
+				resultCapture.JPEG = nil
+				result := desktopFrameUploadResult{
+					sessionID:   upload.sessionID,
+					lane:        lane,
+					capture:     resultCapture,
+					completedAt: time.Now(),
+					dropped:     true,
+				}
 				releaseDesktopFrameUpload(&upload)
+				select {
+				case results <- result:
+				default:
+				}
 				continue
 			}
 			resultCapture := upload.capture
 			resultCapture.JPEG = nil
-			result := desktopFrameUploadResult{sessionID: upload.sessionID, capture: resultCapture, duration: time.Since(startedAt), err: err}
+			result := desktopFrameUploadResult{sessionID: upload.sessionID, lane: lane, capture: resultCapture, duration: time.Since(startedAt), completedAt: time.Now(), err: err}
 			releaseDesktopFrameUpload(&upload)
 			select {
 			case results <- result:
@@ -1242,19 +1637,22 @@ func runDesktopFrameUploadLane(ctx context.Context, client *http.Client, lane in
 	}
 }
 
-func runDesktopFrameUploader(ctx context.Context, client *http.Client, uploads <-chan desktopFrameUpload, results chan<- desktopFrameUploadResult, inputs chan<- []desktopInput, active *atomic.Bool) {
+func runDesktopFrameUploader(ctx context.Context, client *http.Client, uploads <-chan desktopFrameUpload, results chan<- desktopFrameUploadResult, inputs chan<- desktopInputBatch, legacyActive *atomic.Bool) {
 	// A single websocket becomes the limiting factor for high-quality JPEG at
 	// 30/60 FPS even when capture and encoding take only a few milliseconds.
-	// Six independent, latest-only lanes preserve frame quality and expand the
-	// available transport window without coupling keyboard/mouse input to a
-	// slow image write. Producer sequence numbers let the server discard a late
+	// Six independent lanes preserve frame quality and expand the available
+	// transport window without coupling keyboard/mouse input to a slow image
+	// write. The lanes are intentionally unbuffered: a frame is handed only to
+	// a writer that can start it immediately. Keeping one waiting JPEG per lane
+	// used to retain up to six already-obsolete frames during congestion. The
+	// producer sequence numbers still let the server discard a late in-flight
 	// frame when lanes complete out of order.
 	lanes := [6]chan desktopFrameUpload{
-		make(chan desktopFrameUpload, 1), make(chan desktopFrameUpload, 1),
-		make(chan desktopFrameUpload, 1), make(chan desktopFrameUpload, 1),
-		make(chan desktopFrameUpload, 1), make(chan desktopFrameUpload, 1),
+		make(chan desktopFrameUpload), make(chan desktopFrameUpload),
+		make(chan desktopFrameUpload), make(chan desktopFrameUpload),
+		make(chan desktopFrameUpload), make(chan desktopFrameUpload),
 	}
-	go runDesktopFrameUploadLane(ctx, client, 0, lanes[0], results, inputs, active, true)
+	go runDesktopFrameUploadLane(ctx, client, 0, lanes[0], results, inputs, legacyActive, true)
 	go runDesktopFrameUploadLane(ctx, client, 1, lanes[1], results, nil, nil, false)
 	go runDesktopFrameUploadLane(ctx, client, 2, lanes[2], results, nil, nil, false)
 	go runDesktopFrameUploadLane(ctx, client, 3, lanes[3], results, nil, nil, false)
@@ -1266,10 +1664,49 @@ func runDesktopFrameUploader(ctx context.Context, client *http.Client, uploads <
 		case <-ctx.Done():
 			return
 		case upload := <-uploads:
-			enqueueLatestDesktopFrame(lanes[lane], upload)
-			lane = (lane + 1) % len(lanes)
+			captureMetadata := upload.capture
+			captureMetadata.JPEG = nil
+			var sent bool
+			lane, sent = dispatchDesktopFrameToAvailableLane(lanes[:], lane, upload)
+			if !sent {
+				// The frame was released immediately, but Auto still needs a bounded
+				// congestion signal. Never block the uploader to report telemetry: a
+				// later drop or completed upload will provide another sample.
+				select {
+				case results <- desktopFrameUploadResult{
+					sessionID:   upload.sessionID,
+					lane:        -1,
+					capture:     captureMetadata,
+					completedAt: time.Now(),
+					dropped:     true,
+				}:
+				default:
+				}
+			}
 		}
 	}
+}
+
+func dispatchDesktopFrameToAvailableLane(lanes []chan desktopFrameUpload, start int, upload desktopFrameUpload) (int, bool) {
+	if len(lanes) == 0 {
+		releaseDesktopFrameUpload(&upload)
+		return 0, false
+	}
+	if start < 0 || start >= len(lanes) {
+		start = 0
+	}
+	for offset := 0; offset < len(lanes); offset++ {
+		lane := (start + offset) % len(lanes)
+		select {
+		case lanes[lane] <- upload:
+			return (lane + 1) % len(lanes), true
+		default:
+		}
+	}
+	// All transport writes are busy. Starting this frame later would only add
+	// latency because a newer capture will arrive first; release it immediately.
+	releaseDesktopFrameUpload(&upload)
+	return start, false
 }
 
 func enqueueLatestDesktopFrame(uploads chan desktopFrameUpload, upload desktopFrameUpload) {
@@ -1349,13 +1786,15 @@ type desktopCapturer struct {
 	dxgiPixels              []byte
 	dxgiScaled              []byte
 	motionScaled            []byte
-	cursorFrame             []byte
+	cursorRestore           []byte
 	dxgiScaleX              []int32
 	dxgiScaleWeight         []int32
 	motionScaleX            []int32
 	motionScaleWeight       []int32
 	nativeMotionScaleX      []int32
 	nativeMotionScaleWeight []int32
+	cursorBaseSurface       desktopCursorSurface
+	cursorMotionSurface     desktopCursorSurface
 	frame                   *image.RGBA
 	info                    bitmapInfo
 	encoder                 desktopJPEGEncoder
@@ -1365,13 +1804,82 @@ type desktopCapturer struct {
 	lastFrameHeight         int
 	lastQuality             int
 	lastChroma              desktopJPEGChroma
+	lastEncodedQuality      int
+	lastEncodedChroma       desktopJPEGChroma
 	lastCursor              desktopCursorState
 	lastCursorVisible       bool
+	oversizeQuality         int
+	oversizeChroma          desktopJPEGChroma
+	oversizeUntil           time.Time
+}
+
+// desktopCursorSurface is an independent GDI surface used only for composing
+// the remote pointer. The capture DIB has the selected base-profile stride
+// (for example 3840 pixels), while an interactive/constrained frame can be
+// 2560 pixels wide. Drawing a 2560-wide frame through that 3840-wide DIB mixes
+// scan-line strides and produces the blinking/teleporting cursor seen on 4K
+// and other non-standard displays. Keeping one surface for the base geometry
+// and one for the motion geometry also avoids recreating GDI objects every
+// time the 220 ms interaction window changes profile.
+type desktopCursorSurface struct {
+	memoryDC uintptr
+	bitmap   uintptr
+	previous uintptr
+	pixels   []byte
+	width    int
+	height   int
+}
+
+func (surface *desktopCursorSurface) Close() {
+	if surface.memoryDC != 0 && surface.previous != 0 {
+		procSelectObject.Call(surface.memoryDC, surface.previous)
+	}
+	if surface.bitmap != 0 {
+		procDeleteObject.Call(surface.bitmap)
+	}
+	if surface.memoryDC != 0 {
+		procDeleteDC.Call(surface.memoryDC)
+	}
+	*surface = desktopCursorSurface{}
+}
+
+func (surface *desktopCursorSurface) ensure(screenDC uintptr, width, height int) bool {
+	if screenDC == 0 || width <= 0 || height <= 0 {
+		return false
+	}
+	if surface.memoryDC != 0 && surface.width == width && surface.height == height && len(surface.pixels) == width*height*4 {
+		return true
+	}
+	surface.Close()
+	surface.memoryDC, _, _ = procCreateCompatibleDC.Call(screenDC)
+	if surface.memoryDC == 0 {
+		return false
+	}
+	info := bitmapInfo{Header: bitmapInfoHeader{Size: uint32(unsafe.Sizeof(bitmapInfoHeader{})), Width: int32(width), Height: -int32(height), Planes: 1, BitCount: 32}}
+	var pixelMemory unsafe.Pointer
+	surface.bitmap, _, _ = procCreateDIBSection.Call(
+		screenDC,
+		uintptr(unsafe.Pointer(&info)),
+		0, // DIB_RGB_COLORS
+		uintptr(unsafe.Pointer(&pixelMemory)),
+		0,
+		0,
+	)
+	if surface.bitmap == 0 || pixelMemory == nil {
+		surface.Close()
+		return false
+	}
+	surface.previous, _, _ = procSelectObject.Call(surface.memoryDC, surface.bitmap)
+	surface.pixels = unsafe.Slice((*byte)(pixelMemory), width*height*4)
+	surface.width, surface.height = width, height
+	return true
 }
 
 func (capturer *desktopCapturer) Close() {
 	capturer.encoder.Close()
 	capturer.fast.Close()
+	capturer.cursorBaseSurface.Close()
+	capturer.cursorMotionSurface.Close()
 	if capturer.memoryDC != 0 && capturer.previous != 0 {
 		procSelectObject.Call(capturer.memoryDC, capturer.previous)
 	}
@@ -1414,7 +1922,6 @@ func (capturer *desktopCapturer) ensure(targetFPS int) error {
 	motionWidth := interactionWidth
 	motionHeight := max(1, height*motionWidth/width)
 	capturer.motionScaled = make([]byte, motionWidth*motionHeight*4)
-	capturer.cursorFrame = make([]byte, width*height*4)
 	capturer.dxgiScaleX = make([]int32, width)
 	capturer.dxgiScaleWeight = make([]int32, width)
 	capturer.motionScaleX = make([]int32, motionWidth)
@@ -1495,15 +2002,14 @@ func (capturer *desktopCapturer) ensure(targetFPS int) error {
 	return nil
 }
 
-func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cursorVisible bool, secureDesktop bool) (desktopCapture, error) {
+func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constrained bool, cursorVisible bool, secureDesktop bool) (desktopCapture, error) {
 	if err := capturer.ensure(targetFPS); err != nil {
 		return desktopCapture{}, err
 	}
 	// During active mouse/keyboard input prefer immediate motion over spending
 	// bandwidth on visually lossless chroma in every intermediate frame. The
 	// geometry remains unchanged, so pointer mapping cannot jump. A sharp 4:4:4
-	// frame is emitted automatically after 350 ms of inactivity.
-	profile := desktopProfileForInteraction(targetFPS, interactive)
+	// frame is emitted automatically after the short interaction window.
 	captureStartedAt := time.Now()
 	copyStartedAt := captureStartedAt
 	copyMillis := 0
@@ -1521,12 +2027,8 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 	}
 	framePixels := capturer.dxgiPixels
 	frameWidth, frameHeight := capturer.screenWidth, capturer.screenHeight
-	desiredWidth, desiredHeight := capturer.width, capturer.height
-	interactionWidth := desktopInteractionWidth(targetFPS, desiredWidth)
-	if interactive && desiredWidth > interactionWidth {
-		desiredWidth = interactionWidth
-		desiredHeight = max(1, capturer.height*desiredWidth/capturer.width)
-	}
+	desiredWidth, desiredHeight := desktopOutputGeometry(capturer.width, capturer.height, targetFPS, interactive, constrained)
+	profile := desktopProfileForInteraction(targetFPS, interactive, constrained, desiredWidth)
 	fastResult := -1
 	cursor := currentDesktopCursorState()
 	// Desktop Duplication operates at the native output resolution. The former
@@ -1540,7 +2042,14 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 		(!cursorVisible || cursor == capturer.lastCursor) &&
 		cursorVisible == capturer.lastCursorVisible &&
 		capturer.lastFrameWidth == desiredWidth && capturer.lastFrameHeight == desiredHeight &&
-		capturer.lastQuality == profile.quality && capturer.lastChroma == profile.chroma {
+		capturer.lastQuality == profile.quality && capturer.lastChroma == profile.chroma &&
+		desktopCanReuseBoundedJPEG(
+			profile,
+			capturer.lastEncodedQuality,
+			capturer.lastEncodedChroma,
+			capturer.oversizeUntil,
+			time.Now(),
+		) {
 		return desktopCapture{
 			JPEG:           capturer.lastJPEG,
 			FrameWidth:     capturer.lastFrameWidth,
@@ -1624,13 +2133,17 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 	// Desktop and direct-touch clients rely on their local/finger position, so
 	// skipping this copy removes the duplicate pointer and also avoids needless
 	// JPEG work whenever the remote user's cursor moves over a static desktop.
+	cursorPatch := desktopCursorPatch{}
 	if cursorVisible {
-		if len(capturer.cursorFrame) != len(framePixels) {
-			capturer.cursorFrame = make([]byte, len(framePixels))
+		// Draw directly into the selected capture surface and restore only the
+		// affected cursor rectangle after synchronous JPEG encoding. The previous
+		// safety copy duplicated the entire 13.5 MiB notebook frame (or 31.6 MiB at
+		// 4K) on every pointer update, which reduced FPS precisely in mobile
+		// trackpad mode. The compact patch remains private to this capture call.
+		cursorPatch = capturer.drawCursor(framePixels, frameWidth, frameHeight, cursor)
+		if cursorPatch.width > 0 {
+			defer restoreDesktopCursorPatch(framePixels, frameWidth, cursorPatch, capturer.cursorRestore)
 		}
-		copy(capturer.cursorFrame, framePixels)
-		capturer.drawCursor(capturer.cursorFrame, frameWidth, frameHeight, cursor)
-		framePixels = capturer.cursorFrame
 	}
 	// TurboJPEG consumes packed BGRA directly at every supported resolution,
 	// including native 2560 px and 4K profiles. The previous >1920 branch first
@@ -1639,16 +2152,42 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive bool, cu
 	// 4-7 FPS ceiling measured on a 2560 px desktop.
 	captureMillis := int(time.Since(captureStartedAt).Milliseconds())
 	encodeStartedAt := time.Now()
-	encoded, encodeErr := capturer.encoder.EncodeBGRA(framePixels, frameWidth, frameHeight, profile.quality, profile.chroma)
-	if encodeErr != nil {
-		return desktopCapture{}, encodeErr
+	encodeNow := time.Now()
+	preferFallback := profile.quality == capturer.oversizeQuality && profile.chroma == capturer.oversizeChroma && encodeNow.Before(capturer.oversizeUntil)
+	var encoded []byte
+	encodedQuality, encodedChroma := profile.quality, profile.chroma
+	for attempt := 0; ; attempt++ {
+		quality, chroma, ok := desktopBoundedEncodingProfile(profile, attempt, preferFallback)
+		if !ok {
+			return desktopCapture{}, errors.New("desktop frame exceeds the bounded transport limit")
+		}
+		candidate, encodeErr := capturer.encoder.EncodeBGRA(framePixels, frameWidth, frameHeight, quality, chroma)
+		if encodeErr != nil {
+			return desktopCapture{}, encodeErr
+		}
+		if len(candidate) <= desktopMaximumFrameBytes {
+			encoded, encodedQuality, encodedChroma = candidate, quality, chroma
+			break
+		}
+		if quality == profile.quality && chroma == profile.chroma {
+			capturer.oversizeQuality = profile.quality
+			capturer.oversizeChroma = profile.chroma
+			capturer.oversizeUntil = encodeNow.Add(desktopOversizeProfileBackoff)
+		}
 	}
-	if len(encoded) > desktopMaximumFrameBytes {
-		return desktopCapture{}, errors.New("desktop frame exceeds the size limit")
+	if encodedQuality != profile.quality || encodedChroma != profile.chroma {
+		captureBackend += "-bounded-jpeg"
+	} else if !preferFallback {
+		capturer.oversizeUntil = time.Time{}
 	}
 	capturer.lastJPEG = encoded
 	capturer.lastFrameWidth, capturer.lastFrameHeight = frameWidth, frameHeight
+	// Remember both the requested and the actually encoded profile. A frame that
+	// temporarily exceeded the wire limit is safe to reuse only for the short
+	// oversize backoff. Once it expires, an unchanged desktop must retry the
+	// requested quality instead of remaining on the fallback JPEG forever.
 	capturer.lastQuality, capturer.lastChroma = profile.quality, profile.chroma
+	capturer.lastEncodedQuality, capturer.lastEncodedChroma = encodedQuality, encodedChroma
 	capturer.lastCursor = cursor
 	capturer.lastCursorVisible = cursorVisible
 	return desktopCapture{JPEG: capturer.lastJPEG, FrameWidth: frameWidth, FrameHeight: frameHeight, ScreenX: capturer.screenX, ScreenY: capturer.screenY, ScreenWidth: capturer.screenWidth, ScreenHeight: capturer.screenHeight, CaptureMillis: captureMillis, CopyMillis: copyMillis, ScaleMillis: scaleMillis, EncodeMillis: int(time.Since(encodeStartedAt).Milliseconds()), CaptureBackend: captureBackend}, nil
@@ -1663,13 +2202,43 @@ func currentDesktopCursorState() desktopCursorState {
 	return desktopCursorState{Visible: true, X: int(info.Position.X), Y: int(info.Position.Y), Handle: info.Cursor}
 }
 
-func (capturer *desktopCapturer) drawCursor(frame []byte, frameWidth, frameHeight int, cursor desktopCursorState) {
-	if !cursor.Visible || cursor.Handle == 0 || capturer.memoryDC == 0 || len(capturer.pixels) < frameWidth*frameHeight*4 || len(frame) < frameWidth*frameHeight*4 {
+type desktopCursorPatch struct {
+	left   int
+	top    int
+	width  int
+	height int
+}
+
+func restoreDesktopCursorPatch(frame []byte, frameWidth int, patch desktopCursorPatch, saved []byte) {
+	if patch.width <= 0 || patch.height <= 0 || frameWidth <= 0 || len(saved) < patch.width*patch.height*4 {
 		return
+	}
+	stride := frameWidth * 4
+	rowBytes := patch.width * 4
+	for row := 0; row < patch.height; row++ {
+		targetStart := (patch.top+row)*stride + patch.left*4
+		savedStart := row * rowBytes
+		if targetStart < 0 || targetStart+rowBytes > len(frame) {
+			return
+		}
+		copy(frame[targetStart:targetStart+rowBytes], saved[savedStart:savedStart+rowBytes])
+	}
+}
+
+func (capturer *desktopCapturer) drawCursor(frame []byte, frameWidth, frameHeight int, cursor desktopCursorState) desktopCursorPatch {
+	if !cursor.Visible || cursor.Handle == 0 || capturer.screenDC == 0 || len(frame) < frameWidth*frameHeight*4 {
+		return desktopCursorPatch{}
+	}
+	surface := &capturer.cursorMotionSurface
+	if frameWidth == capturer.width && frameHeight == capturer.height {
+		surface = &capturer.cursorBaseSurface
+	}
+	if !surface.ensure(capturer.screenDC, frameWidth, frameHeight) {
+		return desktopCursorPatch{}
 	}
 	icon := desktopIconInfo{}
 	if result, _, _ := procGetIconInfo.Call(cursor.Handle, uintptr(unsafe.Pointer(&icon))); result == 0 {
-		return
+		return desktopCursorPatch{}
 	}
 	if icon.Mask != 0 {
 		defer procDeleteObject.Call(icon.Mask)
@@ -1688,21 +2257,35 @@ func (capturer *desktopCapturer) drawCursor(frame []byte, frameWidth, frameHeigh
 	clipLeft, clipTop := max(0, left), max(0, top)
 	clipRight, clipBottom := min(frameWidth, left+cursorWidth), min(frameHeight, top+cursorHeight)
 	if clipLeft >= clipRight || clipTop >= clipBottom {
-		return
+		return desktopCursorPatch{}
 	}
 	stride := frameWidth * 4
-	for y := clipTop; y < clipBottom; y++ {
+	patch := desktopCursorPatch{left: clipLeft, top: clipTop, width: clipRight - clipLeft, height: clipBottom - clipTop}
+	patchBytes := patch.width * patch.height * 4
+	if cap(capturer.cursorRestore) < patchBytes {
+		capturer.cursorRestore = make([]byte, patchBytes)
+	} else {
+		capturer.cursorRestore = capturer.cursorRestore[:patchBytes]
+	}
+	rowBytes := patch.width * 4
+	// Only seed the cursor rectangle. Copying an entire 4K frame into the GDI
+	// scratch DIB for a 32x32 pointer adds tens of megabytes of memory traffic to
+	// every mouse frame and directly reduces the delivered FPS.
+	for row, y := 0, clipTop; y < clipBottom; row, y = row+1, y+1 {
 		start, end := y*stride+clipLeft*4, y*stride+clipRight*4
-		copy(capturer.pixels[start:end], frame[start:end])
+		copy(capturer.cursorRestore[row*rowBytes:(row+1)*rowBytes], frame[start:end])
+		copy(surface.pixels[start:end], frame[start:end])
 	}
 	const drawNormal = 0x0003 // DI_MASK | DI_IMAGE
-	if result, _, _ := procDrawIconEx.Call(capturer.memoryDC, uintptr(left), uintptr(top), cursor.Handle, uintptr(cursorWidth), uintptr(cursorHeight), 0, 0, drawNormal); result == 0 {
-		return
+	if result, _, _ := procDrawIconEx.Call(surface.memoryDC, uintptr(left), uintptr(top), cursor.Handle, uintptr(cursorWidth), uintptr(cursorHeight), 0, 0, drawNormal); result == 0 {
+		capturer.cursorRestore = capturer.cursorRestore[:0]
+		return desktopCursorPatch{}
 	}
 	for y := clipTop; y < clipBottom; y++ {
 		start, end := y*stride+clipLeft*4, y*stride+clipRight*4
-		copy(frame[start:end], capturer.pixels[start:end])
+		copy(frame[start:end], surface.pixels[start:end])
 	}
+	return patch
 }
 
 func scaleDesktopBGRA(source []byte, sourceWidth, sourceHeight int, target []byte, targetWidth, targetHeight int, scaleX, scaleWeight []int32) {

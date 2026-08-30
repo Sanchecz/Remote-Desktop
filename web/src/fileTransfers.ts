@@ -47,6 +47,24 @@ export type UploadedTransferChunk = {
   size: number;
 };
 
+const INITIAL_BROWSER_TRANSFER_CHUNK = 8 * 1024 * 1024;
+const STEADY_BROWSER_TRANSFER_CHUNK = 64 * 1024 * 1024;
+
+/**
+ * Starts a browser -> device transfer with a small committed checkpoint so the
+ * agent can begin consuming it quickly, then switches to the largest chunk the
+ * server accepts. This avoids both a 64 MiB start-up bubble and the per-request
+ * fsync overhead of keeping every chunk small for multi-gigabyte files.
+ */
+export function browserTransferChunkLength(offset: number, totalSize: number) {
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(totalSize) || offset < 0 || totalSize < 0 || offset > totalSize) {
+    throw new Error("Некорректная контрольная точка передачи");
+  }
+  const remaining = totalSize - offset;
+  if (remaining === 0) return 0;
+  return Math.min(remaining, offset === 0 ? INITIAL_BROWSER_TRANSFER_CHUNK : STEADY_BROWSER_TRANSFER_CHUNK);
+}
+
 export function validateTransferCheckpoint(
   progress: UploadedTransferChunk,
   offset: number,
@@ -60,6 +78,7 @@ export function validateTransferCheckpoint(
     !Number.isSafeInteger(offset) ||
     !Number.isSafeInteger(chunkSize) ||
     !Number.isSafeInteger(totalSize) ||
+    !Number.isSafeInteger(expected) ||
     offset < 0 ||
     chunkSize < 0 ||
     totalSize < 0 ||

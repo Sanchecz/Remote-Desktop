@@ -7,11 +7,43 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
 func transferRequest(body string) *http.Request {
 	return httptest.NewRequest("PUT", "/api/file-transfers/test/data", strings.NewReader(body))
+}
+
+func TestTransferChunkLockSerializesSameTransferOnly(t *testing.T) {
+	s := &server{}
+	first := s.transferChunkLock("a")
+	if first != s.transferChunkLock("a") {
+		t.Fatal("same transfer did not reuse its serialization lock")
+	}
+	if first == s.transferChunkLock("b") {
+		t.Fatal("unrelated transfers unexpectedly share one lock")
+	}
+
+	first.Lock()
+	attempting := make(chan struct{})
+	entered := make(chan struct{})
+	done := make(chan struct{})
+	go func(lock *sync.Mutex) {
+		close(attempting)
+		lock.Lock()
+		close(entered)
+		lock.Unlock()
+		close(done)
+	}(s.transferChunkLock("a"))
+	<-attempting
+	select {
+	case <-entered:
+		t.Fatal("concurrent retry entered while the committed chunk was locked")
+	default:
+	}
+	first.Unlock()
+	<-done
 }
 
 func TestAppendTransferChunkSupportsOrderedResume(t *testing.T) {
@@ -102,5 +134,59 @@ func TestRollbackTransferChunkRestoresCommittedCheckpoint(t *testing.T) {
 	content, err := os.ReadFile(path)
 	if err != nil || string(content) != "committed" {
 		t.Fatalf("rollback did not restore checkpoint: %q, err=%v", content, err)
+	}
+}
+
+func TestAvailableAgentDownloadLengthPipelinesCommittedChunks(t *testing.T) {
+	tests := []struct {
+		name                     string
+		offset, total, committed int64
+		ready                    bool
+		status                   string
+		wantLength               int64
+		wantWait, wantError      bool
+	}{
+		{name: "first committed part", total: 128 << 20, committed: 32 << 20, status: "transferring", wantLength: 32 << 20},
+		{name: "next committed part", offset: 32 << 20, total: 128 << 20, committed: 96 << 20, status: "transferring", wantLength: 64 << 20},
+		{name: "producer still uploading", offset: 32 << 20, total: 128 << 20, committed: 32 << 20, status: "transferring", wantWait: true},
+		{name: "complete source", offset: 128 << 20, total: 128 << 20, committed: 128 << 20, ready: true, status: "transferring"},
+		{name: "ready but incomplete", offset: 32 << 20, total: 128 << 20, committed: 32 << 20, ready: true, status: "transferring", wantError: true},
+		{name: "cancelled", total: 128 << 20, committed: 32 << 20, status: "cancelled", wantError: true},
+		{name: "invalid checkpoint", offset: 129 << 20, total: 128 << 20, committed: 32 << 20, status: "transferring", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			length, wait, err := availableAgentDownloadLength(test.offset, test.total, test.committed, test.ready, test.status)
+			if length != test.wantLength || wait != test.wantWait || (err != nil) != test.wantError {
+				t.Fatalf("length=%d wait=%v err=%v; want length=%d wait=%v error=%v", length, wait, err, test.wantLength, test.wantWait, test.wantError)
+			}
+		})
+	}
+}
+
+func TestTransferProgressSignalWakesImmediatelyAndCoalesces(t *testing.T) {
+	s := &server{}
+	signal := s.transferProgressSignal("transfer-a")
+	s.signalTransferProgress("transfer-a")
+	s.signalTransferProgress("transfer-a")
+	select {
+	case <-signal:
+	default:
+		t.Fatal("committed checkpoint did not wake the waiting Agent")
+	}
+	select {
+	case <-signal:
+		t.Fatal("duplicate progress notifications were not coalesced")
+	default:
+	}
+
+	s.finishTransferProgressSignal("transfer-a")
+	select {
+	case <-signal:
+	default:
+		t.Fatal("terminal transfer state did not wake the existing waiter")
+	}
+	if replacement := s.transferProgressSignal("transfer-a"); replacement == signal {
+		t.Fatal("terminal transfer signal was not removed from the registry")
 	}
 }

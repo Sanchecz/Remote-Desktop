@@ -1548,51 +1548,11 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-mobile-keyboard input { width: 100%; height: 42px; color: #15202b; background: #fff; border-color: #dce3e9; font-size: 16px; }
 	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-stream-stats { top: max(58px,calc(50px + env(safe-area-inset-top))); }
 	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape.remote-controls-collapsed .remote-stream-stats { top: max(7px,env(safe-area-inset-top)); left: max(7px,env(safe-area-inset-left)); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-files-overlay > header { min-height: calc(44px + env(safe-area-inset-top)); padding-top: max(4px,env(safe-area-inset-top)); padding-bottom: 4px; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-files-overlay > header .eyebrow { display: none; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-files-overlay > header h2 { margin: 0; font-size: 13px; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-files-overlay-body { padding: 7px max(8px,env(safe-area-inset-right)) max(7px,env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left)); }
 }
-
-@media (max-width: 1024px) and (orientation: landscape) {
-	.remote-mobile-keyboard-fab { display: grid; }
-	.remote-mobile-fullscreen-fab { position: absolute; z-index: 205; top: max(8px,env(safe-area-inset-top)); right: max(9px,env(safe-area-inset-right)); width: 43px; height: 43px; display: grid; place-items: center; padding: 0; border: 1px solid rgba(255,255,255,.24); border-radius: 50%; color: #eef6f9; background: #0a121b; box-shadow: 0 10px 28px rgba(0,0,0,.4); touch-action: manipulation; }
-	.remote-mobile-fullscreen-fab:active { transform: scale(.95); }
-	.remote-desktop-embedded { position: fixed; z-index: 170; inset: auto; left: var(--remote-vv-left,0px); top: var(--remote-vv-top,0px); width: var(--remote-vv-width,100vw); height: var(--remote-vv-height,100dvh); min-height: 0; border: 0; border-radius: 0; }
-	.remote-desktop-backdrop { width: 100vw; height: 100dvh; overflow: hidden; }
-	.remote-desktop-modal { position: relative; grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,1fr); }
-	/* The generic modal rule above must not turn the embedded remote workspace
-	   back into a relative child of .remote-control-stage. On wide phones that
-	   shifted the 100vw surface by the stage's x/y offset and collapsed the
-	   visible desktop height. Keep the session pinned to the visual viewport. */
-	.remote-desktop-modal.remote-desktop-embedded { position: fixed; inset: auto; left: var(--remote-vv-left,0px); top: var(--remote-vv-top,0px); width: var(--remote-vv-width,100vw); height: var(--remote-vv-height,100dvh); min-height: 0; display: block; }
-	.remote-desktop-modal > header { position: absolute; z-index: 188; top: max(6px,env(safe-area-inset-top)); right: max(8px,env(safe-area-inset-right)); left: max(8px,env(safe-area-inset-left)); min-height: 42px; padding: 5px 7px 5px 10px; border: 1px solid rgba(255,255,255,.16); border-radius: 14px; background: linear-gradient(90deg,rgba(8,17,25,.88),rgba(8,17,25,.72)); -webkit-backdrop-filter: blur(18px) saturate(1.12); backdrop-filter: blur(18px) saturate(1.12); box-shadow: 0 8px 28px rgba(0,0,0,.22); pointer-events: none; }
-	.remote-desktop-modal > header > * { pointer-events: auto; }
-	.remote-desktop-modal header small { display: none; }
-	.remote-controls-collapsed > header { display: none; }
-	/* Every action below also exists in the landscape control rail. Keeping
-	   duplicates in the narrow header clipped controls on real phones. */
-	.remote-desktop-embedded > header .remote-header-tool { display: none; }
-	.remote-mode-badge { display: none; }
-	.remote-desktop-modal.remote-desktop-embedded > .remote-screen { position: absolute; inset: 0; width: 100%; height: 100%; }
-	.remote-screen-canvas { width: 100%; height: 100%; }
-	.remote-controls-scrim { inset: 0; }
-	.remote-desktop-modal.remote-desktop-embedded > .remote-session-footer { position: absolute; z-index: 187; top: max(58px,calc(50px + env(safe-area-inset-top))); right: auto; bottom: max(9px,env(safe-area-inset-bottom)); left: max(9px,env(safe-area-inset-left)); width: min(226px,38vw); max-height: calc(100dvh - 68px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); display: flex; align-content: flex-start; flex-direction: column; gap: 7px; padding: 9px !important; border: 1px solid rgba(207,218,227,.9) !important; border-radius: 17px; background: rgba(250,252,253,.95) !important; overflow-y: auto; transform-origin: left center; }
-	.remote-session-tools { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; flex: 0 0 auto; }
-	.remote-pointer-modes { grid-column: 1/-1; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-	.remote-tool-button { min-width: 0; min-height: 48px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 5px; border-color: #dce3e9; border-radius: 11px; color: #283442; background: #fff; font-size: 8px; box-shadow: 0 3px 12px rgba(31,42,55,.04); }
-	.remote-tool-button:hover,.remote-tool-button.active { color: #14895f; border-color: #44c997; background: #eefaf5; }
-	.remote-desktop-embedded .remote-footer-end { width: 100%; min-height: 44px; display: flex; color: #ec4545; border: 1px solid #ff7878; background: transparent; }
-	.remote-controls-collapsed .remote-session-footer { display: none !important; }
-	.remote-mobile-dock { position: absolute; top: auto; right: max(64px,calc(56px + env(safe-area-inset-right))); bottom: max(8px,env(safe-area-inset-bottom)); left: auto; width: min(350px,calc(100% - 82px - env(safe-area-inset-left) - env(safe-area-inset-right))); min-height: 50px; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)) 32px; gap: 4px; padding: 5px; border: 1px solid rgba(255,255,255,.24); border-radius: 17px; color: #dbe5ee; background: #0a121b; -webkit-backdrop-filter: blur(20px) saturate(1.15); backdrop-filter: blur(20px) saturate(1.15); box-shadow: 0 14px 40px rgba(0,0,0,.42); }
-	.remote-mobile-dock button { min-height: 40px; }
-	.remote-mobile-dock-reveal { position: absolute; right: max(66px,calc(58px + env(safe-area-inset-right))); bottom: max(8px,env(safe-area-inset-bottom)); }
-	.remote-mobile-dock-hidden .remote-mobile-dock-reveal { display: grid; }
-	.remote-mobile-keyboard { position: absolute; right: max(64px,calc(56px + env(safe-area-inset-right))); bottom: max(7px,env(safe-area-inset-bottom)); left: max(8px,env(safe-area-inset-left)); width: auto; display: grid; grid-template-columns: minmax(0,1fr) auto auto; }
-	.remote-mobile-keyboard input { width: 100%; }
-	.remote-stream-stats { top: max(58px,calc(50px + env(safe-area-inset-top))); }
-	.remote-controls-collapsed .remote-stream-stats { top: max(7px,env(safe-area-inset-top)); left: max(7px,env(safe-area-inset-left)); }
-	.remote-files-overlay > header { min-height: calc(44px + env(safe-area-inset-top)); padding-top: max(4px,env(safe-area-inset-top)); padding-bottom: 4px; }
-	.remote-files-overlay > header .eyebrow { display: none; }
-	.remote-files-overlay > header h2 { margin: 0; font-size: 13px; }
-	.remote-files-overlay-body { padding: 7px max(8px,env(safe-area-inset-right)) max(7px,env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left)); }
-	}
 
 @media (max-width: 1024px) and (orientation: landscape) and (max-height: 520px) {
 	html,body,#root { width: 100%; max-width: 100%; overflow-x: hidden; }
@@ -1617,13 +1577,13 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.mobile-bottom-nav button { min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 2px 1px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; font: inherit; font-size: 7px; cursor: pointer; }
 	.mobile-bottom-nav button.active { color: var(--green); background: color-mix(in srgb,var(--green) 6%,transparent); }
 	.mobile-bottom-nav button:disabled { opacity: .35; }
-	.remote-desktop-modal { grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,1fr); }
-	.remote-desktop-modal > header { min-height: 40px; padding: 4px 7px; }
-	.remote-desktop-modal h2 { font-size: 12px; }
-	.remote-session-footer { top: max(52px,calc(46px + env(safe-area-inset-top))); bottom: max(7px,env(safe-area-inset-bottom)); left: max(7px,env(safe-area-inset-left)); width: min(214px,39vw); padding: 7px !important; }
-	.remote-session-tools { gap: 4px; }
-	.remote-tool-button { min-height: 40px; border-radius: 9px; font-size: 7px; }
-	.remote-stream-stats { top: max(52px,calc(46px + env(safe-area-inset-top))); left: 6px; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape { grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,1fr); }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape > header { min-height: 40px; padding: 4px 7px; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape h2 { font-size: 12px; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape > .remote-session-footer { top: max(52px,calc(46px + env(safe-area-inset-top))); bottom: max(7px,env(safe-area-inset-bottom)); left: max(7px,env(safe-area-inset-left)); width: min(214px,39vw); padding: 7px !important; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-session-tools { gap: 4px; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-tool-button { min-height: 40px; border-radius: 9px; font-size: 7px; }
+	.remote-desktop-modal.remote-desktop-embedded.remote-runtime-landscape .remote-stream-stats { top: max(52px,calc(46px + env(safe-area-inset-top))); left: 6px; }
 }
 
 @media (max-width: 460px) {

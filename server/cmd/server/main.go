@@ -56,6 +56,8 @@ type server struct {
 	desktopSessionRuntime   sync.Map
 	desktopDeviceSessions   sync.Map
 	desktopInputQueues      sync.Map
+	transferProgressSignals sync.Map
+	transferChunkLocks      sync.Map
 }
 
 type loginAttempt struct {
@@ -357,7 +359,8 @@ var schemaStatements = []string{
         completed_at timestamptz,
         expires_at timestamptz NOT NULL DEFAULT (now()+interval '24 hours'),
         updated_at timestamptz NOT NULL DEFAULT now()
-    )`,
+	)`,
+	`ALTER TABLE remote_file_transfers ADD COLUMN IF NOT EXISTS source_ready boolean NOT NULL DEFAULT false`,
 	`CREATE INDEX IF NOT EXISTS remote_file_transfers_queue_idx ON remote_file_transfers(device_id,status,created_at)`,
 }
 

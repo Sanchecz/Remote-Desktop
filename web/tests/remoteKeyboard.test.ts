@@ -6,15 +6,17 @@ import {
 	chunkRemoteText,
 	planRemoteBoundaryDeletion,
 	planRemoteKeyboardInput,
+	planRemoteMobileBeforeInput,
 	planRemoteTextReconciliation,
 } from "../src/remoteKeyboard.ts";
 
-const event = (overrides: Partial<{ code: string; key: string; ctrlKey: boolean; altKey: boolean; metaKey: boolean }> = {}) => ({
+const event = (overrides: Partial<{ code: string; key: string; ctrlKey: boolean; altKey: boolean; metaKey: boolean; altGraphKey: boolean }> = {}) => ({
 	code: "KeyA",
 	key: "a",
 	ctrlKey: false,
 	altKey: false,
 	metaKey: false,
+	altGraphKey: false,
 	...overrides,
 });
 
@@ -53,6 +55,40 @@ test("preserves Ctrl shortcuts as physical key events", () => {
 	assert.deepEqual(planRemoteKeyboardInput(event({ code: "KeyC", key: "c", ctrlKey: false }), "up", textKeys), {
 		handled: true,
 		input: { type: "key", action: "up", keyCode: 67 },
+	});
+});
+
+test("sends AltGr symbols as resolved Unicode instead of a layout-dependent shortcut", () => {
+	const textKeys = new Set<string>();
+	assert.deepEqual(planRemoteKeyboardInput(event({
+		code: "KeyQ",
+		key: "@",
+		ctrlKey: true,
+		altKey: true,
+		altGraphKey: true,
+	}), "down", textKeys), {
+		handled: true,
+		input: { type: "text", text: "@" },
+	});
+	assert.deepEqual(planRemoteKeyboardInput(event({
+		code: "KeyQ",
+		key: "@",
+		ctrlKey: true,
+		altKey: true,
+		altGraphKey: true,
+	}), "up", textKeys), { handled: true });
+});
+
+test("keeps an explicit Ctrl+Alt shortcut physical when AltGraph is not active", () => {
+	const textKeys = new Set<string>();
+	assert.deepEqual(planRemoteKeyboardInput(event({
+		code: "KeyQ",
+		key: "q",
+		ctrlKey: true,
+		altKey: true,
+	}), "down", textKeys), {
+		handled: true,
+		input: { type: "key", action: "down", keyCode: 81 },
 	});
 });
 
@@ -102,4 +138,22 @@ test("leaves deletions inside the mobile mirror to IME reconciliation", () => {
 test("sends remote Delete only at the forward boundary", () => {
 	assert.deepEqual(planRemoteBoundaryDeletion("deleteContentForward", "", 0, 0), { handled: true, keyCode: 46 });
 	assert.deepEqual(planRemoteBoundaryDeletion("deleteContentForward", "hello", 5, 5), { handled: true, keyCode: 46 });
+});
+
+test("maps mobile IME action commands to remote Enter without inserting a local newline", () => {
+	assert.deepEqual(planRemoteMobileBeforeInput("insertParagraph", "hello", 5, 5), {
+		handled: true,
+		keyCode: 13,
+		clearMirror: true,
+	});
+	assert.deepEqual(planRemoteMobileBeforeInput("insertLineBreak", "", 0, 0), {
+		handled: true,
+		keyCode: 13,
+		clearMirror: true,
+	});
+});
+
+test("keeps ordinary mobile text and boundary deletion behavior unchanged", () => {
+	assert.deepEqual(planRemoteMobileBeforeInput("insertText", "hello", 5, 5), { handled: false });
+	assert.deepEqual(planRemoteMobileBeforeInput("deleteContentBackward", "", 0, 0), { handled: true, keyCode: 8 });
 });

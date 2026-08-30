@@ -23,6 +23,8 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
 import android.webkit.SslErrorHandler;
@@ -38,6 +40,7 @@ import android.webkit.JavascriptInterface;
 import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
+import java.util.Locale;
 
 public final class MainActivity extends Activity {
     private static final String START_URL = "https://supportgenesis.ru/";
@@ -50,22 +53,21 @@ public final class MainActivity extends Activity {
         """;
     private WebView webView;
     private ValueCallback<Uri[]> pendingFileChooser;
-	private boolean remoteSessionActive;
+    private boolean remoteSessionActive;
+    private OnBackInvokedCallback backInvokedCallback;
 
     @Override
     @SuppressLint("SetJavaScriptEnabled")
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().setStatusBarColor(Color.WHITE);
-        getWindow().setNavigationBarColor(Color.WHITE);
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        applySoftInputMode();
 
         webView = new WebView(this);
         webView.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         webView.setBackgroundColor(Color.rgb(10, 13, 18));
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         setContentView(webView);
+        registerBackNavigation();
         applySystemBars();
 
         WebSettings settings = webView.getSettings();
@@ -73,8 +75,6 @@ public final class MainActivity extends Activity {
         settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(true);
-        settings.setAllowFileAccessFromFileURLs(false);
-        settings.setAllowUniversalAccessFromFileURLs(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setSupportMultipleWindows(true);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
@@ -85,8 +85,8 @@ public final class MainActivity extends Activity {
         settings.setTextZoom(100);
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " RemoteIt-Android/1.0.22");
-		webView.addJavascriptInterface(new RemoteItAndroidBridge(), "RemoteItAndroid");
+        settings.setUserAgentString(settings.getUserAgentString() + " RemoteIt-Android/1.0.23");
+        webView.addJavascriptInterface(new RemoteItAndroidBridge(), "RemoteItAndroid");
 
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
@@ -158,6 +158,7 @@ public final class MainActivity extends Activity {
 		public void setRemoteSessionActive(boolean active) {
 			runOnUiThread(() -> {
 				remoteSessionActive = active;
+				applySoftInputMode();
 				applySystemBars();
 				if (active && webView != null) {
 					webView.postDelayed(MainActivity.this::applySystemBars, 120);
@@ -170,6 +171,7 @@ public final class MainActivity extends Activity {
 		public void requestImmersiveFullscreen() {
 			runOnUiThread(() -> {
 				remoteSessionActive = true;
+				applySoftInputMode();
 				applySystemBars();
 				if (webView != null) webView.postDelayed(MainActivity.this::applySystemBars, 180);
 			});
@@ -186,6 +188,38 @@ public final class MainActivity extends Activity {
 		}
 	}
 
+	@SuppressWarnings("deprecation")
+	private void applySoftInputMode() {
+		// The remote canvas is a coordinate surface. Resizing the WebView when the
+		// IME appears changes both the fit scale and the pointer transform halfway
+		// through a gesture, which looks like an unexpected zoom/cursor jump. Keep
+		// the surface stable during a remote session and let the keyboard overlay it;
+		// regular application forms still use Android's normal resize behaviour.
+		getWindow().setSoftInputMode(remoteSessionActive
+			? WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+			: WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+	}
+
+	private void registerBackNavigation() {
+		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+			return;
+		}
+		backInvokedCallback = this::navigateBack;
+		getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+			OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+			backInvokedCallback
+		);
+	}
+
+	private void navigateBack() {
+		if (webView != null && webView.canGoBack()) {
+			webView.goBack();
+			return;
+		}
+		finish();
+	}
+
+	@SuppressWarnings("deprecation")
 	private void applySystemBars() {
 		boolean immersive = remoteSessionActive && getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -213,6 +247,7 @@ public final class MainActivity extends Activity {
 	@Override
 	public void onConfigurationChanged(Configuration newConfig) {
 		super.onConfigurationChanged(newConfig);
+		applySoftInputMode();
 		applySystemBars();
 		if (webView != null) {
 			webView.requestLayout();
@@ -239,6 +274,7 @@ public final class MainActivity extends Activity {
 	@Override
 	protected void onResume() {
 		super.onResume();
+		applySoftInputMode();
 		applySystemBars();
 	}
 
@@ -308,12 +344,12 @@ public final class MainActivity extends Activity {
         if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) {
             return false;
         }
-        String host = uri.getHost().toLowerCase();
+        String host = uri.getHost().toLowerCase(Locale.ROOT);
         return host.equals("supportgenesis.ru") || host.equals("www.supportgenesis.ru");
     }
 
     private void showOfflinePage() {
-        Bitmap logo = BitmapFactory.decodeResource(getResources(), R.drawable.app_icon);
+        Bitmap logo = BitmapFactory.decodeResource(getResources(), R.drawable.remoteit_offline_logo);
         ByteArrayOutputStream stream = new ByteArrayOutputStream();
         logo.compress(Bitmap.CompressFormat.PNG, 100, stream);
         String html = OFFLINE_HTML.replace("REMOTEIT_ICON", Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP));
@@ -327,16 +363,18 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+	@SuppressLint("GestureBackNavigation")
+	@SuppressWarnings("deprecation")
     public void onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+		navigateBack();
     }
 
     @Override
     protected void onDestroy() {
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && backInvokedCallback != null) {
+			getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backInvokedCallback);
+			backInvokedCallback = null;
+		}
         if (pendingFileChooser != null) {
             pendingFileChooser.onReceiveValue(null);
             pendingFileChooser = null;

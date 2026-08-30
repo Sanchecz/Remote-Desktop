@@ -12,6 +12,7 @@ work/keys/
 work/
 outputs/
 mobile/android/.gradle/
+mobile/android/build/
 mobile/android/app/build/
 *.jks
 *.keystore

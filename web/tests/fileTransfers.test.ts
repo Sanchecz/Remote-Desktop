@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { abortableDelay, fileTransferProgress, isAbortError, uploadTransferChunk, validateTransferCheckpoint } from "../src/fileTransfers.ts";
+import { abortableDelay, browserTransferChunkLength, fileTransferProgress, isAbortError, uploadTransferChunk, validateTransferCheckpoint } from "../src/fileTransfers.ts";
 
 const nativeXMLHttpRequest = globalThis.XMLHttpRequest;
 
@@ -62,11 +62,46 @@ describe("abortable transfer waits", () => {
 });
 
 describe("resumable browser uploads", () => {
+	it("commits a fast first checkpoint and uses full-size steady-state chunks", () => {
+		const MiB = 1024 * 1024;
+		assert.equal(browserTransferChunkLength(0, 200 * MiB), 8 * MiB);
+		assert.equal(browserTransferChunkLength(8 * MiB, 200 * MiB), 64 * MiB);
+		assert.equal(browserTransferChunkLength(72 * MiB, 100 * MiB), 28 * MiB);
+		assert.equal(browserTransferChunkLength(0, 3 * MiB), 3 * MiB);
+		assert.equal(browserTransferChunkLength(100, 100), 0);
+		assert.throws(() => browserTransferChunkLength(-1, 100), /контрольная точка/i);
+		assert.throws(() => browserTransferChunkLength(101, 100), /контрольная точка/i);
+	});
+
+	it("covers an exact 10 GiB upload without gaps, overlap or unsafe arithmetic", () => {
+		const GiB = 1024 * 1024 * 1024;
+		const total = 10 * GiB;
+		let offset = 0;
+		let chunks = 0;
+		while (offset < total) {
+			const length = browserTransferChunkLength(offset, total);
+			assert.ok(length > 0 && length <= 64 * 1024 * 1024);
+			const next = offset + length;
+			assert.ok(Number.isSafeInteger(next));
+			validateTransferCheckpoint({ received: next, size: total }, offset, length, total);
+			offset = next;
+			chunks += 1;
+		}
+		assert.equal(offset, total);
+		assert.equal(chunks, 161);
+	});
+
 	it("accepts only the exact committed chunk boundary", () => {
 		assert.deepEqual(validateTransferCheckpoint({ received: 68, size: 100 }, 4, 64, 100), { received: 68, size: 100 });
 		assert.throws(() => validateTransferCheckpoint({ received: 67, size: 100 }, 4, 64, 100), /контрольная точка/i);
 		assert.throws(() => validateTransferCheckpoint({ received: 101, size: 100 }, 68, 32, 100), /контрольная точка/i);
 		assert.throws(() => validateTransferCheckpoint({ received: 68, size: 99 }, 4, 64, 100), /контрольная точка/i);
+		assert.throws(() => validateTransferCheckpoint(
+			{ received: Number.MAX_SAFE_INTEGER, size: Number.MAX_SAFE_INTEGER },
+			Number.MAX_SAFE_INTEGER - 1,
+			2,
+			Number.MAX_SAFE_INTEGER
+		), /контрольная точка/i);
 	});
 
   it("reports progress within a chunk and validates the checkpoint", async () => {

@@ -2,18 +2,39 @@ export type RemoteCamera = { zoom: number; panX: number; panY: number };
 export type Point = { x: number; y: number };
 export type Rect = { left: number; top: number; width: number; height: number };
 export type RemoteTouchGestureMode = "pending" | "zoom" | "scroll";
+export type RemotePointerSample = { x: number; y: number; time?: number };
+export type RemoteTrackpadPendingMotion = Point | null;
+export type RemotePointerTapAction = { action: "down" | "up"; button: "left" | "right" };
+
+// A tap is one complete button transition. Sending duplicate downs before the
+// release leaves some Windows applications in a drag/double-click state and
+// makes a phone tap appear to land on the wrong control.
+export function remotePointerTapActions(button: "left" | "right"): RemotePointerTapAction[] {
+	return [
+		{ action: "down", button },
+		{ action: "up", button },
+	];
+}
 
 // Replacing an <img> source temporarily clears naturalWidth/naturalHeight in
 // several mobile browsers. Keep using the last fully decoded frame while that
 // happens; falling back straight to the rendered phone rectangle would move a
 // 1080p/2K cursor into CSS-pixel space for one paint and then move it back.
 export function authoritativeRemoteFrameSize(natural: Point, lastDecoded: Point, status: Point, rendered: Point): Point {
-	const axis = (naturalLength: number, decodedLength: number, statusLength: number, renderedLength: number) =>
-		Math.max(1, naturalLength || decodedLength || statusLength || Math.round(renderedLength));
-	return {
-		x: axis(natural.x, lastDecoded.x, status.x, rendered.x),
-		y: axis(natural.y, lastDecoded.y, status.y, rendered.y),
-	};
+	// Width and height are one coordinate-space identity. During an image source
+	// swap WebKit can expose only one new natural dimension for a paint. Picking
+	// each axis independently would then manufacture a geometry which never
+	// existed (for example 2560x1504 from a 2560x1440 frame and the previous
+	// 2256x1504 frame). A pointer packet produced in that transient basis appears
+	// to teleport when the complete image becomes available. Select the first
+	// complete pair instead, keeping the previous decoded frame authoritative
+	// until both dimensions of the new frame are known.
+	for (const candidate of [natural, lastDecoded, status, rendered]) {
+		if (Number.isFinite(candidate.x) && candidate.x > 0 && Number.isFinite(candidate.y) && candidate.y > 0) {
+			return { x: Math.max(1, Math.round(candidate.x)), y: Math.max(1, Math.round(candidate.y)) };
+		}
+	}
+	return { x: 1, y: 1 };
 }
 
 export function classifyRemoteTouchGesture(mode: RemoteTouchGestureMode, trackpad: boolean, scaleChange: number, midpointTravel: number): RemoteTouchGestureMode {
@@ -29,6 +50,14 @@ export function classifyRemoteTouchGesture(mode: RemoteTouchGestureMode, trackpa
 
 export function isRemoteTwoFingerTap(mode: RemoteTouchGestureMode, trackpad: boolean, cancelled: boolean, elapsedMillis: number, midpointTravel: number): boolean {
 	return trackpad && !cancelled && mode === "pending" && elapsedMillis < 420 && midpointTravel < 12;
+}
+
+// A pinch can finish between the event which schedules the camera update and
+// the browser paint which applies the transformed image rectangle. Keep touch
+// clicks suppressed until every finger is up and the pinch itself is inactive;
+// the caller then waits for the committed paint before clearing suppression.
+export function canReleaseRemoteTouchSuppression(activeTouchCount: number, pinchActive: boolean): boolean {
+	return Number.isFinite(activeTouchCount) && activeTouchCount <= 0 && !pinchActive;
 }
 
 export function pointUnderScreenCoordinate(screen: Point, viewportCenter: Point, camera: RemoteCamera): Point {
@@ -85,6 +114,55 @@ export function clampRemotePoint(point: Point, frame: Point): Point {
 	};
 }
 
+// The Agent needs integer pixels, but the local mobile cursor is rendered in
+// the browser and must retain sub-pixel progress. Quantising every touch sample
+// made slow movements on fitted 2K/4K desktops alternate between stopping and
+// jumping. Keep a stable compositor coordinate and round only the packet sent
+// through clampRemotePoint(). Three decimal places are well below a display
+// pixel at every supported zoom while avoiding noisy CSS strings.
+export function remoteCursorVisualPoint(point: Point, frame: Point): Point {
+	const clampAxis = (value: number, length: number) => {
+		const maximum = Math.max(0, (Number.isFinite(length) ? length : 1) - 1);
+		const finite = Number.isFinite(value) ? value : 0;
+		return Math.round(Math.max(0, Math.min(maximum, finite)) * 1000) / 1000;
+	};
+	return {
+		x: clampAxis(point.x, frame.x),
+		y: clampAxis(point.y, frame.y),
+	};
+}
+
+// The decoded JPEG can switch geometry (for example, a sharp 4K rest frame to
+// a lighter 2K interaction frame) one browser paint before React commits the
+// matching image-layer dimensions. Keep the local cursor in the coordinate
+// system of the layer that is actually on screen during that short boundary.
+// Without this projection a centred 2K cursor was drawn at x=1280 inside a
+// still-3840px layer and visibly jumped left until the following React commit.
+export function remoteCursorVisualPointForLayer(point: Point, coordinateFrame: Point, layerFrame: Point): Point {
+	const source = {
+		x: Math.max(1, Number.isFinite(coordinateFrame.x) ? coordinateFrame.x : 1),
+		y: Math.max(1, Number.isFinite(coordinateFrame.y) ? coordinateFrame.y : 1),
+	};
+	const target = layerFrame.x > 0 && layerFrame.y > 0 && Number.isFinite(layerFrame.x) && Number.isFinite(layerFrame.y)
+		? layerFrame
+		: source;
+	const projected = source.x === target.x && source.y === target.y
+		? point
+		: reprojectRemotePoint(point, source, target);
+	return remoteCursorVisualPoint(projected, target);
+}
+
+// A decode already in progress must be presented even when a newer compressed
+// frame arrived meanwhile. Comparing it with the latest *arrival* can starve a
+// 60 FPS stream forever whenever JPEG decoding takes longer than one producer
+// interval. Compare only with the last frame actually presented; the one-slot
+// pending queue will then immediately decode the newest waiting frame.
+export function shouldPresentDecodedRemoteFrame(candidateOrder: number, lastPresentedOrder: number): boolean {
+	return Number.isSafeInteger(candidateOrder)
+		&& Number.isSafeInteger(lastPresentedOrder)
+		&& candidateOrder > lastPresentedOrder;
+}
+
 // JPEG dimensions may change while a session stays open: the Agent uses a
 // sharper idle profile and a lower-latency interaction profile, and Windows can
 // also change monitor geometry after RDP, docking or rotation. Keep the remote
@@ -127,6 +205,133 @@ export function advanceRemoteTrackpadCursor(current: Point, delta: Point, frame:
 		x: Math.max(0, Math.min(frameWidth - 1, current.x + delta.x * frameWidth / renderedWidth * acceleration)),
 		y: Math.max(0, Math.min(frameHeight - 1, current.y + delta.y * frameHeight / renderedHeight * acceleration)),
 	};
+}
+
+// Pointer capture in mobile Chromium/WebView can emit one sample in the old
+// visual-viewport coordinate system after browser chrome or orientation moves.
+// Treat an impossible jump as a rebase and softly bound merely coalesced fast
+// samples. This prevents a single browser glitch from sending the remote cursor
+// to an edge while preserving natural acceleration for real swipes.
+export function stableRemoteTrackpadDelta(delta: Point, rendered: Point): Point {
+	const x = Number.isFinite(delta.x) ? delta.x : 0;
+	const y = Number.isFinite(delta.y) ? delta.y : 0;
+	const travel = Math.hypot(x, y);
+	if (travel === 0) return { x: 0, y: 0 };
+	// Use the shorter controller dimension. Browser chrome makes portrait and
+	// landscape viewports very asymmetric; basing the cap on the long edge let a
+	// solitary inset sample move a 2256x1504 cursor by several hundred remote
+	// pixels before the next event pulled it back.
+	const renderedExtent = Math.max(1, Math.min(rendered.x, rendered.y));
+	const impossibleTravel = Math.max(120, renderedExtent * 0.35);
+	if (travel > impossibleTravel) return { x: 0, y: 0 };
+	// A genuine fast swipe is normally represented by several coalesced pointer
+	// samples (see stableRemoteTrackpadSamples below). A single 80-100 CSS-pixel
+	// jump is therefore much more likely to be a visualViewport/pointer-capture
+	// rebase than useful motion. Keep the emergency cap deliberately below one
+	// tenth of a phone landscape canvas so one bad sample cannot throw a 2K/4K
+	// cursor hundreds of remote pixels away.
+	const boundedTravel = Math.max(28, Math.min(52, renderedExtent * 0.07));
+	if (travel <= boundedTravel) return { x, y };
+	const scale = boundedTravel / travel;
+	return { x: x * scale, y: y * scale };
+}
+
+// Chromium, WebView and Safari can batch several physical touch samples into
+// one pointermove. Filtering only the final event either discards a legitimate
+// fast swipe or accepts it as one large teleport. Preserve every coalesced
+// sample, reject only a coordinate-space rebase that is proven by a following
+// settled sample, and let the caller render/send the newest resulting cursor
+// once per browser event. A solitary fast sample is deliberately retained:
+// stabilizeRemoteTrackpadMotion can compare it with the next browser event and
+// distinguish real continued motion from the characteristic jump-return pair.
+export function stableRemoteTrackpadSamples(previous: Point, samples: RemotePointerSample[], rendered: Point, previousTime = 0): { deltas: Point[]; last: Point; lastTime: number } {
+	let last = {
+		x: Number.isFinite(previous.x) ? previous.x : 0,
+		y: Number.isFinite(previous.y) ? previous.y : 0,
+	};
+	let lastTime = Number.isFinite(previousTime) ? previousTime : 0;
+	const deltas: Point[] = [];
+	const shortExtent = Math.max(1, Math.min(rendered.x, rendered.y));
+	// A viewport rebase has a characteristic shape: the first coalesced sample
+	// suddenly moves tens of CSS pixels and the following sample resumes with a
+	// small, ordinary delta in the new coordinate space. This is common when the
+	// Android browser bar settles or a WebView changes its display inset. Merely
+	// capping that first delta still throws a 2256x1504/4K cursor by hundreds of
+	// remote pixels. Some engines expose that rebase as the only sample in the
+	// event, so an isolated first jump above the same threshold is also absorbed.
+	// A real fast swipe normally contributes continued/coalesced samples and is
+	// fully preserved; at worst an ambiguous single event pauses motion once
+	// instead of teleporting a 2K/4K cursor and then snapping it back.
+	const rebaseTravel = Math.max(42, Math.min(84, shortExtent * 0.12));
+	const settledTravel = Math.max(14, Math.min(34, shortExtent * 0.08));
+	for (let index = 0; index < samples.length; index += 1) {
+		const sample = samples[index];
+		if (!Number.isFinite(sample.x) || !Number.isFinite(sample.y)) continue;
+		const next = { x: sample.x, y: sample.y };
+		const nextTime = Number.isFinite(sample.time) ? Number(sample.time) : lastTime;
+		const rawDelta = { x: next.x - last.x, y: next.y - last.y };
+		const following = samples[index + 1];
+		const followingTravel = following && Number.isFinite(following.x) && Number.isFinite(following.y)
+			? Math.hypot(following.x - next.x, following.y - next.y)
+			: Number.POSITIVE_INFINITY;
+		const firstSampleTravel = Math.hypot(rawDelta.x, rawDelta.y);
+		if (index === 0 && firstSampleTravel > rebaseTravel && followingTravel <= settledTravel) {
+			last = next;
+			lastTime = nextTime;
+			continue;
+		}
+		const delta = stableRemoteTrackpadDelta(rawDelta, rendered);
+		last = next;
+		lastTime = nextTime;
+		if (delta.x !== 0 || delta.y !== 0) deltas.push(delta);
+	}
+	return { deltas, last, lastTime };
+}
+
+// A few Android browser/WebView combinations occasionally deliver a pair of
+// individually plausible pointer samples in different visual-viewport bases:
+// one quick jump followed one event later by an almost equal jump back. Each
+// sample is below the hard rebase threshold above, so applying the first one
+// makes the local cursor visibly teleport and then return. Hold only a rapid,
+// solitary, unusually large delta for one short event. A matching reversal is
+// discarded; sustained motion is released in order with at most one-event lag.
+// Ordinary movement and coalesced samples stay on the zero-look-ahead path.
+export function stabilizeRemoteTrackpadMotion(
+	pending: RemoteTrackpadPendingMotion,
+	deltas: Point[],
+	rendered: Point,
+	elapsedMillis: number,
+): { deltas: Point[]; pending: RemoteTrackpadPendingMotion } {
+	const output: Point[] = [];
+	let remaining = deltas.filter((delta) => Number.isFinite(delta.x) && Number.isFinite(delta.y) && (delta.x !== 0 || delta.y !== 0));
+	const shortExtent = Math.max(1, Math.min(rendered.x, rendered.y));
+	const ambiguousTravel = Math.max(24, Math.min(38, shortExtent * 0.06));
+	const rapid = !Number.isFinite(elapsedMillis) || elapsedMillis <= 0 || elapsedMillis < 48;
+
+	if (pending) {
+		if (!remaining.length) return { deltas: output, pending };
+		const current = remaining[0];
+		const pendingTravel = Math.hypot(pending.x, pending.y);
+		const currentTravel = Math.hypot(current.x, current.y);
+		const direction = pendingTravel > 0 && currentTravel > 0
+			? (pending.x * current.x + pending.y * current.y) / (pendingTravel * currentTravel)
+			: 1;
+		const residual = Math.hypot(pending.x + current.x, pending.y + current.y);
+		const reversal = rapid
+			&& direction < -0.72
+			&& residual <= Math.max(10, Math.min(pendingTravel, currentTravel) * 0.55);
+		if (reversal) remaining = remaining.slice(1);
+		else output.push(pending);
+	}
+
+	if (remaining.length === 1) {
+		const candidate = remaining[0];
+		if (rapid && Math.hypot(candidate.x, candidate.y) >= ambiguousTravel) {
+			return { deltas: output, pending: candidate };
+		}
+	}
+	output.push(...remaining);
+	return { deltas: output, pending: null };
 }
 
 // Fit the complete remote desktop inside the available canvas without ever

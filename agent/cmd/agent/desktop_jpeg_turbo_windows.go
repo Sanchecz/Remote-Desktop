@@ -14,6 +14,8 @@ import (
 	"unsafe"
 )
 
+const desktopMaximumCodecFrameBytes = 64 << 20
+
 // desktopJPEGEncoder owns one TurboJPEG compressor for the lifetime of the
 // capture surface. Reusing it avoids allocator and codec initialization cost
 // on every frame.
@@ -50,14 +52,16 @@ func (encoder *desktopJPEGEncoder) EncodeBGRA(pixels []byte, width, height, qual
 		subsampling = C.int(C.TJSAMP_422)
 	} else if chroma == desktopJPEGChroma444 {
 		// Desktop text and thin UI glyphs lose a surprising amount of detail with
-		// 4:2:0 chroma subsampling. The 15/30 FPS profiles use 4:4:4 so coloured
-		// text stays crisp; the 60 FPS profile also keeps 4:4:4 while controlling
-		// motion bandwidth through its 1920 px output profile.
+		// 4:2:0 chroma subsampling. The profiles that select 4:4:4 use this path so
+		// coloured text stays crisp; high-frame-rate profiles select 4:2:2 above.
 		subsampling = C.int(C.TJSAMP_444)
 	}
 	required := C.tjBufSize(C.int(width), C.int(height), subsampling)
 	if required == 0 {
 		return nil, errors.New("libjpeg-turbo returned an invalid buffer size")
+	}
+	if uint64(required) > desktopMaximumCodecFrameBytes {
+		return nil, errors.New("libjpeg-turbo frame buffer exceeds the codec limit")
 	}
 	if encoder.buffer == nil || encoder.capacity < required {
 		if encoder.buffer != nil {
@@ -92,7 +96,7 @@ func (encoder *desktopJPEGEncoder) EncodeBGRA(pixels []byte, width, height, qual
 		}
 		return nil, fmt.Errorf("libjpeg-turbo: %s", message)
 	}
-	if destination == nil || destination != encoder.buffer || destinationSize == 0 || uint64(destinationSize) > desktopMaximumFrameBytes {
+	if destination == nil || destination != encoder.buffer || destinationSize == 0 || uint64(destinationSize) > desktopMaximumCodecFrameBytes {
 		return nil, errors.New("libjpeg-turbo returned an invalid frame")
 	}
 	return C.GoBytes(unsafe.Pointer(destination), C.int(destinationSize)), nil

@@ -8,6 +8,7 @@ export type RemoteKeyboardEvent = {
 	ctrlKey: boolean;
 	altKey: boolean;
 	metaKey: boolean;
+	altGraphKey?: boolean;
 };
 
 export type RemoteKeyboardPlan = {
@@ -23,6 +24,12 @@ export type RemoteTextReconciliation = {
 export type RemoteBoundaryDeletion = {
 	handled: boolean;
 	keyCode?: 8 | 46;
+};
+
+export type RemoteMobileBeforeInput = {
+	handled: boolean;
+	keyCode?: 8 | 13 | 46;
+	clearMirror?: boolean;
 };
 
 // Browser `code` names describe physical keys, whereas Windows SendInput uses
@@ -101,7 +108,12 @@ export function planRemoteKeyboardInput(
 	if (action === "up" && textKeys.delete(physicalKey)) return { handled: true };
 
 	const printable = isPrintableRemoteKey(event.key);
-	const commandModified = event.ctrlKey || event.altKey || event.metaKey;
+	// Browsers expose AltGr as Ctrl+Alt on Windows. Treating the resulting
+	// printable key as a physical shortcut makes symbols such as @, € and |
+	// depend on the remote machine using the same keyboard layout. The resolved
+	// Unicode character is authoritative when AltGraph is active; real Ctrl/Alt
+	// shortcuts keep the physical-key path.
+	const commandModified = event.metaKey || (!event.altGraphKey && (event.ctrlKey || event.altKey));
 	if (action === "down" && printable && !commandModified) {
 		textKeys.add(physicalKey);
 		return { handled: true, input: { type: "text", text: event.key } };
@@ -157,4 +169,20 @@ export function planRemoteBoundaryDeletion(
 	if (inputType.endsWith("Backward") && start === 0) return { handled: true, keyCode: 8 };
 	if (inputType.endsWith("Forward") && end === value.length) return { handled: true, keyCode: 46 };
 	return { handled: false };
+}
+
+// Mobile keyboards are not required to emit `keydown` for their action key.
+// Gboard, Samsung Keyboard and iOS Safari can expose Enter only through
+// `beforeinput` as an insertion command. Keep that path beside boundary
+// deletion so remote editing remains immediate across WebView/browser engines.
+export function planRemoteMobileBeforeInput(
+	inputType: string,
+	value: string,
+	selectionStart: number | null,
+	selectionEnd: number | null,
+): RemoteMobileBeforeInput {
+	if (inputType === "insertParagraph" || inputType === "insertLineBreak") {
+		return { handled: true, keyCode: 13, clearMirror: true };
+	}
+	return planRemoteBoundaryDeletion(inputType, value, selectionStart, selectionEnd);
 }

@@ -1,4 +1,4 @@
-import { CSSProperties, DragEvent as ReactDragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, DragEvent as ReactDragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -60,12 +60,14 @@ import {
 	Power,
   X
 } from "lucide-react";
-import { chunkRemoteText, planRemoteBoundaryDeletion, planRemoteKeyboardInput, planRemoteTextReconciliation } from "./remoteKeyboard";
-import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remotePointFromClient, reprojectRemotePoint } from "./remoteCamera";
+import { chunkRemoteText, planRemoteBoundaryDeletion, planRemoteKeyboardInput, planRemoteMobileBeforeInput, planRemoteTextReconciliation } from "./remoteKeyboard";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, canReleaseRemoteTouchSuppression, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remoteCursorVisualPointForLayer, remotePointerTapActions, remotePointFromClient, reprojectRemotePoint, shouldPresentDecodedRemoteFrame, stabilizeRemoteTrackpadMotion, stableRemoteTrackpadSamples } from "./remoteCamera";
+import { LatestPointerCadence, remotePointerCadenceMillis } from "./remotePointerCadence";
+import { bindRemoteInputCoordinates, remoteInputAckID, remoteInputBatchID, remoteInputClientID, restoreRemoteInputBatch, shouldRetryRemoteInputDelivery, takePendingRemoteInputBatches, type PendingRemoteInputBatch } from "./remoteInputDelivery";
 import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
-import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, resolveRemoteViewport, shouldUseCompactRemoteControls, type RemoteViewport } from "./remoteViewport";
-import { isRecoverableRemoteStatusFailure, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
-import { abortableDelay, fileTransferProgress, isAbortError, uploadTransferChunk, validateTransferCheckpoint } from "./fileTransfers";
+import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, remoteViewportWithStableOrientation, resolveRemoteLayoutLandscape, resolveRemoteViewport, shouldApplyRemoteOrientationTransition, shouldRebaseRemotePointerViewport, shouldUseCompactRemoteControls, shouldUseRemoteTrackpad, type RemoteViewport } from "./remoteViewport";
+import { isCurrentRemoteFallbackGeneration, isRecoverableRemoteStatusFailure, isRemoteFrameStreamStalled, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
+import { abortableDelay, browserTransferChunkLength, fileTransferProgress, isAbortError, uploadTransferChunk, validateTransferCheckpoint } from "./fileTransfers";
 
 type User = {
   id: string;
@@ -223,7 +225,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.22";
+const LATEST_AGENT_VERSION = "1.0.23";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1131,9 +1133,10 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
   useEffect(() => {
     if (!supported) return;
 		handedOff.current = false;
-    let disposed = false; let statusTimer = 0; let frameTimer = 0; let currentURL = ""; let createdId = ""; let lastFrameAt = ""; let frameSocket: WebSocket | null = null; let fallbackStarted = false;
+    let disposed = false; let statusTimer = 0; let frameTimer = 0; let streamWatchdogTimer = 0; let currentURL = ""; let createdId = ""; let lastFrameAt = ""; let frameSocket: WebSocket | null = null; let fallbackActive = false; let fallbackGeneration = 0; let lastFrameReceivedAt = performance.now();
 		const presentPreview = (frame: Blob) => {
 			if (disposed || frame.size < 100) return;
+			lastFrameReceivedAt = performance.now();
 			const next = URL.createObjectURL(frame);
 			if (currentURL) URL.revokeObjectURL(currentURL);
 			currentURL = next;
@@ -1151,8 +1154,8 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
           } catch (reason) { if (!disposed) setError(reason instanceof Error ? reason.message : "Предпросмотр временно недоступен"); }
           if (!disposed) statusTimer = window.setTimeout(() => void refreshStatus(), 900);
         };
-				const refreshFrame = async () => {
-					if (disposed) return;
+				const refreshFrame = async (generation: number) => {
+					if (disposed || !fallbackActive || generation !== fallbackGeneration) return;
 					try {
             const after = lastFrameAt ? `&after=${encodeURIComponent(lastFrameAt)}` : "";
             const response = await fetch(`/api/desktop-sessions/${created.id}/frame?t=${Date.now()}${after}`, { credentials: "same-origin", cache: "no-store" });
@@ -1163,20 +1166,27 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
 							presentPreview(frame);
 						}
 					} catch (reason) { if (!disposed) setError(reason instanceof Error ? reason.message : "Предпросмотр временно недоступен"); }
-					if (!disposed) frameTimer = window.setTimeout(() => void refreshFrame(), 25);
+					if (!disposed && fallbackActive && generation === fallbackGeneration) frameTimer = window.setTimeout(() => void refreshFrame(generation), 5);
 				};
 				const startFallback = () => {
-					if (disposed || fallbackStarted) return;
-					fallbackStarted = true;
-					void refreshFrame();
+					if (disposed || fallbackActive) return;
+					fallbackActive = true;
+					const generation = ++fallbackGeneration;
+					void refreshFrame(generation);
+				};
+				const stopFallback = () => {
+					fallbackActive = false;
+					fallbackGeneration += 1;
+					window.clearTimeout(frameTimer);
+					frameTimer = 0;
 				};
 				void refreshStatus();
 				const streamProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 				frameSocket = new WebSocket(`${streamProtocol}//${window.location.host}/api/desktop-sessions/${created.id}/stream`);
 				frameSocket.binaryType = "blob";
 				frameSocket.onmessage = (event) => {
-					if (event.data instanceof Blob) presentPreview(event.data);
-					else if (event.data instanceof ArrayBuffer) presentPreview(new Blob([event.data], { type: "image/jpeg" }));
+					if (event.data instanceof Blob) { stopFallback(); presentPreview(event.data); }
+					else if (event.data instanceof ArrayBuffer) { stopFallback(); presentPreview(new Blob([event.data], { type: "image/jpeg" })); }
 				};
 				frameSocket.onerror = () => frameSocket?.close();
 				frameSocket.onclose = () => startFallback();
@@ -1186,14 +1196,43 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
 						startFallback();
 					}
 				}, 2_500);
+				// OPEN only confirms a WebSocket handshake. A proxy, VPN transition or
+				// suspended Android browser can leave an open stream that never delivers
+				// video. Start the HTTP long-poll safety lane whenever no fresh frame has
+				// arrived; a real WebSocket frame immediately stops it again.
+				const watchStream = () => {
+					if (disposed) return;
+					if (isRemoteFrameStreamStalled(lastFrameReceivedAt, performance.now(), 900)) startFallback();
+					streamWatchdogTimer = window.setTimeout(watchStream, 450);
+				};
+				streamWatchdogTimer = window.setTimeout(watchStream, 450);
       } catch (reason) { if (!disposed) setError(reason instanceof Error ? reason.message : "Не удалось запустить предпросмотр"); }
     };
     void start();
-    return () => { disposed = true; frameSocket?.close(); window.clearTimeout(statusTimer); window.clearTimeout(frameTimer); if (currentURL) URL.revokeObjectURL(currentURL); if (createdId && !handedOff.current) void fetch(`/api/desktop-sessions/${createdId}`, { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": csrf } }); setSessionId(""); setFrameURL(""); setConnected(false); };
+    return () => { disposed = true; frameSocket?.close(); window.clearTimeout(statusTimer); window.clearTimeout(frameTimer); window.clearTimeout(streamWatchdogTimer); if (currentURL) URL.revokeObjectURL(currentURL); if (createdId && !handedOff.current) void fetch(`/api/desktop-sessions/${createdId}`, { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": csrf } }); setSessionId(""); setFrameURL(""); setConnected(false); };
   }, [device.id, csrf, supported]);
 
   const unavailableReason = !device.online ? "Агент не в сети" : !device.os.toLowerCase().includes("windows") ? "Доступно для Windows" : !desktopCompatible ? `Обновите Agent ${device.agentVersion || "старой версии"} до 0.6.0` : "Предпросмотр недоступен";
   return <section className="remote-preview-card"><header><div><span className="eyebrow">УДАЛЁННЫЙ ДОСТУП</span><strong><ScreenShare size={18} /> Живой экран</strong><small>{supported ? frameURL ? "Предпросмотр онлайн · управление выключено" : connected ? "Agent подключён · ожидаем первый кадр" : "Подключаем защищённый предпросмотр…" : unavailableReason}</small></div><span className={`preview-live ${connected && !!frameURL ? "active" : ""}`}><span />{connected && frameURL ? "LIVE" : "WAIT"}</span></header><button type="button" className="remote-preview-screen" disabled={!supported || !sessionId || !frameURL} onClick={() => { handedOff.current = true; onConnect(sessionId); }}>{frameURL ? <img ref={previewImageRef} src={frameURL} draggable={false} onError={() => { setFrameURL(""); setError("Получен повреждённый кадр — ожидаем следующий"); }} /> : <span><Monitor size={38} /><strong>{error || (supported ? "Ожидаем изображение от Agent" : unavailableReason)}</strong><small>{desktopCompatible ? "Диагностика обновляется автоматически" : "Скачайте новый агент из раздела токенов"}</small></span>}<b><MousePointer2 size={17} /> Открыть подключение</b></button><footer><ShieldCheck size={14} /> Пассивный предпросмотр журналируется, но не показывает всплывающее уведомление. Оно появится при первом управляющем действии.</footer></section>;
+}
+
+function capturePointerSafely(target: Element, pointerId: number) {
+	try {
+		target.setPointerCapture(pointerId);
+	} catch {
+		// Pointer capture is an optimisation, not a prerequisite. Older Android
+		// WebViews and Safari can reject it while rotating, zooming or transferring
+		// capture between two fingers; the gesture must continue instead of throwing.
+	}
+}
+
+function releasePointerSafely(target: Element, pointerId: number) {
+	try {
+		if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+	} catch {
+		// A browser may already have released capture after pointercancel or a visual
+		// viewport change. Local gesture ownership is cleared by the caller.
+	}
 }
 
 function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embedded = false }: { device: Device; csrf: string; initialSessionId?: string; onClose: () => void; embedded?: boolean }) {
@@ -1246,21 +1285,30 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const cameraRef = useRef(camera);
 	const pendingCameraRef = useRef(camera);
 	const cameraAnimationFrame = useRef(0);
+	const pinchSuppressionAnimationFrame = useRef(0);
 	const viewportRef = useRef<HTMLDivElement>(null);
 	const workspaceRef = useRef<HTMLElement>(null);
 	const mobileKeyboardRef = useRef<HTMLInputElement>(null);
 	const mobileTextSyncedRef = useRef("");
 	const mobileBoundaryDeleteAt = useRef(0);
+	const mobileEnterAt = useRef(0);
 	const keyboardOpenRef = useRef(false);
 	const wheelRepeat = useRef({ delay: 0, interval: 0, pointerId: -1 });
 	const sasFeedbackTimer = useRef(0);
 	const sasPendingInputID = useRef(0);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
-  const lastPointerSent = useRef(0);
+	const pointerMoveCadence = useRef(new LatestPointerCadence<{ event: Record<string, unknown>; activatesControl: boolean }>(8));
+	const pointerMoveTimer = useRef(0);
+	const pointerViewportRevision = useRef(0);
+	const trackpadGestureViewportRevision = useRef(0);
+	const directGestureViewportRevision = useRef(0);
+	const pinchGestureViewportRevision = useRef(0);
   const trackpadCursor = useRef({ x: 0, y: 0, frameWidth: 0, frameHeight: 0, ready: false });
-	const trackpadGesture = useRef({ pointerId: -1, lastX: 0, lastY: 0, distance: 0, longPress: false, dragging: false, secondTap: false, timer: 0 });
+	const trackpadGesture = useRef({ pointerId: -1, lastX: 0, lastY: 0, lastTime: 0, distance: 0, longPress: false, dragging: false, secondTap: false, suppressTap: false, timer: 0, pendingX: 0, pendingY: 0, pendingTimer: 0 });
 	const lastTrackpadTap = useRef({ at: 0, clientX: 0, clientY: 0 });
-	const directGesture = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number; coordinateWidth: number; coordinateHeight: number; moved: boolean; leftDown: boolean; longPress: boolean; timer: number }>({ pointerId: -1, startX: 0, startY: 0, x: 0, y: 0, coordinateWidth: 1, coordinateHeight: 1, moved: false, leftDown: false, longPress: false, timer: 0 });
+	const directGesture = useRef<{ pointerId: number; startX: number; startY: number; startRemoteX: number; startRemoteY: number; x: number; y: number; coordinateWidth: number; coordinateHeight: number; moved: boolean; leftDown: boolean; longPress: boolean; suppressTap: boolean; timer: number }>({ pointerId: -1, startX: 0, startY: 0, startRemoteX: 0, startRemoteY: 0, x: 0, y: 0, coordinateWidth: 1, coordinateHeight: 1, moved: false, leftDown: false, longPress: false, suppressTap: false, timer: 0 });
+	const heldMouseButton = useRef<"left" | "middle" | "right" | null>(null);
+	const lastMousePosition = useRef<{ x: number; y: number; coordinateWidth: number; coordinateHeight: number } | null>(null);
 	const controlEnabledRef = useRef(false);
 	const controlActivationRef = useRef<Promise<void> | null>(null);
 	const frameArrivalTimes = useRef<number[]>([]);
@@ -1271,26 +1319,38 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const inputFlushTimer = useRef(0);
 	const inputInFlight = useRef(false);
 	const inputAbortController = useRef<AbortController | null>(null);
+	const inputClientPrefix = useRef(`viewer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+	const inputClientSequence = useRef(0);
+	const inputBatchSequence = useRef(0);
+	const inputPendingBatches = useRef(new Map<string, PendingRemoteInputBatch<WebSocket>>());
+	const activeInputSessionID = useRef("");
 	const flushInputQueueRef = useRef<() => void>(() => undefined);
+	// Orientation, browser chrome and visibility changes can cancel native pointer
+	// capture without delivering pointerup. Keep one stable escape hatch which
+	// always calls the latest input closure and releases any remote drag before
+	// local gesture coordinates are rebased.
+	const releaseActivePointerRef = useRef<() => void>(() => undefined);
 	const textKeyboardKeys = useRef(new Set<string>());
 	const frameImageRef = useRef<HTMLImageElement>(null);
 	const frameSocketRef = useRef<WebSocket | null>(null);
-	const mobileTrackpadMode = coarsePointerClient && pointerMode === "trackpad";
+	const mobileTrackpadMode = shouldUseRemoteTrackpad(compactRemoteClient, pointerMode);
 	const localCursorVisible = mobileTrackpadMode;
 	// Remote cursor pixels are disabled for every viewer. Desktop already has a
 	// native cursor and mobile trackpad mode draws an immediate local overlay;
 	// encoding a second cursor in JPEG created the duplicate/lagging pointer.
 	const encodedRemoteCursorVisible = false;
 	// Pointer input has its own WebSocket and must not be tied to the video FPS.
-	// 8 ms keeps both a desktop mouse and a mobile trackpad close to a 125 Hz
-	// input cadence. Pointer moves use a dedicated socket and latest-only
-	// coalescing, so this lowers perceived latency without building a queue.
-	const pointerSendInterval = 8;
+	// The cadence below sends an immediate leading sample and one newest trailing
+	// sample, so 120/240 Hz phones stay responsive without leaving the last local
+	// cursor position unsent or building a stale input backlog.
 
 	useEffect(() => { cameraRef.current = camera; pendingCameraRef.current = camera; }, [camera]);
 	useEffect(() => { keyboardOpenRef.current = keyboardOpen; }, [keyboardOpen]);
 
-	useEffect(() => () => window.cancelAnimationFrame(cameraAnimationFrame.current), []);
+	useEffect(() => () => {
+		window.cancelAnimationFrame(cameraAnimationFrame.current);
+		window.cancelAnimationFrame(pinchSuppressionAnimationFrame.current);
+	}, []);
 	useEffect(() => () => {
 		window.clearTimeout(sasFeedbackTimer.current);
 		sasPendingInputID.current = 0;
@@ -1321,12 +1381,21 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			documentHeight: document.documentElement.clientHeight,
 			visualViewport: window.visualViewport,
 		});
+		const readLayoutLandscape = () => resolveRemoteLayoutLandscape({
+			innerWidth: window.innerWidth,
+			innerHeight: window.innerHeight,
+			documentWidth: document.documentElement.clientWidth,
+			documentHeight: document.documentElement.clientHeight,
+		});
 		const initialVisible = readVisibleViewport();
 		let lastLandscape = initialVisible.landscape;
-		const applyOrientationState = (visible: RemoteViewport, force = false) => {
-			if (!force && visible.landscape === lastLandscape) return;
+		let lastPointerViewport = initialVisible;
+		let lastPointerSurface = { width: viewport.clientWidth, height: viewport.clientHeight };
+		const applyOrientationState = (visible: RemoteViewport, force = false, layoutLandscape: boolean | null = null) => {
+			if (!shouldApplyRemoteOrientationTransition(lastLandscape, visible.landscape, keyboardOpenRef.current, force, layoutLandscape)) return;
 			lastLandscape = visible.landscape;
 			if (!compactRemoteClient) return;
+			releaseActivePointerRef.current();
 			// Browsers do not agree on whether rotating an already-open page emits
 			// orientationchange, resize, both, or only visualViewport.resize. Drive
 			// the compact controller from the measured rectangle so every engine
@@ -1344,14 +1413,27 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			setCamera(reset);
 			activeTouches.current.clear();
 			pinchGesture.current.active = false;
+			window.cancelAnimationFrame(pinchSuppressionAnimationFrame.current);
+			pinchSuppressionAnimationFrame.current = 0;
+			pinchGesture.current.suppress = false;
 			viewport.scrollLeft = 0;
 			viewport.scrollTop = 0;
 		};
 		const update = () => {
-			const visible = readVisibleViewport();
-			applyOrientationState(visible);
-			setRemoteViewport((current) => remoteViewportChanged(current, visible) ? visible : current);
+			const measured = readVisibleViewport();
+			const layoutLandscape = readLayoutLandscape();
+			applyOrientationState(measured, false, layoutLandscape);
+			// Keep CSS orientation tied to the physical device while the IME merely
+			// shortens the visible rectangle. Otherwise the phone receives landscape
+			// controls in the middle of typing even though it is still upright.
+			const visible = remoteViewportWithStableOrientation(measured, lastLandscape, keyboardOpenRef.current, layoutLandscape);
+			setRemoteViewport((current) => remoteViewportChanged(current, visible) || current.landscape !== visible.landscape ? visible : current);
 			const next = { width: viewport.clientWidth, height: viewport.clientHeight };
+			if (shouldRebaseRemotePointerViewport(lastPointerViewport, measured, lastPointerSurface, next, keyboardOpenRef.current)) {
+				pointerViewportRevision.current += 1;
+			}
+			lastPointerViewport = measured;
+			lastPointerSurface = next;
 			setViewportSize((current) => {
 				// Android resizes the WebView while its IME is visible. Keep the
 				// remote canvas geometry stable during that temporary resize so opening
@@ -1397,7 +1479,13 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			window.visualViewport?.removeEventListener("scroll", update);
 			for (const id of delayedUpdates) window.clearTimeout(id);
 		};
-	}, [frameURL, compactRemoteClient]);
+	// Frame URLs can change 15-60 times per second. Re-subscribing the
+	// ResizeObserver and every viewport/orientation listener for each decoded
+	// JPEG caused Android WebViews to lose gesture state and intermittently
+	// re-apply stale viewport measurements. The listener lifecycle depends only
+	// on the compact controller mode; decoded frame geometry is tracked by the
+	// image callbacks and refs independently.
+	}, [compactRemoteClient]);
 
 	useEffect(() => {
 		const doc = document as Document & { webkitFullscreenElement?: Element | null };
@@ -1436,6 +1524,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		setCamera(cameraRef.current);
 		activeTouches.current.clear();
 		pinchGesture.current.active = false;
+		window.cancelAnimationFrame(pinchSuppressionAnimationFrame.current);
+		pinchSuppressionAnimationFrame.current = 0;
+		pinchGesture.current.suppress = false;
 	}, [screenScale, viewportSize.width > viewportSize.height]);
 
 	useEffect(() => {
@@ -1444,13 +1535,16 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		positionLocalCursor(trackpadCursor.current, { width: status.frameWidth, height: status.frameHeight });
 	}, [status?.frameWidth, status?.frameHeight]);
 
-	useEffect(() => {
+	useLayoutEffect(() => {
 		if (!mobileTrackpadMode) return;
 		const image = frameImageRef.current;
 		if (!image) return;
-		const size = frameSize(image);
-		ensureTrackpadCursor(image);
-		window.requestAnimationFrame(() => positionLocalCursor(trackpadCursor.current, size));
+		const renderedRect = image.getBoundingClientRect();
+		// Layout effects run before paint. ensureTrackpadCursor writes the compositor
+		// transform synchronously, so scheduling a second requestAnimationFrame here
+		// only exposed the old cursor position for one paint after a 1080p/2K/4K
+		// profile change or phone rotation.
+		ensureTrackpadCursor(image, renderedRect);
 	// Do not depend on frameURL: assigning a new image URL briefly clears the
 	// intrinsic dimensions in mobile browsers. onLoad updates renderedFrameSize
 	// after decode and is the safe point at which to reproject the cursor.
@@ -1485,6 +1579,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
   useEffect(() => {
     if (!sessionId) return;
+		activeInputSessionID.current = sessionId;
     let disposed = false;
     let currentURL = "";
     let lastFrameAt = "";
@@ -1496,14 +1591,20 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		let inputSocket: WebSocket | null = null;
 		let inputReconnectTimer = 0;
 		let inputReconnectAttempt = 0;
+		let inputAckWatchdogTimer = 0;
 		const frameLaneClosed = [true, true, true, true, true, true];
 		let fallbackActive = false;
+		let fallbackGeneration = 0;
 		let consecutiveStatusFailures = 0;
 		let lastFrameStatsAt = 0;
+		let lastFrameReceivedAt = performance.now();
+		let streamWatchdogTimer = 0;
 		let lastPresentedSequence = -1;
 		let pendingPresentation: { frame: Blob; order: number } | null = null;
 		let presentationRunning = false;
 		let presentationOrder = 0;
+		let lastDecodedPresentationOrder = 0;
+		let frameArrivalHead = 0;
 		const decoderImage = new Image();
 		decoderImage.decoding = "async";
 		frameArrivalTimes.current = [];
@@ -1562,23 +1663,34 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 						try { await loaded; } catch { URL.revokeObjectURL(nextURL); continue; }
 					}
 					if (disposed) { URL.revokeObjectURL(nextURL); break; }
-					// JPEG decode is deliberately single-flight. If several of the six
-					// transport lanes delivered newer frames while this one decoded, skip
-					// the obsolete bitmap instead of showing latency-producing history.
-					if (presentationOrder > candidate.order) {
+					// JPEG decode is deliberately single-flight. Never compare this decoded
+					// candidate with the latest *arrival*: on a sustained 60 FPS stream that
+					// can starve presentation indefinitely. Show each completed decode, then
+					// immediately consume the newest item from the one-slot pending queue.
+					if (!shouldPresentDecodedRemoteFrame(candidate.order, lastDecodedPresentationOrder)) {
 						URL.revokeObjectURL(nextURL);
 						continue;
 					}
+					lastDecodedPresentationOrder = candidate.order;
 					const previousURL = currentURL;
 					currentURL = nextURL;
 					if (frameImageRef.current) frameImageRef.current.src = nextURL;
 					else setFrameURL(nextURL);
 					if (previousURL) URL.revokeObjectURL(previousURL);
 					const now = performance.now();
-					frameArrivalTimes.current = [...frameArrivalTimes.current.filter((timestamp) => now - timestamp < 1_000), now];
+					const arrivals = frameArrivalTimes.current;
+					arrivals.push(now);
+					while (frameArrivalHead < arrivals.length && now - arrivals[frameArrivalHead] >= 1_000) frameArrivalHead += 1;
+					// Keep the hot path allocation-free while bounding storage for sessions
+					// that remain open for days. Splicing only once every few seconds is much
+					// cheaper than filter+spread for every decoded 30/60 FPS JPEG.
+					if (frameArrivalHead >= 128) {
+						arrivals.splice(0, frameArrivalHead);
+						frameArrivalHead = 0;
+					}
 					if (now - lastFrameStatsAt >= 250) {
 						lastFrameStatsAt = now;
-						setFrameFPS(frameArrivalTimes.current.length);
+						setFrameFPS(arrivals.length - frameArrivalHead);
 					}
 				}
 			} finally {
@@ -1588,17 +1700,18 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		};
     const presentFrame = (frame: Blob) => {
 			if (disposed || frame.size < 100) return;
+			lastFrameReceivedAt = performance.now();
 			pendingPresentation = { frame, order: ++presentationOrder };
 			void drainPresentationQueue();
 		};
-    const refreshFrame = async () => {
-			if (disposed || !fallbackActive) return;
+    const refreshFrame = async (generation: number) => {
+			if (disposed || !isCurrentRemoteFallbackGeneration(fallbackActive, generation, fallbackGeneration)) return;
       try {
         const after = lastFrameAt ? `&after=${encodeURIComponent(lastFrameAt)}` : "";
         const response = await fetch(`/api/desktop-sessions/${sessionId}/frame?t=${Date.now()}${after}`, { credentials: "same-origin", cache: "no-store" });
         const receivedAt = response.headers.get("X-RemoteIt-Frame-At") || "";
         const frame = await desktopFrameBlob(response);
-        if (frame) {
+				if (frame && isCurrentRemoteFallbackGeneration(fallbackActive, generation, fallbackGeneration)) {
           lastFrameAt = receivedAt || lastFrameAt;
 					presentFrame(frame);
         }
@@ -1609,16 +1722,20 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				// top of HTTP latency capped a healthy 30 FPS Agent at 24-26 displayed
 				// FPS and delayed every newly uploaded frame. Five milliseconds keeps
 				// the browser close to the producer cadence without parallel requests.
-				if (!disposed && fallbackActive) frameTimer = window.setTimeout(() => void refreshFrame(), 5);
+				if (!disposed && isCurrentRemoteFallbackGeneration(fallbackActive, generation, fallbackGeneration)) {
+					frameTimer = window.setTimeout(() => void refreshFrame(generation), 5);
+				}
       }
     };
 		const startFrameFallback = () => {
 			if (disposed || fallbackActive) return;
 			fallbackActive = true;
-			void refreshFrame();
+			const generation = ++fallbackGeneration;
+			void refreshFrame(generation);
 		};
 		const stopFrameFallback = () => {
 			fallbackActive = false;
+			fallbackGeneration += 1;
 			window.clearTimeout(frameTimer);
 			frameTimer = 0;
 		};
@@ -1639,13 +1756,21 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			// also reduces WebView garbage-collection hitches on Android.
 			presentFrame(new Blob([bytes.subarray(12)], { type: "image/jpeg" }));
 		};
-		const presentViewerPayload = (payload: unknown) => {
-			let buffer: ArrayBuffer;
+		const presentViewerPayload = (payload: unknown, isCurrent: () => boolean, onAccepted: () => void) => {
+			const accept = (buffer: ArrayBuffer) => {
+				// Safari can still expose a Blob even after binaryType was switched to
+				// arraybuffer. Its asynchronous conversion may finish after Android has
+				// resumed and replaced this lane. Never let that stale payload stop the
+				// working HTTP fallback or overwrite a frame from the current socket.
+				if (disposed || !isCurrent()) return;
+				onAccepted();
+				decodeViewerBuffer(buffer);
+			};
 			if (payload instanceof ArrayBuffer) {
-				decodeViewerBuffer(payload);
+				accept(payload);
 				return;
 			}
-			if (payload instanceof Blob) void payload.arrayBuffer().then(decodeViewerBuffer);
+			if (payload instanceof Blob) void payload.arrayBuffer().then(accept).catch(() => undefined);
 		};
 		const streamProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 		const scheduleFrameReconnect = (lane: number) => {
@@ -1675,12 +1800,30 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			socket.onopen = () => {
 				window.clearTimeout(connectTimeout);
 				connectTimeout = 0;
+				// A browser can deliver an OPEN event from a socket that was replaced
+				// after Android resumed or the network changed. Never let that stale
+				// lane disable fallback or accept frames for the new generation.
+				if (frameSockets[lane] !== socket) {
+					socket.close();
+					return;
+				}
 				frameReconnectAttempts[lane] = 0;
 				frameLaneClosed[lane] = false;
-				stopFrameFallback();
 				setError((value) => value.startsWith("Связь нестабильна") ? "" : value);
 			};
-			socket.onmessage = (event) => { presentViewerPayload(event.data); };
+			socket.onmessage = (event) => {
+				// OPEN only proves that the WebSocket handshake completed. After a
+				// Wi-Fi/VPN route change Android can expose a newly-open socket before
+				// the Agent has resumed publishing frames. Keep the working HTTP
+				// long-poll alive until the current lane actually delivers video, and
+				// reject delayed messages from a socket superseded during resume.
+				if (frameSockets[lane] !== socket) return;
+				presentViewerPayload(
+					event.data,
+					() => frameSockets[lane] === socket,
+					stopFrameFallback,
+				);
+			};
 			socket.onerror = () => socket.close();
 			socket.onclose = () => {
 				window.clearTimeout(connectTimeout);
@@ -1698,6 +1841,25 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				openInputSocket();
 			}, remoteReconnectDelay(inputReconnectAttempt++));
 		};
+		const restorePendingInput = (predicate: (batch: PendingRemoteInputBatch<WebSocket>) => boolean) => {
+			const retry = takePendingRemoteInputBatches(inputPendingBatches.current, predicate);
+			if (!retry.length || disposed) return;
+			inputQueue.current = restoreRemoteInputBatch(retry, inputQueue.current);
+			window.clearTimeout(inputFlushTimer.current);
+			inputFlushTimer.current = window.setTimeout(() => flushInputQueueRef.current(), 0);
+		};
+		const watchInputAcknowledgements = () => {
+			inputAckWatchdogTimer = 0;
+			if (disposed) return;
+			const now = performance.now();
+			restorePendingInput((batch) => batch.expiresAt <= now);
+			inputAckWatchdogTimer = window.setTimeout(watchInputAcknowledgements, 250);
+		};
+		const ensureInputAcknowledgementWatchdog = () => {
+			if (!disposed && !inputAckWatchdogTimer) {
+				inputAckWatchdogTimer = window.setTimeout(watchInputAcknowledgements, 250);
+			}
+		};
 		function openInputSocket() {
 			if (disposed) return;
 			const socket = new WebSocket(`${streamProtocol}//${window.location.host}/api/desktop-sessions/${sessionId}/stream?lane=input`);
@@ -1708,26 +1870,105 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			socket.onopen = () => {
 				window.clearTimeout(connectTimeout);
 				connectTimeout = 0;
+				if (inputSocket !== socket) {
+					socket.close();
+					return;
+				}
 				inputReconnectAttempt = 0;
 				frameSocketRef.current = socket;
+				if (inputQueue.current.length) flushInputQueueRef.current();
+			};
+			socket.onmessage = (event) => {
+				const batchID = remoteInputAckID(event.data);
+				if (!batchID) return;
+				const batch = inputPendingBatches.current.get(batchID);
+				if (batch?.socket === socket) inputPendingBatches.current.delete(batchID);
 			};
 			socket.onerror = () => socket.close();
 			socket.onclose = () => {
 				window.clearTimeout(connectTimeout);
-				if (inputSocket === socket) inputSocket = null;
-				if (frameSocketRef.current === socket) frameSocketRef.current = null;
+				const wasCurrent = inputSocket === socket;
+				if (wasCurrent) {
+					inputSocket = null;
+					if (frameSocketRef.current === socket) frameSocketRef.current = null;
+				}
+				restorePendingInput((batch) => batch.socket === socket);
+				// Closing a superseded socket must not arm another reconnect timer;
+				// otherwise an online/visibility wake-up can create two input lanes and
+				// make pointer packets alternate between them.
+				if (!wasCurrent) return;
 				if (!disposed) scheduleInputReconnect();
 			};
 		}
 		openInputSocket();
+		ensureInputAcknowledgementWatchdog();
+		const reconnectRemoteSocketsNow = (force = false) => {
+			if (disposed) return;
+			frameSockets.forEach((socket, lane) => {
+				window.clearTimeout(frameReconnectTimers[lane]);
+				frameReconnectTimers[lane] = 0;
+				frameReconnectAttempts[lane] = 0;
+				if (!force && socket?.readyState === WebSocket.OPEN) return;
+				// Detach before close so the old onclose handler cannot schedule a
+				// competing lane. Reopening immediately avoids waiting up to eight
+				// seconds after Wi-Fi/VPN recovery or Android browser resume.
+				frameSockets[lane] = null;
+				frameLaneClosed[lane] = true;
+				socket?.close();
+				openFrameLane(lane);
+			});
+			window.clearTimeout(inputReconnectTimer);
+			window.clearTimeout(inputAckWatchdogTimer);
+			inputAckWatchdogTimer = 0;
+			inputReconnectTimer = 0;
+			inputReconnectAttempt = 0;
+			if (force || inputSocket?.readyState !== WebSocket.OPEN) {
+				const previous = inputSocket;
+				inputSocket = null;
+				if (frameSocketRef.current === previous) frameSocketRef.current = null;
+				previous?.close();
+				openInputSocket();
+			}
+			// An online/pageshow wake-up deliberately replaces every socket. It must
+			// also re-arm acknowledgement expiry; otherwise the first network roam
+			// permanently disables retry for later pointer and keyboard batches.
+			ensureInputAcknowledgementWatchdog();
+		};
+		const forceRemoteSocketRefresh = () => reconnectRemoteSocketsNow(true);
+		const resumeRemoteSockets = () => {
+			if (document.visibilityState !== "hidden") reconnectRemoteSocketsNow(false);
+		};
+		const watchRemoteStreams = () => {
+			if (disposed) return;
+			if (document.visibilityState !== "hidden" && isRemoteFrameStreamStalled(lastFrameReceivedAt, performance.now())) {
+				// Start the already authenticated HTTP path immediately, then replace
+				// every possibly-zombie WebSocket. A successful frame through either
+				// transport resets the watchdog and prevents reconnect churn.
+				startFrameFallback();
+				forceRemoteSocketRefresh();
+				lastFrameReceivedAt = performance.now();
+			}
+			streamWatchdogTimer = window.setTimeout(watchRemoteStreams, 1_000);
+		};
+		streamWatchdogTimer = window.setTimeout(watchRemoteStreams, 1_000);
+		window.addEventListener("online", forceRemoteSocketRefresh);
+		window.addEventListener("pageshow", forceRemoteSocketRefresh);
+		document.addEventListener("visibilitychange", resumeRemoteSockets);
     void refreshStatus();
     return () => {
       disposed = true;
+		if (activeInputSessionID.current === sessionId) activeInputSessionID.current = "";
+			window.removeEventListener("online", forceRemoteSocketRefresh);
+			window.removeEventListener("pageshow", forceRemoteSocketRefresh);
+			document.removeEventListener("visibilitychange", resumeRemoteSockets);
 			pendingPresentation = null;
 			frameSockets.forEach((socket) => socket?.close());
 			frameReconnectTimers.forEach((timer) => window.clearTimeout(timer));
 			inputSocket?.close();
 			window.clearTimeout(inputReconnectTimer);
+			window.clearTimeout(inputAckWatchdogTimer);
+			inputAckWatchdogTimer = 0;
+			window.clearTimeout(streamWatchdogTimer);
 			if (frameSocketRef.current === inputSocket) frameSocketRef.current = null;
 			window.clearTimeout(statusTimer);
 			window.clearTimeout(frameTimer);
@@ -1735,6 +1976,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			inputAbortController.current?.abort();
 			inputAbortController.current = null;
 			inputQueue.current = [];
+			inputPendingBatches.current.clear();
 			inputInFlight.current = false;
       if (currentURL) URL.revokeObjectURL(currentURL);
       if (initialSessionId) {
@@ -1747,17 +1989,21 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
     };
   }, [sessionId, csrf, initialSessionId]);
 
-  flushInputQueueRef.current = () => {
+	flushInputQueueRef.current = () => {
 		if (!sessionId || inputInFlight.current || !controlEnabledRef.current || inputQueue.current.length === 0) return;
+		const deliverySessionID = sessionId;
 		const events = inputQueue.current.splice(0, 32);
 		const body = events.length === 1 ? events[0] : { events };
 		const socket = frameSocketRef.current;
 		if (socket?.readyState === WebSocket.OPEN && socket.bufferedAmount < 64 << 10) {
+			const batchID = remoteInputBatchID(inputClientPrefix.current, ++inputBatchSequence.current);
 			try {
-				socket.send(JSON.stringify({ events }));
+				inputPendingBatches.current.set(batchID, { events, socket, expiresAt: performance.now() + 2_500 });
+				socket.send(JSON.stringify({ batchId: batchID, events }));
 				if (inputQueue.current.length) inputFlushTimer.current = window.setTimeout(() => flushInputQueueRef.current(), 0);
 				return;
 			} catch {
+				inputPendingBatches.current.delete(batchID);
 				// The compatibility HTTP path below preserves ordered input if a proxy
 				// closes the duplex channel between the ready-state check and send().
 			}
@@ -1766,15 +2012,26 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const controller = new AbortController();
 		inputAbortController.current = controller;
 		const timeout = window.setTimeout(() => controller.abort(), 2_500);
+		let delivered = false;
 		void fetch(`/api/desktop-sessions/${sessionId}/input`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(body), signal: controller.signal })
-			.then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); })
-			.catch(() => setError("Команда управления не доставлена — проверяем соединение…"))
+			.then((response) => {
+				if (!response.ok) throw new Error(`HTTP ${response.status}`);
+				delivered = true;
+			})
+			.catch(() => {
+				// Keep the exact client IDs. The server remembers accepted IDs even after
+				// Agent delivery, so a response-loss retry cannot type text or click twice.
+				if (shouldRetryRemoteInputDelivery(activeInputSessionID.current, deliverySessionID)) {
+					inputQueue.current = restoreRemoteInputBatch(events, inputQueue.current);
+					setError("Команда управления не подтверждена — автоматически повторяем…");
+				}
+			})
 			.finally(() => {
 				window.clearTimeout(timeout);
 				if (inputAbortController.current === controller) {
 					inputAbortController.current = null;
 					inputInFlight.current = false;
-					if (inputQueue.current.length) inputFlushTimer.current = window.setTimeout(() => flushInputQueueRef.current(), 0);
+					if (inputQueue.current.length) inputFlushTimer.current = window.setTimeout(() => flushInputQueueRef.current(), delivered ? 0 : 120);
 				}
 			});
 	};
@@ -1800,23 +2057,41 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		// viewer when the event was produced. The Agent may switch capture profiles
 		// before this packet arrives; without this basis, 1920px input interpreted
 		// against a later 1600px frame moves the Windows pointer to the wrong place.
-		let queuedEvent = event;
+		let queuedEvent: Record<string, unknown> = {
+			...event,
+			clientInputId: remoteInputClientID(inputClientPrefix.current, ++inputClientSequence.current),
+		};
 		if (event.type === "pointer") {
-			const image = frameImageRef.current;
-			const size = image ? frameSize(image) : {
-				width: Math.max(1, status?.frameWidth || 1),
-				height: Math.max(1, status?.frameHeight || 1),
-			};
-			const coordinateWidth = Number(event.coordinateWidth) > 0 ? Number(event.coordinateWidth) : size.width;
-			const coordinateHeight = Number(event.coordinateHeight) > 0 ? Number(event.coordinateHeight) : size.height;
-			queuedEvent = { ...event, coordinateWidth, coordinateHeight };
+			let coordinateWidth = Number(event.coordinateWidth);
+			let coordinateHeight = Number(event.coordinateHeight);
+			// Every current pointer producer already binds its sample to the decoded
+			// frame. Re-reading getBoundingClientRect() here forced a second layout on
+			// every high-frequency movement and could observe the next JPEG's geometry,
+			// making a correct coordinate jump. Keep the fallback only for legacy or
+			// synthetic packets without an explicit basis.
+			if (!(coordinateWidth > 0 && coordinateHeight > 0)) {
+				const image = frameImageRef.current;
+				const size = image ? frameSize(image) : {
+					width: Math.max(1, status?.frameWidth || 1),
+					height: Math.max(1, status?.frameHeight || 1),
+				};
+				coordinateWidth = size.width;
+				coordinateHeight = size.height;
+			}
+			queuedEvent = bindRemoteInputCoordinates(queuedEvent, coordinateWidth, coordinateHeight);
 		}
 		const enqueueOrdered = () => {
 			const last = inputQueue.current.at(-1);
 			if (queuedEvent.type === "pointer" && queuedEvent.action === "move" && last?.type === "pointer" && last?.action === "move") inputQueue.current[inputQueue.current.length - 1] = queuedEvent;
 			else inputQueue.current.push(queuedEvent);
 			window.clearTimeout(inputFlushTimer.current);
-			inputFlushTimer.current = window.setTimeout(() => flushInputQueueRef.current(), 0);
+			inputFlushTimer.current = 0;
+			// The first control packet is latency-sensitive and already runs on its own
+			// low-bandwidth WebSocket. Deferring it to a zero-delay timer allowed a JPEG
+			// decode/layout task to run first, adding a full frame of input lag on mobile.
+			// Flush synchronously; the existing 32-event batching, websocket pressure
+			// guard and ordered HTTP fallback still bound and preserve the queue.
+			flushInputQueueRef.current();
 		};
 		if (controlEnabledRef.current) { enqueueOrdered(); return; }
 		if (!activatesControl) return;
@@ -1824,13 +2099,104 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		return;
 	}, [sessionId, activateRemoteControl, status?.frameWidth, status?.frameHeight]);
 
+	function armPointerMoveTimer(delayMs: number) {
+		if (pointerMoveTimer.current) return;
+		pointerMoveTimer.current = window.setTimeout(() => {
+			pointerMoveTimer.current = 0;
+			const cadence = pointerMoveCadence.current;
+			const pending = cadence.take(performance.now());
+			if (pending) {
+				sendInput(pending.event, pending.activatesControl);
+				return;
+			}
+			const remaining = cadence.remaining(performance.now());
+			if (remaining > 0) armPointerMoveTimer(remaining);
+		}, Math.max(1, Math.ceil(delayMs)));
+	}
+
+	function schedulePointerMove(event: Record<string, unknown>, activatesControl = true) {
+		const cadence = pointerMoveCadence.current;
+		cadence.setInterval(remotePointerCadenceMillis(coarsePointerClient, frameSocketRef.current?.bufferedAmount || 0));
+		const result = cadence.offer({ event, activatesControl }, performance.now());
+		if (result.send) {
+			window.clearTimeout(pointerMoveTimer.current);
+			pointerMoveTimer.current = 0;
+			sendInput(result.send.event, result.send.activatesControl);
+			return;
+		}
+		armPointerMoveTimer(result.delayMs);
+	}
+
+	function flushPendingPointerMove() {
+		window.clearTimeout(pointerMoveTimer.current);
+		pointerMoveTimer.current = 0;
+		const pending = pointerMoveCadence.current.take(performance.now(), true);
+		if (pending) sendInput(pending.event, pending.activatesControl);
+	}
+
+	function discardPendingPointerMove() {
+		window.clearTimeout(pointerMoveTimer.current);
+		pointerMoveTimer.current = 0;
+		pointerMoveCadence.current.clear();
+	}
+
+	releaseActivePointerRef.current = () => {
+		discardPendingPointerMove();
+		clearPendingTrackpadMotion(false);
+		stopWheelRepeat();
+		if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
+		if (trackpadGesture.current.timer) window.clearTimeout(trackpadGesture.current.timer);
+		if (directGesture.current.leftDown) {
+			const gesture = directGesture.current;
+			sendInput({
+				type: "pointer", action: "up", button: "left",
+				x: gesture.x, y: gesture.y,
+				coordinateWidth: gesture.coordinateWidth,
+				coordinateHeight: gesture.coordinateHeight,
+			}, false);
+		}
+		if (trackpadGesture.current.dragging) {
+			sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() }, false);
+		}
+		if (heldMouseButton.current && lastMousePosition.current) {
+			sendInput({ type: "pointer", action: "up", button: heldMouseButton.current, ...lastMousePosition.current }, false);
+		}
+		heldMouseButton.current = null;
+		directGesture.current.pointerId = -1;
+		directGesture.current.leftDown = false;
+		directGesture.current.longPress = false;
+		directGesture.current.suppressTap = false;
+		directGesture.current.timer = 0;
+		trackpadGesture.current.pointerId = -1;
+		trackpadGesture.current.dragging = false;
+		trackpadGesture.current.longPress = false;
+		trackpadGesture.current.suppressTap = false;
+		trackpadGesture.current.timer = 0;
+		trackpadGesture.current.pendingX = 0;
+		trackpadGesture.current.pendingY = 0;
+		trackpadGesture.current.pendingTimer = 0;
+		activeTouches.current.clear();
+		pinchGesture.current.active = false;
+		window.cancelAnimationFrame(pinchSuppressionAnimationFrame.current);
+		pinchSuppressionAnimationFrame.current = 0;
+		pinchGesture.current.suppress = false;
+	};
+
+	useEffect(() => () => {
+		discardPendingPointerMove();
+		clearPendingTrackpadMotion(false);
+	}, [sessionId]);
+
 	const releaseRemoteModifiers = useCallback(() => {
 		textKeyboardKeys.current.clear();
 		for (const keyCode of [16, 17, 18, 91, 92]) sendInput({ type: "key", action: "up", keyCode }, false);
 	}, [sendInput]);
 
 	useEffect(() => {
-		const release = () => releaseRemoteModifiers();
+		const release = () => {
+			releaseActivePointerRef.current();
+			releaseRemoteModifiers();
+		};
 		const visibility = () => { if (document.hidden) release(); };
 		window.addEventListener("blur", release);
 		document.addEventListener("visibilitychange", visibility);
@@ -1858,16 +2224,33 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		return { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
 	}
 
+	function coalescedPointerSamples(event: ReactPointerEvent<HTMLDivElement>): PointerEvent[] {
+		let samples: PointerEvent[] = [];
+		try { samples = event.nativeEvent.getCoalescedEvents?.() || []; } catch { samples = []; }
+		const finalSample = event.nativeEvent;
+		const last = samples[samples.length - 1];
+		// Chromium normally includes the dispatched sample, while WebKit builds have
+		// returned only the preceding coalesced points. Append the final coordinate
+		// only when it is absent so neither engine loses nor double-applies motion.
+		if (!last || last.clientX !== finalSample.clientX || last.clientY !== finalSample.clientY) samples.push(finalSample);
+		return samples;
+	}
+
 	function clampCamera(next: { zoom: number; panX: number; panY: number }) {
 		return clampRemoteCamera(next, { x: fittedFrame.width, y: fittedFrame.height }, { x: viewportSize.width, y: viewportSize.height });
 	}
 
-	function frameSize(element: HTMLImageElement) {
+	function frameSize(element: HTMLImageElement, renderedRect?: { width: number; height: number }) {
+		// A pointer sample must use one atomic view of the image geometry. Reading
+		// getBoundingClientRect() repeatedly in the same sample forces extra layout
+		// work on Android and can observe two different compositor states while the
+		// camera is panning. Reuse the caller's snapshot whenever it already has one.
+		const rect = renderedRect || element.getBoundingClientRect();
 		const size = authoritativeRemoteFrameSize(
 			{ x: element.naturalWidth, y: element.naturalHeight },
 			{ x: renderedFrameSize.width, y: renderedFrameSize.height },
 			{ x: status?.frameWidth || 0, y: status?.frameHeight || 0 },
-			{ x: element.getBoundingClientRect().width, y: element.getBoundingClientRect().height },
+			{ x: rect.width, y: rect.height },
 		);
 		return {
 			width: size.x,
@@ -1875,8 +2258,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		};
 	}
 
-	function ensureTrackpadCursor(element: HTMLImageElement) {
-		const size = frameSize(element);
+	function ensureTrackpadCursor(element: HTMLImageElement, renderedRect?: { width: number; height: number }) {
+		const size = frameSize(element, renderedRect);
 		if (!trackpadCursor.current.ready) {
 			trackpadCursor.current = { x: Math.round(size.width / 2), y: Math.round(size.height / 2), frameWidth: size.width, frameHeight: size.height, ready: true };
 		} else if (trackpadCursor.current.frameWidth !== size.width || trackpadCursor.current.frameHeight !== size.height) {
@@ -1893,11 +2276,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	function serialisedTrackpadPosition() {
 		const image = frameImageRef.current;
-		const size = image ? frameSize(image) : {
+		const size = image ? ensureTrackpadCursor(image) : {
 			width: Math.max(1, status?.frameWidth || 1),
 			height: Math.max(1, status?.frameHeight || 1),
 		};
-		if (image) ensureTrackpadCursor(image);
 		const position = clampRemotePoint(trackpadCursor.current, { x: size.width, y: size.height });
 		return { ...position, coordinateWidth: size.width, coordinateHeight: size.height };
 	}
@@ -1910,10 +2292,77 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		// rounded differently on 1366px/2256px/ultrawide frames, which looked like
 		// blinking or teleporting on Android. A compositor-only transform stays
 		// stable while the JPEG element is being replaced underneath it.
-		const x = Math.max(0, Math.min(Math.max(0, size.width - 1), Math.round(position.x)));
-		const y = Math.max(0, Math.min(Math.max(0, size.height - 1), Math.round(position.y)));
+		const { x, y } = remoteCursorVisualPointForLayer(
+			position,
+			{ x: size.width, y: size.height },
+			{ x: renderedFrameSize.width, y: renderedFrameSize.height },
+		);
 		cursor.style.setProperty("--remote-cursor-x", `${x}px`);
 		cursor.style.setProperty("--remote-cursor-y", `${y}px`);
+	}
+
+	function commitTrackpadDeltas(deltas: Array<{ x: number; y: number }>) {
+		if (!deltas.length) return false;
+		const image = frameImageRef.current;
+		if (!image) return false;
+		const rect = image.getBoundingClientRect();
+		const size = ensureTrackpadCursor(image, rect);
+		let next = { x: trackpadCursor.current.x, y: trackpadCursor.current.y };
+		for (const delta of deltas) {
+			trackpadGesture.current.distance += Math.abs(delta.x) + Math.abs(delta.y);
+			next = advanceRemoteTrackpadCursor(
+				next,
+				delta,
+				{ x: size.width, y: size.height },
+				{ x: rect.width, y: rect.height },
+			);
+		}
+		if (trackpadGesture.current.distance > 10 && trackpadGesture.current.timer) {
+			window.clearTimeout(trackpadGesture.current.timer);
+			trackpadGesture.current.timer = 0;
+		}
+		trackpadCursor.current = { ...next, frameWidth: size.width, frameHeight: size.height, ready: true };
+		positionLocalCursor(next, size);
+		const followedCamera = cameraFollowingRemotePoint(
+			pendingCameraRef.current,
+			{ x: next.x, y: next.y },
+			{ x: size.width, y: size.height },
+			{ x: fittedFrame.width, y: fittedFrame.height },
+			{ x: viewportSize.width, y: viewportSize.height },
+		);
+		if (followedCamera.panX !== pendingCameraRef.current.panX || followedCamera.panY !== pendingCameraRef.current.panY) scheduleCamera(followedCamera);
+		// A trackpad drag is an explicit control action. Send the leading sample
+		// immediately and keep one newest trailing coordinate. This preserves the
+		// exact final position on high-Hz touchscreens without queueing old moves.
+		schedulePointerMove({ type: "pointer", action: "move", ...clampRemotePoint(next, { x: size.width, y: size.height }), coordinateWidth: size.width, coordinateHeight: size.height });
+		return true;
+	}
+
+	function clearPendingTrackpadMotion(flush: boolean) {
+		const gesture = trackpadGesture.current;
+		if (gesture.pendingTimer) window.clearTimeout(gesture.pendingTimer);
+		gesture.pendingTimer = 0;
+		const pending = gesture.pendingX !== 0 || gesture.pendingY !== 0
+			? { x: gesture.pendingX, y: gesture.pendingY }
+			: null;
+		gesture.pendingX = 0;
+		gesture.pendingY = 0;
+		if (flush && pending) return commitTrackpadDeltas([pending]);
+		return false;
+	}
+
+	function armPendingTrackpadMotion(pointerId: number) {
+		const gesture = trackpadGesture.current;
+		if (gesture.pendingTimer) window.clearTimeout(gesture.pendingTimer);
+		gesture.pendingTimer = window.setTimeout(() => {
+			const current = trackpadGesture.current;
+			current.pendingTimer = 0;
+			if (current.pointerId !== pointerId || (current.pendingX === 0 && current.pendingY === 0)) return;
+			const pending = { x: current.pendingX, y: current.pendingY };
+			current.pendingX = 0;
+			current.pendingY = 0;
+			commitTrackpadDeltas([pending]);
+		}, 34);
 	}
 
 	function pointerPosition(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1923,10 +2372,11 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			const coordinateHeight = Math.max(1, status?.frameHeight || 1);
 			return { x: 0, y: 0, coordinateWidth, coordinateHeight };
 		}
-		const { width: frameWidth, height: frameHeight } = frameSize(image);
+		const rect = image.getBoundingClientRect();
+		const { width: frameWidth, height: frameHeight } = frameSize(image, rect);
 		const position = remotePointFromClient(
 			{ x: event.clientX, y: event.clientY },
-			image.getBoundingClientRect(),
+			rect,
 			{ x: frameWidth, y: frameHeight },
 		);
 		trackpadCursor.current = { ...position, frameWidth, frameHeight, ready: true };
@@ -1937,6 +2387,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	function beginTouchGesture(event: ReactPointerEvent<HTMLDivElement>) {
 		activeTouches.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
 		if (activeTouches.current.size < 2) return false;
+		window.cancelAnimationFrame(pinchSuppressionAnimationFrame.current);
+		pinchSuppressionAnimationFrame.current = 0;
 		const points = [...activeTouches.current.values()].slice(0, 2);
 		const midpoint = touchMidpoint(points);
 		const distance = Math.max(1, touchDistance(points));
@@ -1953,12 +2405,14 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			startedAt: performance.now(),
 			rightClickSent: false,
 		};
+		pinchGestureViewportRevision.current = pointerViewportRevision.current;
 		if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
 		if (directGesture.current.leftDown) {
 			const direct = directGesture.current;
 			sendInput({ type: "pointer", action: "up", button: "left", x: direct.x, y: direct.y, coordinateWidth: direct.coordinateWidth, coordinateHeight: direct.coordinateHeight });
 		}
 		if (trackpadGesture.current.timer) { window.clearTimeout(trackpadGesture.current.timer); trackpadGesture.current.timer = 0; }
+		clearPendingTrackpadMotion(false);
 		if (trackpadGesture.current.dragging) sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() });
 		trackpadGesture.current.pointerId = -1;
 		trackpadGesture.current.dragging = false;
@@ -1968,49 +2422,65 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	function updateTouchGesture(event: ReactPointerEvent<HTMLDivElement>) {
 		if (!activeTouches.current.has(event.pointerId)) return false;
-		activeTouches.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
 		if (!pinchGesture.current.active || activeTouches.current.size < 2) return false;
-		const points = [...activeTouches.current.values()].slice(0, 2);
-		const midpoint = touchMidpoint(points);
-		const gesture = pinchGesture.current;
-		const distance = touchDistance(points);
-		const scaleChange = distance / Math.max(1, gesture.startDistance);
-		const midpointDelta = Math.hypot(midpoint.x - gesture.lastMidX, midpoint.y - gesture.lastMidY);
-		gesture.midpointTravel += midpointDelta;
-		gesture.mode = classifyRemoteTouchGesture(gesture.mode, mobileTrackpadMode, scaleChange, gesture.midpointTravel);
-		if (gesture.mode === "zoom") {
-			const viewport = viewportRef.current?.getBoundingClientRect();
-			// Work in viewport-local coordinates. Android changes WebView insets while
-			// rotating or showing the IME; absolute page coordinates made those inset
-			// changes look like a camera jump even when the fingers had not moved.
-			const left = viewport?.left || 0;
-			const top = viewport?.top || 0;
-			const centerX = (viewport?.width || viewportSize.width) / 2;
-			const centerY = (viewport?.height || viewportSize.height) / 2;
-			// Accumulate each native pointer sample. Using the gesture's original
-			// anchor for every move made the content tug back towards its starting
-			// point, especially while the two fingers also translated across screen.
-			scheduleCamera(advanceRemotePinch(
-				pendingCameraRef.current,
-				{ x: gesture.lastMidX - left, y: gesture.lastMidY - top },
-				{ x: midpoint.x - left, y: midpoint.y - top },
-				{ x: centerX, y: centerY },
-				gesture.lastDistance,
-				distance,
-			));
-		} else if (gesture.mode === "scroll") {
-			gesture.wheelDistance += midpoint.y - gesture.lastMidY;
-			let steps = 0;
-			while (Math.abs(gesture.wheelDistance) >= 8 && steps < 5) {
-				const direction = gesture.wheelDistance > 0 ? 1 : -1;
-				sendInput({ type: "wheel", delta: direction > 0 ? -120 : 120 });
-				gesture.wheelDistance -= direction * 8;
-				steps += 1;
-			}
+		if (pinchGestureViewportRevision.current !== pointerViewportRevision.current) {
+			// The visual viewport changed while both fingers were down. Mixing samples
+			// from the old and new coordinate spaces produces a large false pinch.
+			// Suppress the rest of this native gesture and resume after both fingers
+			// are lifted; the already committed camera remains untouched.
+			pinchGestureViewportRevision.current = pointerViewportRevision.current;
+			pinchGesture.current.active = false;
+			pinchGesture.current.suppress = true;
+			return true;
 		}
-		gesture.lastMidX = midpoint.x;
-		gesture.lastMidY = midpoint.y;
-		gesture.lastDistance = distance;
+		const gesture = pinchGesture.current;
+		const viewport = viewportRef.current?.getBoundingClientRect();
+		// Work in viewport-local coordinates. Android changes WebView insets while
+		// rotating or showing the IME; absolute page coordinates made those inset
+		// changes look like a camera jump even when the fingers had not moved.
+		const left = viewport?.left || 0;
+		const top = viewport?.top || 0;
+		const centerX = (viewport?.width || viewportSize.width) / 2;
+		const centerY = (viewport?.height || viewportSize.height) / 2;
+		for (const sample of coalescedPointerSamples(event)) {
+			activeTouches.current.set(event.pointerId, { x: sample.clientX, y: sample.clientY });
+			const points = [...activeTouches.current.values()].slice(0, 2);
+			if (points.length < 2) continue;
+			const midpoint = touchMidpoint(points);
+			const distance = Math.max(1, touchDistance(points));
+			const scaleChange = distance / Math.max(1, gesture.startDistance);
+			const midpointDelta = Math.hypot(midpoint.x - gesture.lastMidX, midpoint.y - gesture.lastMidY);
+			gesture.midpointTravel += midpointDelta;
+			gesture.mode = classifyRemoteTouchGesture(gesture.mode, mobileTrackpadMode, scaleChange, gesture.midpointTravel);
+			if (gesture.mode === "zoom") {
+				// Apply every native sample to the latest pending camera, while React
+				// commits only once on the next animation frame. This keeps the midpoint
+				// under the fingers without re-rendering for every 120/240 Hz touch point.
+				scheduleCamera(advanceRemotePinch(
+					pendingCameraRef.current,
+					{ x: gesture.lastMidX - left, y: gesture.lastMidY - top },
+					{ x: midpoint.x - left, y: midpoint.y - top },
+					{ x: centerX, y: centerY },
+					gesture.lastDistance,
+					distance,
+				));
+			} else if (gesture.mode === "scroll") {
+				gesture.wheelDistance += midpoint.y - gesture.lastMidY;
+			}
+			gesture.lastMidX = midpoint.x;
+			gesture.lastMidY = midpoint.y;
+			gesture.lastDistance = distance;
+		}
+		// Bound transport work independently of the number of coalesced native
+		// samples. Residual distance remains for the next event, so scrolling is
+		// continuous but never emits an unbounded packet burst after a UI stall.
+		let steps = 0;
+		while (gesture.mode === "scroll" && Math.abs(gesture.wheelDistance) >= 8 && steps < 6) {
+			const direction = gesture.wheelDistance > 0 ? 1 : -1;
+			sendInput({ type: "wheel", delta: direction > 0 ? -120 : 120 });
+			gesture.wheelDistance -= direction * 8;
+			steps += 1;
+		}
 		return true;
 	}
 
@@ -2026,7 +2496,18 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		}
 		activeTouches.current.delete(pointerId);
 		if (activeTouches.current.size < 2) pinchGesture.current.active = false;
-		if (activeTouches.current.size === 0) window.setTimeout(() => { pinchGesture.current.suppress = false; }, 0);
+		if (canReleaseRemoteTouchSuppression(activeTouches.current.size, pinchGesture.current.active)) {
+			window.cancelAnimationFrame(pinchSuppressionAnimationFrame.current);
+			// React commits the camera state on the first frame and the transformed
+			// image rectangle becomes observable after the following paint. Releasing
+			// earlier lets a very fast post-pinch tap use the previous rectangle.
+			pinchSuppressionAnimationFrame.current = window.requestAnimationFrame(() => {
+				pinchSuppressionAnimationFrame.current = window.requestAnimationFrame(() => {
+					pinchSuppressionAnimationFrame.current = 0;
+					if (canReleaseRemoteTouchSuppression(activeTouches.current.size, pinchGesture.current.active)) pinchGesture.current.suppress = false;
+				});
+			});
+		}
 		return wasPinching;
 	}
 
@@ -2038,47 +2519,81 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		}
 		if (mobileTrackpadMode) {
 			if (trackpadGesture.current.pointerId !== event.pointerId) return;
+			if (trackpadGestureViewportRevision.current !== pointerViewportRevision.current) {
+				const samples = coalescedPointerSamples(event);
+				const latest = samples[samples.length - 1] || event;
+				discardPendingPointerMove();
+				clearPendingTrackpadMotion(false);
+				trackpadGesture.current.lastX = latest.clientX;
+				trackpadGesture.current.lastY = latest.clientY;
+				trackpadGesture.current.lastTime = latest.timeStamp;
+				trackpadGesture.current.suppressTap = true;
+				trackpadGestureViewportRevision.current = pointerViewportRevision.current;
+				return;
+			}
 			const image = frameImageRef.current;
 			if (!image) return;
 			const rect = image.getBoundingClientRect();
-			const size = ensureTrackpadCursor(image);
-			const deltaX = event.clientX - trackpadGesture.current.lastX;
-			const deltaY = event.clientY - trackpadGesture.current.lastY;
-			trackpadGesture.current.lastX = event.clientX;
-			trackpadGesture.current.lastY = event.clientY;
-			trackpadGesture.current.distance += Math.abs(deltaX) + Math.abs(deltaY);
-			if (trackpadGesture.current.distance > 10 && trackpadGesture.current.timer) {
+			const nativeSamples = coalescedPointerSamples(event);
+			const previousNative = { x: trackpadGesture.current.lastX, y: trackpadGesture.current.lastY };
+			const previousTime = trackpadGesture.current.lastTime;
+			const filtered = stableRemoteTrackpadSamples(
+				previousNative,
+				nativeSamples.map((sample) => ({ x: sample.clientX, y: sample.clientY, time: sample.timeStamp })),
+				{ x: rect.width, y: rect.height },
+				previousTime,
+			);
+			trackpadGesture.current.lastX = filtered.last.x;
+			trackpadGesture.current.lastY = filtered.last.y;
+			trackpadGesture.current.lastTime = filtered.lastTime;
+			const elapsed = previousTime > 0 && filtered.lastTime >= previousTime ? filtered.lastTime - previousTime : 0;
+			const currentPending = trackpadGesture.current.pendingX !== 0 || trackpadGesture.current.pendingY !== 0
+				? { x: trackpadGesture.current.pendingX, y: trackpadGesture.current.pendingY }
+				: null;
+			const stabilized = stabilizeRemoteTrackpadMotion(currentPending, filtered.deltas, { x: rect.width, y: rect.height }, elapsed);
+			clearPendingTrackpadMotion(false);
+			if (stabilized.pending) {
+				trackpadGesture.current.pendingX = stabilized.pending.x;
+				trackpadGesture.current.pendingY = stabilized.pending.y;
+				armPendingTrackpadMotion(event.pointerId);
+			}
+			const nativeTravel = Math.hypot(filtered.last.x - previousNative.x, filtered.last.y - previousNative.y);
+			if (nativeTravel > 10 && trackpadGesture.current.timer) {
 				window.clearTimeout(trackpadGesture.current.timer);
 				trackpadGesture.current.timer = 0;
 			}
-			const next = advanceRemoteTrackpadCursor(
-				trackpadCursor.current,
-				{ x: deltaX, y: deltaY },
-				{ x: size.width, y: size.height },
-				{ x: rect.width, y: rect.height },
-			);
-			trackpadCursor.current = { ...next, frameWidth: size.width, frameHeight: size.height, ready: true };
-			positionLocalCursor(next, size);
-			const followedCamera = cameraFollowingRemotePoint(
-				pendingCameraRef.current,
-				{ x: next.x, y: next.y },
-				{ x: size.width, y: size.height },
-				{ x: fittedFrame.width, y: fittedFrame.height },
-				{ x: viewportSize.width, y: viewportSize.height },
-			);
-			if (followedCamera.panX !== pendingCameraRef.current.panX || followedCamera.panY !== pendingCameraRef.current.panY) scheduleCamera(followedCamera);
-			const now = performance.now();
-			if (now - lastPointerSent.current >= pointerSendInterval) {
-				lastPointerSent.current = now;
-				// A trackpad drag is an explicit control action. Activating control on
-				// the first movement makes the cursor follow the finger immediately;
-				// previously only the later tap enabled control, so the first drag was
-				// silently discarded and subsequent clicks appeared offset.
-				sendInput({ type: "pointer", action: "move", ...clampRemotePoint(next, { x: size.width, y: size.height }), coordinateWidth: size.width, coordinateHeight: size.height });
-			}
+			commitTrackpadDeltas(stabilized.deltas);
 			return;
 		}
 		if (directGesture.current.pointerId === event.pointerId) {
+			if (directGestureViewportRevision.current !== pointerViewportRevision.current) {
+				const gesture = directGesture.current;
+				discardPendingPointerMove();
+				if (gesture.timer) window.clearTimeout(gesture.timer);
+				if (gesture.leftDown) {
+					sendInput({
+						type: "pointer", action: "up", button: "left",
+						x: gesture.x, y: gesture.y,
+						coordinateWidth: gesture.coordinateWidth,
+						coordinateHeight: gesture.coordinateHeight,
+					}, false);
+				}
+				const position = pointerPosition(event);
+				gesture.startX = event.clientX;
+				gesture.startY = event.clientY;
+				gesture.startRemoteX = position.x;
+				gesture.startRemoteY = position.y;
+				gesture.x = position.x;
+				gesture.y = position.y;
+				gesture.coordinateWidth = position.coordinateWidth;
+				gesture.coordinateHeight = position.coordinateHeight;
+				gesture.moved = true;
+				gesture.leftDown = false;
+				gesture.suppressTap = true;
+				gesture.timer = 0;
+				directGestureViewportRevision.current = pointerViewportRevision.current;
+				return;
+			}
 			const position = pointerPosition(event);
 			const distance = Math.abs(event.clientX-directGesture.current.startX)+Math.abs(event.clientY-directGesture.current.startY);
 			directGesture.current.x = position.x; directGesture.current.y = position.y;
@@ -2087,25 +2602,45 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (distance > 10 && !directGesture.current.longPress) {
 				directGesture.current.moved = true;
 				if (directGesture.current.timer) { window.clearTimeout(directGesture.current.timer); directGesture.current.timer = 0; }
-				if (!directGesture.current.leftDown) { sendInput({ type: "pointer", action: "down", button: "left", ...position }); directGesture.current.leftDown = true; }
+				if (!directGesture.current.leftDown) {
+					const start = {
+						x: directGesture.current.startRemoteX,
+						y: directGesture.current.startRemoteY,
+						coordinateWidth: directGesture.current.coordinateWidth,
+						coordinateHeight: directGesture.current.coordinateHeight,
+					};
+					// Begin a direct-touch drag at the actual touch-down coordinate. Starting
+					// at the threshold-crossing sample can miss a narrow title bar or handle.
+					sendInput({ type: "pointer", action: "move", ...start });
+					sendInput({ type: "pointer", action: "down", button: "left", ...start });
+					directGesture.current.leftDown = true;
+				}
 			}
+			schedulePointerMove({ type: "pointer", action: "move", ...position }, directGesture.current.leftDown);
+			return;
 		}
-    const now = performance.now();
-		if (now-lastPointerSent.current < pointerSendInterval) return;
-    lastPointerSent.current = now;
-		sendInput({ type: "pointer", action: "move", ...pointerPosition(event) }, directGesture.current.leftDown);
+		const position = pointerPosition(event);
+		if (event.pointerType === "mouse") lastMousePosition.current = position;
+		schedulePointerMove({ type: "pointer", action: "move", ...position }, directGesture.current.leftDown);
   }
 
 	function pointerButton(event: ReactPointerEvent<HTMLDivElement>, action: "down" | "up") {
     event.preventDefault();
+		// Stateful input must never overtake the newest throttled move. Flushing here
+		// keeps drag boundaries ordered: move -> down/up, including on slow proxies.
+		flushPendingPointerMove();
     viewportRef.current?.focus();
 		if (event.pointerType !== "mouse") {
 			if (action === "down") {
-				event.currentTarget.setPointerCapture(event.pointerId);
+				capturePointerSafely(event.currentTarget, event.pointerId);
 				if (beginTouchGesture(event)) return;
 			} else if (pinchGesture.current.active || pinchGesture.current.suppress) {
-				if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+				// Remove the native pointer from our gesture before releasing capture.
+				// Chromium may dispatch lostpointercapture synchronously here; if the
+				// pointer still looks active, the interruption handler tears down the
+				// whole gesture and the next sample appears to jump.
 				endTouchGesture(event.pointerId);
+				releasePointerSafely(event.currentTarget, event.pointerId);
 				return;
 			}
 		}
@@ -2114,7 +2649,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (!image) return;
 			const size = ensureTrackpadCursor(image);
 			if (action === "down") {
-				event.currentTarget.setPointerCapture(event.pointerId);
+				clearPendingTrackpadMotion(false);
+				capturePointerSafely(event.currentTarget, event.pointerId);
 				const previousTap = lastTrackpadTap.current;
 				const secondTap = performance.now() - previousTap.at < 330 && Math.hypot(event.clientX - previousTap.clientX, event.clientY - previousTap.clientY) < 48;
 				if (secondTap) {
@@ -2122,7 +2658,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 					const position = serialisedTrackpadPosition();
 					sendInput({ type: "pointer", action: "move", ...position });
 					sendInput({ type: "pointer", action: "down", button: "left", ...position });
-					trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, distance: 0, longPress: false, dragging: true, secondTap: true, timer: 0 };
+					trackpadGestureViewportRevision.current = pointerViewportRevision.current;
+					trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, lastTime: event.timeStamp, distance: 0, longPress: false, dragging: true, secondTap: true, suppressTap: false, timer: 0, pendingX: 0, pendingY: 0, pendingTimer: 0 };
 					positionLocalCursor(trackpadCursor.current, size);
 					return;
 				}
@@ -2133,33 +2670,41 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 					lastTrackpadTap.current.at = 0;
 					sendPointerTap("right");
 				}, 2000);
-				trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, distance: 0, longPress: false, dragging: false, secondTap: false, timer };
+				trackpadGestureViewportRevision.current = pointerViewportRevision.current;
+				trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, lastTime: event.timeStamp, distance: 0, longPress: false, dragging: false, secondTap: false, suppressTap: false, timer, pendingX: 0, pendingY: 0, pendingTimer: 0 };
 				positionLocalCursor(trackpadCursor.current, size);
 				return;
 			}
-			if (trackpadGesture.current.timer) window.clearTimeout(trackpadGesture.current.timer);
-			if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-			if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.dragging) {
-				const position = serialisedTrackpadPosition();
-				sendInput({ type: "pointer", action: "up", button: "left", ...position });
-			} else if (trackpadGesture.current.pointerId === event.pointerId && trackpadGesture.current.distance < 10 && !trackpadGesture.current.longPress) {
-				const position = serialisedTrackpadPosition();
-				sendInput({ type: "pointer", action: "move", ...position });
-				sendInput({ type: "pointer", action: "down", button: "left", ...position });
-				sendInput({ type: "pointer", action: "up", button: "left", ...position });
-				lastTrackpadTap.current = { at: performance.now(), clientX: event.clientX, clientY: event.clientY };
+			const ownsTrackpadGesture = trackpadGesture.current.pointerId === event.pointerId;
+			if (ownsTrackpadGesture) {
+				clearPendingTrackpadMotion(true);
+				flushPendingPointerMove();
 			}
+			const wasDragging = ownsTrackpadGesture && trackpadGesture.current.dragging;
+			const wasTap = ownsTrackpadGesture && trackpadGesture.current.distance < 10 && !trackpadGesture.current.longPress && !trackpadGesture.current.suppressTap;
+			if (trackpadGesture.current.timer) window.clearTimeout(trackpadGesture.current.timer);
 			trackpadGesture.current.pointerId = -1;
 			trackpadGesture.current.dragging = false;
 			trackpadGesture.current.timer = 0;
 			if (event.pointerType !== "mouse") endTouchGesture(event.pointerId);
+			releasePointerSafely(event.currentTarget, event.pointerId);
+			if (wasDragging) {
+				const position = serialisedTrackpadPosition();
+				sendInput({ type: "pointer", action: "up", button: "left", ...position });
+			} else if (wasTap) {
+				const position = serialisedTrackpadPosition();
+				sendInput({ type: "pointer", action: "move", ...position });
+				for (const input of remotePointerTapActions("left")) sendInput({ type: "pointer", ...input, ...position });
+				lastTrackpadTap.current = { at: performance.now(), clientX: event.clientX, clientY: event.clientY };
+			}
 			return;
 		}
 		if (event.pointerType !== "mouse") {
 			const position = pointerPosition(event);
 			if (action === "down") {
-				event.currentTarget.setPointerCapture(event.pointerId);
-				directGesture.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: position.x, y: position.y, coordinateWidth: position.coordinateWidth, coordinateHeight: position.coordinateHeight, moved: false, leftDown: false, longPress: false, timer: window.setTimeout(() => {
+				capturePointerSafely(event.currentTarget, event.pointerId);
+				directGestureViewportRevision.current = pointerViewportRevision.current;
+				directGesture.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startRemoteX: position.x, startRemoteY: position.y, x: position.x, y: position.y, coordinateWidth: position.coordinateWidth, coordinateHeight: position.coordinateHeight, moved: false, leftDown: false, longPress: false, suppressTap: false, timer: window.setTimeout(() => {
 					const gesture = directGesture.current; if (gesture.pointerId !== event.pointerId || gesture.moved) return;
 					const current = { x: gesture.x, y: gesture.y, coordinateWidth: gesture.coordinateWidth, coordinateHeight: gesture.coordinateHeight };
 					gesture.longPress = true; sendInput({ type: "pointer", action: "move", ...current }); sendInput({ type: "pointer", action: "down", button: "right", ...current }); sendInput({ type: "pointer", action: "up", button: "right", ...current });
@@ -2167,42 +2712,64 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				return;
 			}
 			const gesture = directGesture.current;
+			const ownsDirectGesture = gesture.pointerId === event.pointerId;
+			const wasLongPress = gesture.longPress;
+			const wasLeftDown = gesture.leftDown;
 			if (gesture.timer) window.clearTimeout(gesture.timer);
-			if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-			if (gesture.pointerId === event.pointerId && !gesture.longPress) {
-				if (gesture.leftDown) sendInput({ type: "pointer", action: "up", button: "left", ...position });
+			// As above, make a normal release indistinguishable from an active
+			// interruption before releasePointerCapture can emit its callback.
+			directGesture.current.pointerId = -1;
+			directGesture.current.timer = 0;
+			endTouchGesture(event.pointerId);
+			releasePointerSafely(event.currentTarget, event.pointerId);
+			if (ownsDirectGesture && !wasLongPress && !gesture.suppressTap) {
+				if (wasLeftDown) sendInput({ type: "pointer", action: "up", button: "left", ...position });
 				else { sendInput({ type: "pointer", action: "down", button: "left", ...position }); sendInput({ type: "pointer", action: "up", button: "left", ...position }); }
 			}
-			directGesture.current.pointerId = -1; directGesture.current.timer = 0;
-			endTouchGesture(event.pointerId);
 			return;
 		}
-		if (action === "down") event.currentTarget.setPointerCapture(event.pointerId);
-		if (action === "up" && event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    const button = event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
-    sendInput({ type: "pointer", action, button, ...pointerPosition(event) });
+		const button = event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
+		const position = pointerPosition(event);
+		lastMousePosition.current = position;
+		if (action === "down") {
+			heldMouseButton.current = button;
+			capturePointerSafely(event.currentTarget, event.pointerId);
+		} else {
+			// Clear this before releasePointerCapture: a conforming browser dispatches
+			// lostpointercapture synchronously or immediately afterwards. The dedicated
+			// handler must only synthesize pointer-up for an actually interrupted press.
+			heldMouseButton.current = null;
+			releasePointerSafely(event.currentTarget, event.pointerId);
+		}
+		sendInput({ type: "pointer", action, button, ...position });
   }
+
+	function lostPointerCapture(event: ReactPointerEvent<HTMLDivElement>) {
+		const ownsGesture = directGesture.current.pointerId === event.pointerId
+			|| trackpadGesture.current.pointerId === event.pointerId
+			|| activeTouches.current.has(event.pointerId)
+			|| heldMouseButton.current !== null;
+		if (!ownsGesture) return;
+		event.preventDefault();
+		releaseActivePointerRef.current();
+	}
 
 	function cancelPointer(event: ReactPointerEvent<HTMLDivElement>) {
 		event.preventDefault();
+		flushPendingPointerMove();
 		if (event.pointerType !== "mouse") endTouchGesture(event.pointerId, true);
-		if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-		if (directGesture.current.pointerId === event.pointerId) {
-			if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
-			if (directGesture.current.leftDown) sendInput({ type: "pointer", action: "up", button: "left", x: directGesture.current.x, y: directGesture.current.y, coordinateWidth: directGesture.current.coordinateWidth, coordinateHeight: directGesture.current.coordinateHeight });
-			directGesture.current.pointerId = -1; directGesture.current.timer = 0;
-		} else if (!mobileTrackpadMode) {
-			sendInput({ type: "pointer", action: "up", button: "left", ...pointerPosition(event) });
-		}
-		trackpadGesture.current.pointerId = -1;
-		if (trackpadGesture.current.dragging) sendInput({ type: "pointer", action: "up", button: "left", ...serialisedTrackpadPosition() });
-		trackpadGesture.current.dragging = false;
-		if (trackpadGesture.current.timer) window.clearTimeout(trackpadGesture.current.timer);
-		trackpadGesture.current.timer = 0;
+		// pointercancel is an interruption, not a click. Release exactly the buttons
+		// that are genuinely held, clear local ownership first, then relinquish native
+		// capture. Releasing capture before clearing the gesture lets Chromium fire
+		// lostpointercapture synchronously and used to synthesize a second pointer-up
+		// (or an unrelated left-up for the second finger of a pinch).
+		releaseActivePointerRef.current();
+		releasePointerSafely(event.currentTarget, event.pointerId);
 	}
 
 	function wheel(event: ReactWheelEvent<HTMLDivElement>) {
     event.preventDefault();
+		flushPendingPointerMove();
 		const pixelDelta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? Math.max(320, viewportSize.height) : 1);
 		wheelAccumulator.current += pixelDelta;
 		let steps = 0;
@@ -2215,7 +2782,14 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
   }
 
   function keyboard(event: ReactKeyboardEvent<HTMLDivElement>, action: "down" | "up") {
-		const plan = planRemoteKeyboardInput(event, action, textKeyboardKeys.current);
+		const plan = planRemoteKeyboardInput({
+			code: event.code,
+			key: event.key,
+			ctrlKey: event.ctrlKey,
+			altKey: event.altKey,
+			metaKey: event.metaKey,
+			altGraphKey: event.getModifierState("AltGraph"),
+		}, action, textKeyboardKeys.current);
 		if (!plan.handled) return;
     event.preventDefault();
     event.stopPropagation();
@@ -2274,14 +2848,16 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	function sendPointerTap(button: "left" | "right") {
+		discardPendingPointerMove();
 		const position = serialisedTrackpadPosition();
 		sendInput({ type: "pointer", action: "move", ...position });
-		sendInput({ type: "pointer", action: "down", button, ...position });
-		sendInput({ type: "pointer", action: "up", button, ...position });
+		for (const input of remotePointerTapActions(button)) sendInput({ type: "pointer", ...input, ...position });
 	}
 
 	function selectPointerMode(next: "direct" | "trackpad") {
 		if (next === pointerMode) return;
+		discardPendingPointerMove();
+		clearPendingTrackpadMotion(false);
 		setPointerMode(next);
 		if (next !== "trackpad") return;
 		window.requestAnimationFrame(() => {
@@ -2293,6 +2869,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	function finishRemoteSession() {
+		discardPendingPointerMove();
+		clearPendingTrackpadMotion(false);
 		onClose();
 	}
 
@@ -2347,6 +2925,11 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	function sendMobileEnter() {
+		const now = performance.now();
+		// A few Android IMEs emit both keydown and beforeinput for the same action.
+		// Accept either path, but never turn one tap into two remote Enter presses.
+		if (now - mobileEnterAt.current < 36) return;
+		mobileEnterAt.current = now;
 		sendVirtualKeyTap(13);
 		setMobileText("");
 		mobileTextSyncedRef.current = "";
@@ -2377,7 +2960,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		event.preventDefault();
 		stopWheelRepeat();
 		wheelRepeat.current.pointerId = event.pointerId;
-		try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* capture is optional in older WebViews */ }
+		capturePointerSafely(event.currentTarget, event.pointerId);
 		sendInput({ type: "wheel", delta: direction * 240 });
 		wheelRepeat.current.delay = window.setTimeout(() => {
 			wheelRepeat.current.interval = window.setInterval(() => sendInput({ type: "wheel", delta: direction * 120 }), 80);
@@ -2485,7 +3068,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button>
 			</div>
 		</header>
-		<div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale === "fit" ? "fit" : "fixed"}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onWheel={wheel} onContextMenu={(event) => event.preventDefault()}>
+		<div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale === "fit" ? "fit" : "fixed"}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onLostPointerCapture={lostPointerCapture} onWheel={wheel} onContextMenu={(event) => event.preventDefault()}>
 			{frameURL ? <>
 				<div className="remote-screen-canvas">
 					<div className="remote-screen-image-layer" style={remoteImageLayerStyle}>
@@ -2529,7 +3112,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button>
 		</footer>
 		{keyboardOpen && <div className="remote-mobile-keyboard" role="group" aria-label="Ввод на удалённом компьютере">
-			<input ref={mobileKeyboardRef} name="remoteit-live-input" autoComplete="off" value={mobileText} onBeforeInput={(event) => { const input = event.currentTarget; const plan = planRemoteBoundaryDeletion((event.nativeEvent as InputEvent).inputType || "", input.value, input.selectionStart, input.selectionEnd); if (plan.handled && plan.keyCode) { event.preventDefault(); sendMobileBoundaryDelete(plan.keyCode); } }} onInput={(event) => updateMobileText(event.currentTarget.value)} onCompositionEnd={(event) => updateMobileText(event.currentTarget.value)} onSelect={(event) => { const input = event.currentTarget; if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) window.requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length)); }} onKeyDown={(event) => { if ((event.key === "Backspace" || event.key === "Delete") && !event.nativeEvent.isComposing) { const inputType = event.key === "Backspace" ? "deleteContentBackward" : "deleteContentForward"; const plan = planRemoteBoundaryDeletion(inputType, event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd); if (plan.handled && plan.keyCode) { event.preventDefault(); sendMobileBoundaryDelete(plan.keyCode); return; } } if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); sendMobileEnter(); } }} placeholder="Ввод в реальном времени" enterKeyHint="send" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+			<input ref={mobileKeyboardRef} name="remoteit-live-input" autoComplete="off" value={mobileText} onBeforeInput={(event) => { const input = event.currentTarget; const plan = planRemoteMobileBeforeInput((event.nativeEvent as InputEvent).inputType || "", input.value, input.selectionStart, input.selectionEnd); if (plan.handled && plan.keyCode) { event.preventDefault(); if (plan.keyCode === 13) sendMobileEnter(); else sendMobileBoundaryDelete(plan.keyCode); } }} onInput={(event) => updateMobileText(event.currentTarget.value)} onCompositionEnd={(event) => updateMobileText(event.currentTarget.value)} onSelect={(event) => { const input = event.currentTarget; if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) window.requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length)); }} onKeyDown={(event) => { if ((event.key === "Backspace" || event.key === "Delete") && !event.nativeEvent.isComposing) { const inputType = event.key === "Backspace" ? "deleteContentBackward" : "deleteContentForward"; const plan = planRemoteBoundaryDeletion(inputType, event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd); if (plan.handled && plan.keyCode) { event.preventDefault(); sendMobileBoundaryDelete(plan.keyCode); return; } } if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); sendMobileEnter(); } }} placeholder="Ввод в реальном времени" enterKeyHint="send" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
 			<button type="button" className="remote-keyboard-enter" onClick={sendMobileEnter}>Enter</button>
 			<button type="button" className="remote-keyboard-close" onClick={() => setMobileKeyboardVisibility(false)} aria-label="Закрыть клавиатуру"><X size={17} /></button>
 		</div>}
@@ -2666,9 +3249,14 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
         const created = await api<{ id: string }>(`/api/devices/${device.id}/file-transfers`, { method: "POST", body: JSON.stringify({ direction: "to_device", name: file.name, remotePath: path, size: file.size }) }, csrf);
         transferId = created.id;
         setActiveTransfer({ id: created.id, direction: "to_device", label: file.name, stage: "Отправка на сервер RemoteIt", received: 0, size: file.size, startedAt });
-        let offset = 0; const chunkSize = 64 * 1024 * 1024;
+        // Commit 8 MiB first so the agent starts immediately, then use 64 MiB
+        // steady-state chunks to keep fast LAN/Wi-Fi links full with fewer
+        // request and fsync round trips.
+        let offset = 0;
         while (offset < file.size) {
-          const chunkOffset = offset; let uploaded = false; let lastError = "";
+          const chunkOffset = offset;
+          const chunkSize = browserTransferChunkLength(chunkOffset, file.size);
+          let uploaded = false; let lastError = "";
           for (let attempt = 0; attempt < 5 && !uploaded; attempt += 1) {
             try {
               const chunk = file.slice(chunkOffset, Math.min(file.size, chunkOffset + chunkSize));
@@ -2751,7 +3339,7 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
 	</div> : loading && <div className="remote-files-loading"><RefreshCw className="spin" size={16} /> Ожидание ответа Agent…</div>}
     {message && <div className="form-success">{message}</div>}
     {error && <div className="form-error">{error}</div>}
-		<small className="remote-files-limit"><ShieldCheck size={14} /> Передача идёт потоковыми частями по 64 МБ, поддерживает отмену и автоматически продолжается после краткого обрыва. Файл до 10 ГБ не хранится целиком в памяти.</small>
+		<small className="remote-files-limit"><ShieldCheck size={14} /> Передача идёт параллельным потоковым конвейером, поддерживает отмену и автоматически продолжается после краткого обрыва. Файл до 10 ГБ не хранится целиком в памяти.</small>
   </section>;
 }
 

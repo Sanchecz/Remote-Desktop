@@ -18,8 +18,12 @@ import (
 )
 
 const (
-	maxLargeTransfer   int64 = 10 * 1024 * 1024 * 1024
-	largeTransferChunk int64 = 64 * 1024 * 1024
+	maxLargeTransfer          int64 = 10 * 1024 * 1024 * 1024
+	largeTransferChunk        int64 = 64 * 1024 * 1024
+	transferSourceWaitTimeout       = 5 * time.Minute
+	transferIdleTimeout             = 45 * time.Second
+	transferDownloadAttempts        = 5
+	transferCompleteAttempts        = 6
 )
 
 type largeFileTransfer struct {
@@ -27,8 +31,74 @@ type largeFileTransfer struct {
 	Size, Received                  int64
 }
 
+type transferActivityReader struct {
+	reader io.Reader
+	touch  func()
+}
+
+func (reader transferActivityReader) Read(buffer []byte) (int, error) {
+	read, err := reader.reader.Read(buffer)
+	if read > 0 && reader.touch != nil {
+		reader.touch()
+	}
+	return read, err
+}
+
+// newTransferIdleWatchdog cancels only a stalled request, not a merely slow
+// transfer. Every successful body read refreshes the deadline, so a 10 GiB
+// file can run for hours on a slow link while a dead Wi-Fi/VPN TCP flow is
+// released quickly enough for the checkpoint retry to take over.
+func newTransferIdleWatchdog(parent context.Context, idle time.Duration) (context.Context, context.CancelFunc, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	activity := make(chan struct{}, 1)
+	touch := func() {
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+	}
+	go func() {
+		timer := time.NewTimer(idle)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-activity:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(idle)
+			case <-timer.C:
+				cancel()
+				return
+			}
+		}
+	}()
+	touch()
+	return ctx, cancel, touch
+}
+
+func newFileTransferHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 8
+	transport.MaxIdleConnsPerHost = 4
+	transport.MaxConnsPerHost = 4
+	transport.IdleConnTimeout = 60 * time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	// The streaming server long-poll waits for at most 20 seconds. A bounded
+	// header wait prevents a vanished route from pinning the transfer loop, but
+	// does not impose an absolute deadline on a large body that is progressing.
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	return &http.Client{Transport: transport}
+}
+
 func runFileTransferLoop(ctx context.Context, cfg *config) {
-	client := &http.Client{}
+	client := newFileTransferHTTPClient()
+	defer client.CloseIdleConnections()
 	for ctx.Err() == nil {
 		transfer, active, err := fetchNextFileTransfer(ctx, client, cfg)
 		if err == nil && active {
@@ -78,6 +148,9 @@ func fetchNextFileTransfer(ctx context.Context, client *http.Client, cfg *config
 }
 
 func executeLargeFileTransfer(ctx context.Context, client *http.Client, cfg *config, transfer largeFileTransfer) error {
+	if !validLargeTransferID(transfer.ID) {
+		return errors.New("сервер вернул некорректный идентификатор передачи")
+	}
 	if transfer.Size < 0 || transfer.Size > maxLargeTransfer {
 		return errors.New("размер передачи превышает 10 ГБ")
 	}
@@ -89,6 +162,24 @@ func executeLargeFileTransfer(ctx context.Context, client *http.Client, cfg *con
 	default:
 		return errors.New("неизвестное направление передачи")
 	}
+}
+
+func validLargeTransferID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for index, character := range id {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if character != '-' {
+				return false
+			}
+			continue
+		}
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func receiveLargeFile(ctx context.Context, client *http.Client, cfg *config, transfer largeFileTransfer) error {
@@ -130,26 +221,33 @@ func receiveLargeFile(ctx context.Context, client *http.Client, cfg *config, tra
 		_ = file.Truncate(0)
 		current = 0
 	}
+	sourceWaitDeadline := time.Now().Add(transferSourceWaitTimeout)
 	for current < transfer.Size {
 		chunkStart := current
 		received := false
 		var lastErr error
-		for attempt := 0; attempt < 5 && !received; attempt++ {
+		failures := 0
+		for !received {
 			if _, seekErr := file.Seek(chunkStart, io.SeekStart); seekErr != nil {
 				return seekErr
 			}
 			_ = file.Truncate(chunkStart)
 			path := "/api/agent/file-transfers/" + transfer.ID + "/data?offset=" + strconv.FormatInt(chunkStart, 10)
-			response, requestErr := transferRequest(ctx, client, cfg, http.MethodGet, path, nil, "")
+			requestCtx, cancelRequest, touch := newTransferIdleWatchdog(ctx, transferIdleTimeout)
+			response, requestErr := transferRequest(requestCtx, client, cfg, http.MethodGet, path, nil, "")
+			status := 0
 			if requestErr == nil {
+				status = response.StatusCode
 				if response.StatusCode == http.StatusOK {
-					written, copyErr := io.Copy(file, io.LimitReader(response.Body, largeTransferChunk+1))
+					written, copyErr := io.Copy(file, io.LimitReader(transferActivityReader{reader: response.Body, touch: touch}, largeTransferChunk+1))
 					response.Body.Close()
+					cancelRequest()
 					if copyErr == nil && written > 0 && written <= largeTransferChunk && chunkStart+written <= transfer.Size {
 						if syncErr := file.Sync(); syncErr != nil {
 							return syncErr
 						}
 						current = chunkStart + written
+						sourceWaitDeadline = time.Now().Add(transferSourceWaitTimeout)
 						received = true
 						break
 					}
@@ -159,16 +257,30 @@ func receiveLargeFile(ctx context.Context, client *http.Client, cfg *config, tra
 					}
 				} else {
 					response.Body.Close()
+					cancelRequest()
 					requestErr = fmt.Errorf("скачивание части: HTTP %d", response.StatusCode)
 				}
+			} else {
+				cancelRequest()
 			}
 			lastErr = requestErr
-			if !waitContext(ctx, time.Duration(attempt+1)*time.Second) {
+			retry, delay, waitsForSource := fileTransferDownloadRetry(status, failures)
+			if !retry {
+				return lastErr
+			}
+			if waitsForSource {
+				if time.Now().After(sourceWaitDeadline) {
+					return errors.New("источник не передал следующий блок файла за 5 минут")
+				}
+			} else {
+				failures++
+				if failures >= transferDownloadAttempts {
+					return lastErr
+				}
+			}
+			if !waitContext(ctx, delay) {
 				return ctx.Err()
 			}
-		}
-		if !received {
-			return lastErr
 		}
 	}
 	if current != transfer.Size {
@@ -215,12 +327,14 @@ func sendLargeFile(ctx context.Context, client *http.Client, cfg *config, transf
 		uploaded := false
 		var lastErr error
 		for attempt := 0; attempt < 5 && !uploaded; attempt++ {
-			body := io.NewSectionReader(file, chunkOffset, length)
+			requestCtx, cancelRequest, touch := newTransferIdleWatchdog(ctx, transferIdleTimeout)
+			body := transferActivityReader{reader: io.NewSectionReader(file, chunkOffset, length), touch: touch}
 			path := "/api/agent/file-transfers/" + transfer.ID + "/data?offset=" + url.QueryEscape(strconv.FormatInt(chunkOffset, 10))
-			response, requestErr := transferRequest(ctx, client, cfg, http.MethodPut, path, body, "application/octet-stream")
+			response, requestErr := transferRequest(requestCtx, client, cfg, http.MethodPut, path, body, "application/octet-stream")
 			if requestErr == nil {
 				payload, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 				response.Body.Close()
+				cancelRequest()
 				if readErr == nil && response.StatusCode == http.StatusOK {
 					var progress struct {
 						Received int64 `json:"received"`
@@ -232,6 +346,8 @@ func sendLargeFile(ctx context.Context, client *http.Client, cfg *config, transf
 					}
 				}
 				requestErr = fmt.Errorf("загрузка части: HTTP %d", response.StatusCode)
+			} else {
+				cancelRequest()
 			}
 			lastErr = requestErr
 			if checkpoint, checkpointErr := fetchFileTransferCheckpoint(ctx, client, cfg, transfer.ID); checkpointErr == nil && validTransferCheckpoint(checkpoint, chunkOffset, length, transfer.Size) {
@@ -254,6 +370,24 @@ func validTransferCheckpoint(received, offset, chunkLength, total int64) bool {
 	return offset >= 0 && chunkLength >= 0 && total >= 0 && offset <= total && chunkLength <= total-offset && received == offset+chunkLength
 }
 
+// fileTransferDownloadRetry keeps a pipelined browser-to-device transfer
+// alive while the browser is still committing the next chunk. HTTP 425 is an
+// expected flow-control response and therefore must not consume the ordinary
+// network-error budget. Permanent authentication/path failures fail fast.
+func fileTransferDownloadRetry(status, failures int) (retry bool, delay time.Duration, waitsForSource bool) {
+	if status == http.StatusTooEarly {
+		return true, 250 * time.Millisecond, true
+	}
+	if status == 0 || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500 {
+		seconds := failures + 1
+		if seconds > 5 {
+			seconds = 5
+		}
+		return true, time.Duration(seconds) * time.Second, false
+	}
+	return false, 0, false
+}
+
 func fetchFileTransferCheckpoint(ctx context.Context, client *http.Client, cfg *config, id string) (int64, error) {
 	response, err := transferRequest(ctx, client, cfg, http.MethodGet, "/api/agent/file-transfers/"+id, nil, "")
 	if err != nil {
@@ -274,9 +408,11 @@ func fetchFileTransferCheckpoint(ctx context.Context, client *http.Client, cfg *
 
 func completeFileTransfer(ctx context.Context, client *http.Client, cfg *config, id string) error {
 	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 0; attempt < transferCompleteAttempts; attempt++ {
 		response, err := transferRequest(ctx, client, cfg, http.MethodPost, "/api/agent/file-transfers/"+id+"/complete", bytes.NewReader([]byte("{}")), "application/json")
+		status := 0
 		if err == nil {
+			status = response.StatusCode
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
 				return nil
@@ -284,11 +420,23 @@ func completeFileTransfer(ctx context.Context, client *http.Client, cfg *config,
 			err = fmt.Errorf("завершение передачи: HTTP %d", response.StatusCode)
 		}
 		lastErr = err
-		if !waitContext(ctx, time.Duration(1<<attempt)*time.Second) {
+		retry, delay := fileTransferCompletionRetry(status, attempt)
+		if !retry || attempt == transferCompleteAttempts-1 {
+			return lastErr
+		}
+		if !waitContext(ctx, delay) {
 			return ctx.Err()
 		}
 	}
 	return lastErr
+}
+
+func fileTransferCompletionRetry(status, attempt int) (bool, time.Duration) {
+	if status != 0 && status != http.StatusConflict && status != http.StatusTooEarly && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests && status < 500 {
+		return false, 0
+	}
+	delay := time.Second << min(attempt, 3)
+	return true, delay
 }
 
 func logTransferFailure(ctx context.Context, client *http.Client, cfg *config, id string, transferErr error) {
