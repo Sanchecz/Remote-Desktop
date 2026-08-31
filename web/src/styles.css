@@ -257,6 +257,9 @@ td code { color: #8becc2; font-size: 11px; padding: 4px 7px; border-radius: 5px;
 .modal-form input { height: 44px; border-radius: 9px; padding: 0 12px; color: var(--text); background: #0b1016; border: 1px solid #293341; outline: none; }
 .modal-form input:focus { border-color: #39c58f; box-shadow: 0 0 0 3px rgba(57,231,155,.07); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; padding-top: 6px; }
+.enrollment-modal { max-height: calc(100dvh - 40px); display: flex; flex-direction: column; }
+.enrollment-modal > .modal-head { flex: 0 0 auto; }
+.enrollment-modal > .modal-form { min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
 .token-result { padding: 28px 24px 24px; text-align: center; }
 .token-icon { width: 58px; height: 58px; border-radius: 16px; display: grid; place-items: center; margin: 0 auto; background: rgba(57,231,155,.1); color: var(--green); }
 .token-result h3 { margin: 16px 0 8px; }
@@ -1318,6 +1321,7 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.ai-composer .primary-button span { display: none; }
 	.modal-backdrop { padding: 0; place-items: stretch; }
 	.modal { width: 100vw; max-height: 100dvh; border: 0; border-radius: 0; }
+	.enrollment-modal { height: 100dvh; max-height: 100dvh; }
 	.enrollment-result-modal { width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; }
 	.enrollment-result-head { padding: 20px 17px 14px; }
 	.enrollment-result-head h2 { margin-top: 9px; font-size: 23px; }

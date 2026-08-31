@@ -4485,9 +4485,9 @@ function EnrollmentModal({ csrf, onClose }: { csrf: string; onClose: () => void 
 		setCommandCopied(true); window.setTimeout(() => setCommandCopied(false), 1800);
 	}
 
-  return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-    <section className={`modal ${token ? "enrollment-result-modal" : ""}`}>
-      <div className={`modal-head ${token ? "enrollment-result-head" : ""}`}><div><span className="eyebrow">АВТОМАТИЧЕСКАЯ ПРИВЯЗКА</span><h2>{token ? "Токен готов" : "Добавить устройства"}</h2>{token && <><p>Используйте токен при установке Agent на компьютере.</p><small>После установки устройство автоматически появится в группе «{group}».</small></>}</div><button className="icon-button" onClick={onClose}><X size={21} /></button></div>
+  return <div className="modal-backdrop enrollment-modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <section className={`modal enrollment-modal ${token ? "enrollment-result-modal" : ""}`} role="dialog" aria-modal="true" aria-labelledby="enrollment-modal-title">
+      <div className={`modal-head ${token ? "enrollment-result-head" : ""}`}><div><span className="eyebrow">АВТОМАТИЧЕСКАЯ ПРИВЯЗКА</span><h2 id="enrollment-modal-title">{token ? "Токен готов" : "Добавить устройства"}</h2>{token && <><p>Используйте токен при установке Agent на компьютере.</p><small>После установки устройство автоматически появится в группе «{group}».</small></>}</div><button className="icon-button" onClick={onClose} aria-label="Закрыть окно добавления устройства"><X size={21} /></button></div>
       {token ? <div className="token-result enrollment-token-result">
         <div className="ready-token-box"><div className="ready-token-content"><span>ВАШ ТОКЕН</span><code>{token}</code></div><div className="ready-token-actions"><button type="button" onClick={copy}><Copy size={18} /> {copied ? "Скопировано" : "Код"}</button><button type="button" onClick={copyInstallLink}><Link2 size={18} /> {linkCopied ? "Ссылка скопирована" : "Ссылка"}</button></div></div>
         <div className="ready-token-validity"><ShieldCheck size={17} /><span>До {maxUses} установок · действует {validDays} дн. · доступ можно отозвать в панели.</span></div>
