@@ -492,6 +492,9 @@ func enableWindowsTokenPrivilege(token windows.Token, name string) error {
 
 func desktopWorkerCommand() error {
 	setupLogging()
+	if err := bindDesktopProcessWindowStation(); err != nil {
+		return err
+	}
 	done := make(chan struct{})
 	runDesktopAgentLoop(done)
 	return nil
