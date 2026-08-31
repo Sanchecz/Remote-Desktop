@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
+	"image/png"
 	"io"
 	"net/http"
 	"net/url"
@@ -75,6 +76,13 @@ var (
 	procSetThreadDesktop       = user32Desktop.NewProc("SetThreadDesktop")
 	procCloseDesktop           = user32Desktop.NewProc("CloseDesktop")
 	procGetUserObjectInfo      = user32Desktop.NewProc("GetUserObjectInformationW")
+	procOpenClipboard          = user32Desktop.NewProc("OpenClipboard")
+	procCloseClipboard         = user32Desktop.NewProc("CloseClipboard")
+	procEmptyClipboard         = user32Desktop.NewProc("EmptyClipboard")
+	procIsClipboardFormat      = user32Desktop.NewProc("IsClipboardFormatAvailable")
+	procGetClipboardData       = user32Desktop.NewProc("GetClipboardData")
+	procSetClipboardData       = user32Desktop.NewProc("SetClipboardData")
+	procCreateDCW              = gdi32Desktop.NewProc("CreateDCW")
 	procCreateCompatibleDC     = gdi32Desktop.NewProc("CreateCompatibleDC")
 	procDeleteDC               = gdi32Desktop.NewProc("DeleteDC")
 	procCreateDIBSection       = gdi32Desktop.NewProc("CreateDIBSection")
@@ -91,6 +99,12 @@ var (
 	procSetWaitableTimerEx     = kernel32Desktop.NewProc("SetWaitableTimerEx")
 	procWaitForSingleObject    = kernel32Desktop.NewProc("WaitForSingleObject")
 	procCloseHandle            = kernel32Desktop.NewProc("CloseHandle")
+	procGlobalAlloc            = kernel32Desktop.NewProc("GlobalAlloc")
+	procGlobalLock             = kernel32Desktop.NewProc("GlobalLock")
+	procGlobalUnlock           = kernel32Desktop.NewProc("GlobalUnlock")
+	procGlobalSize             = kernel32Desktop.NewProc("GlobalSize")
+	procGlobalFree             = kernel32Desktop.NewProc("GlobalFree")
+	procMoveMemory             = kernel32Desktop.NewProc("RtlMoveMemory")
 	procSendSAS                = sasDesktop.NewProc("SendSAS")
 )
 
@@ -188,10 +202,13 @@ type desktopInput struct {
 	CoordinateHeight int    `json:"coordinateHeight,omitempty"`
 	Delta            int    `json:"delta,omitempty"`
 	KeyCode          int    `json:"keyCode,omitempty"`
+	ImagePNG         []byte `json:"-"`
+	TransportErr     error  `json:"-"`
 }
 
 type desktopInputBatch struct {
 	SessionID string
+	Access    desktopAgentAccess
 	Events    []desktopInput
 }
 
@@ -215,6 +232,8 @@ type desktopAcknowledgedInputResult struct {
 	inputID   int64
 	inputType string
 	value     string
+	mime      string
+	imagePNG  []byte
 	err       error
 }
 
@@ -285,6 +304,17 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 					continue
 				}
 				if event.Type == "clipboard_read" {
+					imagePNG, imageAvailable, imageErr := readWindowsClipboardPNG()
+					if imageAvailable || imageErr != nil {
+						if imageErr == nil && !windowsClipboardPNGChanged(imagePNG) {
+							imagePNG = nil
+						}
+						result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, mime: "image/png", imagePNG: imagePNG, err: imageErr})
+						if result.err == nil && imageErr != nil {
+							result.err = imageErr
+						}
+						continue
+					}
 					value, clipboardErr := walk.Clipboard().Text()
 					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, value: value, err: clipboardErr})
 					if result.err == nil && clipboardErr != nil {
@@ -294,6 +324,17 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 				}
 				if event.Type == "clipboard_write" {
 					clipboardErr := walk.Clipboard().SetText(event.Text)
+					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, err: clipboardErr})
+					if result.err == nil && clipboardErr != nil {
+						result.err = clipboardErr
+					}
+					continue
+				}
+				if event.Type == "clipboard_image_write" {
+					clipboardErr := event.TransportErr
+					if clipboardErr == nil {
+						clipboardErr = writeWindowsClipboardPNG(event.ImagePNG)
+					}
 					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, err: clipboardErr})
 					if result.err == nil && clipboardErr != nil {
 						result.err = clipboardErr
@@ -567,7 +608,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 	frameUploadResults := make(chan desktopFrameUploadResult, 8)
 	go runDesktopFrameUploader(ctx, frameClient, frameUploads, frameUploadResults, streamInputBatches, &legacyInputStreamActive)
 	go runDesktopInputStream(ctx, inputClient, inputStreamTargets, streamInputBatches, &dedicatedInputStreamActive)
-	go runDesktopStreamInputDispatcher(ctx, streamInputBatches, inputTasks, &latestCapture, &latestInputNanos, &activeInputSession)
+	go runDesktopStreamInputDispatcher(ctx, controlClient, streamInputBatches, inputTasks, &latestCapture, &latestInputNanos, &activeInputSession)
 	autoCadence := newDesktopAutoCadence()
 	access := desktopAgentAccess{}
 	accessLoadedAt := time.Time{}
@@ -698,6 +739,12 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 				if acknowledged.inputID <= 0 {
 					continue
 				}
+				if len(acknowledged.imagePNG) > 0 && acknowledged.err == nil {
+					acknowledged.err = uploadDesktopClipboardImage(ctx, controlClient, access, offer.ID, acknowledged.imagePNG)
+					if acknowledged.err == nil {
+						rememberWindowsClipboardPNG(acknowledged.imagePNG)
+					}
+				}
 				if err := reportDesktopInputResult(ctx, controlClient, access, offer.ID, acknowledged); err != nil {
 					select {
 					case inputErrors <- err:
@@ -728,7 +775,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 				}
 				if inputErr == nil && len(events) > 0 {
 					select {
-					case streamInputBatches <- desktopInputBatch{SessionID: sessionID, Events: events}:
+					case streamInputBatches <- desktopInputBatch{SessionID: sessionID, Access: accessCopy, Events: events}:
 					case <-ctx.Done():
 					}
 				}
@@ -1032,7 +1079,7 @@ func reportDesktopInputResult(ctx context.Context, client *http.Client, access d
 	if result.err != nil {
 		inputError = result.err.Error()
 	}
-	payload, err := json.Marshal(map[string]any{"inputId": result.inputID, "inputType": result.inputType, "inputError": inputError, "inputValue": result.value})
+	payload, err := json.Marshal(map[string]any{"inputId": result.inputID, "inputType": result.inputType, "inputError": inputError, "inputValue": result.value, "inputMime": result.mime})
 	if err != nil {
 		return err
 	}
@@ -1084,6 +1131,47 @@ func desktopRequest(ctx context.Context, client *http.Client, access desktopAgen
 		request.Header.Set(key, value)
 	}
 	return client.Do(request)
+}
+
+func uploadDesktopClipboardImage(ctx context.Context, client *http.Client, access desktopAgentAccess, sessionID string, imagePNG []byte) error {
+	if len(imagePNG) == 0 || len(imagePNG) > desktopMaximumClipboardImageBytes {
+		return errors.New("изображение удалённого буфера пустое или слишком большое")
+	}
+	response, err := desktopRequest(ctx, client, access, http.MethodPost, "/api/desktop/agent/sessions/"+url.PathEscape(sessionID)+"/clipboard-image", bytes.NewReader(imagePNG), map[string]string{"Content-Type": "image/png"})
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("desktop clipboard image upload: HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func downloadDesktopClipboardImage(ctx context.Context, client *http.Client, access desktopAgentAccess, sessionID, sequence string) ([]byte, error) {
+	if _, err := strconv.ParseUint(sequence, 10, 64); err != nil {
+		return nil, errors.New("некорректная версия изображения буфера")
+	}
+	path := "/api/desktop/agent/sessions/" + url.PathEscape(sessionID) + "/clipboard-image/" + url.PathEscape(sequence)
+	response, err := desktopRequest(ctx, client, access, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("desktop clipboard image download: HTTP %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, desktopMaximumClipboardImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || len(data) > desktopMaximumClipboardImageBytes {
+		return nil, errors.New("изображение буфера пустое или слишком большое")
+	}
+	if _, err := png.DecodeConfig(bytes.NewReader(data)); err != nil {
+		return nil, errors.New("сервер вернул некорректное изображение буфера")
+	}
+	return data, nil
 }
 
 func fetchDesktopOffer(ctx context.Context, client *http.Client, access desktopAgentAccess) (desktopSessionOffer, bool, error) {
@@ -1278,7 +1366,7 @@ func (stream *desktopFrameStreamClient) send(ctx context.Context, client *http.C
 			readCtx, cancel := context.WithCancel(ctx)
 			stream.readCancel = cancel
 			generation := stream.readGeneration.Add(1)
-			go stream.readInputs(readCtx, connection, upload.sessionID, generation)
+			go stream.readInputs(readCtx, connection, upload.sessionID, upload.access, generation)
 		}
 	}
 	header := desktopFrameStreamHeader(upload)
@@ -1305,7 +1393,7 @@ func (stream *desktopFrameStreamClient) send(ctx context.Context, client *http.C
 	return err
 }
 
-func (stream *desktopFrameStreamClient) readInputs(ctx context.Context, connection *websocket.Conn, sessionID string, generation uint64) {
+func (stream *desktopFrameStreamClient) readInputs(ctx context.Context, connection *websocket.Conn, sessionID string, access desktopAgentAccess, generation uint64) {
 	defer func() {
 		if stream.active != nil && stream.readGeneration.Load() == generation {
 			stream.active.Store(false)
@@ -1331,7 +1419,7 @@ func (stream *desktopFrameStreamClient) readInputs(ctx context.Context, connecti
 			stream.active.Store(true)
 		}
 		select {
-		case stream.inputs <- desktopInputBatch{SessionID: sessionID, Events: events}:
+		case stream.inputs <- desktopInputBatch{SessionID: sessionID, Access: access, Events: events}:
 		case <-ctx.Done():
 			return
 		}
@@ -1368,7 +1456,7 @@ func receiveDesktopInputStream(ctx context.Context, connection *websocket.Conn, 
 			continue
 		}
 		select {
-		case inputs <- desktopInputBatch{SessionID: target.sessionID, Events: events}:
+		case inputs <- desktopInputBatch{SessionID: target.sessionID, Access: target.access, Events: events}:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -1512,7 +1600,7 @@ func desktopAtomicString(value *atomic.Value) string {
 // coalesces only obsolete free pointer positions; clicks, keys and wheel events
 // retain their order and are handed to the dedicated locked Windows input
 // thread immediately.
-func runDesktopStreamInputDispatcher(ctx context.Context, batches <-chan desktopInputBatch, tasks chan desktopInputTask, latestCapture *atomic.Value, latestInputNanos *atomic.Int64, activeSession *atomic.Value) {
+func runDesktopStreamInputDispatcher(ctx context.Context, client *http.Client, batches <-chan desktopInputBatch, tasks chan desktopInputTask, latestCapture *atomic.Value, latestInputNanos *atomic.Int64, activeSession *atomic.Value) {
 	var carry *desktopInputBatch
 	lastSessionID := ""
 	var lastDispatchedID int64
@@ -1559,6 +1647,12 @@ func runDesktopStreamInputDispatcher(ctx context.Context, batches <-chan desktop
 			continue
 		}
 		pending = coalesceDesktopInput(pending)
+		for index := range pending {
+			if pending[index].Type != "clipboard_image_write" {
+				continue
+			}
+			pending[index].ImagePNG, pending[index].TransportErr = downloadDesktopClipboardImage(ctx, client, batch.Access, batch.SessionID, pending[index].Text)
+		}
 		// The server restores an input batch if an Agent WebSocket write fails.
 		// A complete message can nevertheless have reached this process before the
 		// close became visible to the sender, so IDs make reconnect delivery
@@ -2035,17 +2129,57 @@ func (capturer *desktopCapturer) copyGDISurface() (string, bool) {
 	if capturer.screenDC == 0 || capturer.memoryDC == 0 || capturer.width <= 0 || capturer.height <= 0 {
 		return "-unavailable", false
 	}
-	const sourceCopy = 0x00CC0020 // SRCCOPY
-	if capturer.screenWidth == capturer.width && capturer.screenHeight == capturer.height {
-		copied, _, _ := procBitBlt.Call(capturer.memoryDC, 0, 0, uintptr(capturer.width), uintptr(capturer.height), capturer.screenDC, uintptr(capturer.screenX), uintptr(capturer.screenY), sourceCopy)
-		return "-bitblt", copied != 0
+	copyFrom := func(sourceDC, rasterOperation uintptr) bool {
+		if sourceDC == 0 {
+			return false
+		}
+		if capturer.screenWidth == capturer.width && capturer.screenHeight == capturer.height {
+			copied, _, _ := procBitBlt.Call(capturer.memoryDC, 0, 0, uintptr(capturer.width), uintptr(capturer.height), sourceDC, uintptr(capturer.screenX), uintptr(capturer.screenY), rasterOperation)
+			return copied != 0
+		}
+		// COLORONCOLOR is intentionally used only on the secure/compatibility GDI
+		// path. HALFTONE makes VMware recompose the native surface and can add
+		// hundreds of milliseconds before JPEG encoding starts.
+		procSetStretchBltMode.Call(capturer.memoryDC, 3) // COLORONCOLOR
+		copied, _, _ := procStretchBlt.Call(capturer.memoryDC, 0, 0, uintptr(capturer.width), uintptr(capturer.height), sourceDC, uintptr(capturer.screenX), uintptr(capturer.screenY), uintptr(capturer.screenWidth), uintptr(capturer.screenHeight), rasterOperation)
+		return copied != 0
 	}
-	// COLORONCOLOR is intentionally used only on the secure/compatibility GDI
-	// path. HALFTONE makes VMware recompose the native surface and can add
-	// hundreds of milliseconds before JPEG encoding starts.
-	procSetStretchBltMode.Call(capturer.memoryDC, 3) // COLORONCOLOR
-	copied, _, _ := procStretchBlt.Call(capturer.memoryDC, 0, 0, uintptr(capturer.width), uintptr(capturer.height), capturer.screenDC, uintptr(capturer.screenX), uintptr(capturer.screenY), uintptr(capturer.screenWidth), uintptr(capturer.screenHeight), sourceCopy)
-	return "-stretch-color", copied != 0
+	const (
+		sourceCopy        = uintptr(0x00CC0020) // SRCCOPY
+		sourceCopyLayered = uintptr(0x40CC0020) // SRCCOPY | CAPTUREBLT
+	)
+	if copyFrom(capturer.screenDC, sourceCopy) {
+		if capturer.screenWidth == capturer.width && capturer.screenHeight == capturer.height {
+			return "-bitblt", true
+		}
+		return "-stretch-color", true
+	}
+	// RDP/VDI display drivers can keep an HDC handle alive while invalidating the
+	// surface behind it during reconnect, user-session switching or CredUI. The
+	// composited CAPTUREBLT retry recovers layered/protected windows without
+	// affecting the normal fast path.
+	if copyFrom(capturer.screenDC, sourceCopyLayered) {
+		return "-layered", true
+	}
+	// Re-open DISPLAY in the currently attached input desktop. This is deliberately
+	// a last-resort, per-failure DC: keeping it would recreate the stale-VDI-handle
+	// problem after the next RDP reconnect.
+	displayName, displayNameErr := windows.UTF16PtrFromString("DISPLAY")
+	if displayNameErr != nil {
+		return "-display-name", false
+	}
+	displayDC, _, _ := procCreateDCW.Call(uintptr(unsafe.Pointer(displayName)), 0, 0, 0)
+	if displayDC == 0 {
+		return "-display-unavailable", false
+	}
+	defer procDeleteDC.Call(displayDC)
+	if copyFrom(displayDC, sourceCopy) {
+		return "-display", true
+	}
+	if copyFrom(displayDC, sourceCopyLayered) {
+		return "-display-layered", true
+	}
+	return "-failed", false
 }
 
 func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constrained, preserveDetail bool, cursorVisible bool, secureDesktop bool) (desktopCapture, error) {

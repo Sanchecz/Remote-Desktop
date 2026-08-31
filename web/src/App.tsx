@@ -1129,6 +1129,7 @@ type DesktopSession = {
 		type: string;
 		error: string;
 		value?: string;
+		mime?: string;
 		at: string;
 	} | null;
   captureDiagnostics?: {
@@ -1256,6 +1257,29 @@ function capturePointerSafely(target: Element, pointerId: number) {
 	}
 }
 
+async function clipboardBlobFingerprint(blob: Blob): Promise<string> {
+	const data = await blob.arrayBuffer();
+	if (globalThis.crypto?.subtle) {
+		const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
+		return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+	}
+	// Secure production contexts always expose SubtleCrypto. Keep a deterministic
+	// bounded fallback for older embedded WebViews so unchanged images do not loop.
+	const bytes = new Uint8Array(data);
+	let hash = 2166136261;
+	for (let index = 0; index < bytes.length; index += Math.max(1, Math.floor(bytes.length / 4096))) {
+		hash = Math.imul(hash ^ bytes[index], 16777619);
+	}
+	return `${blob.size}:${hash >>> 0}`;
+}
+
+async function writeClipboardPNG(blob: Blob): Promise<void> {
+	if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+		throw new Error("Этот браузер не поддерживает изображения в буфере");
+	}
+	await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+}
+
 function releasePointerSafely(target: Element, pointerId: number) {
 	try {
 		if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
@@ -1333,6 +1357,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const clipboardSyncEnabledRef = useRef(false);
 	const clipboardLastLocalRef = useRef("");
 	const clipboardLastRemoteAckRef = useRef(0);
+	const clipboardLastLocalImageRef = useRef("");
+	const clipboardLastRemoteImageSequenceRef = useRef(0);
+	const clipboardPendingRemoteImageRef = useRef<Blob | null>(null);
 	const clipboardPollBusyRef = useRef(false);
 	const clipboardPermissionErrorRef = useRef(false);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
@@ -1692,7 +1719,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				if (clipboardAcknowledgement.error) {
 					setSASFeedbackError(true);
 					setSASFeedback(`Буфер удалённого компьютера недоступен: ${clipboardAcknowledgement.error}`);
-				} else if ((clipboardAcknowledgement.value || "") !== clipboardLastLocalRef.current) {
+				} else if (clipboardAcknowledgement.mime !== "image/png" && (clipboardAcknowledgement.value || "") !== clipboardLastLocalRef.current) {
 					const remoteText = clipboardAcknowledgement.value || "";
 					void navigator.clipboard.writeText(remoteText).then(() => {
 						clipboardLastLocalRef.current = remoteText;
@@ -2186,17 +2213,62 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (disposed || document.visibilityState === "hidden" || clipboardPollBusyRef.current) return;
 			clipboardPollBusyRef.current = true;
 			try {
-				const localText = await navigator.clipboard.readText();
-				if (new TextEncoder().encode(localText).byteLength > 32<<10) {
+				let localImage: Blob | null = null;
+				let localText: string | null = null;
+				if (navigator.clipboard.read) {
+					const clipboardItems = await navigator.clipboard.read();
+					for (const item of clipboardItems) {
+						if (item.types.includes("image/png")) {
+							localImage = await item.getType("image/png");
+							break;
+						}
+					}
+					if (!localImage) {
+						const textItem = clipboardItems.find((item) => item.types.includes("text/plain"));
+						if (textItem) localText = await (await textItem.getType("text/plain")).text();
+					}
+				} else {
+					localText = await navigator.clipboard.readText();
+				}
+				if (localImage) {
+					const hash = await clipboardBlobFingerprint(localImage);
+					if (hash !== clipboardLastLocalImageRef.current) {
+						await uploadLocalClipboardImage(localImage);
+						clipboardLastLocalImageRef.current = hash;
+						clipboardPermissionErrorRef.current = false;
+					}
+				} else if (localText !== null && new TextEncoder().encode(localText).byteLength > 32<<10) {
 					if (!clipboardPermissionErrorRef.current) {
 						clipboardPermissionErrorRef.current = true;
 						setSASFeedbackError(true);
 						setSASFeedback("Текст в буфере больше 32 КБ — передайте его как файл");
 					}
-				} else if (localText !== clipboardLastLocalRef.current) {
+				} else if (localText !== null && localText !== clipboardLastLocalRef.current) {
 					clipboardLastLocalRef.current = localText;
 					clipboardPermissionErrorRef.current = false;
 					sendInput({ type: "clipboard_write", text: localText });
+				}
+				const remoteResponse = await fetch(`/api/desktop-sessions/${sessionId}/clipboard-image?after=${clipboardLastRemoteImageSequenceRef.current}`, { credentials: "same-origin", cache: "no-store" });
+				if (remoteResponse.status === 200) {
+					const sequence = Number(remoteResponse.headers.get("X-RemoteIt-Clipboard-Sequence") || "0");
+					const remoteImage = await remoteResponse.blob();
+					if (sequence > clipboardLastRemoteImageSequenceRef.current && remoteImage.type === "image/png") {
+						clipboardLastRemoteImageSequenceRef.current = sequence;
+						try {
+							await writeClipboardPNG(remoteImage);
+							clipboardLastLocalImageRef.current = await clipboardBlobFingerprint(remoteImage);
+							clipboardPendingRemoteImageRef.current = null;
+						} catch {
+							clipboardPendingRemoteImageRef.current = remoteImage;
+							if (!clipboardPermissionErrorRef.current) {
+								clipboardPermissionErrorRef.current = true;
+								setSASFeedbackError(true);
+								setSASFeedback("Получен скриншот из удалённого буфера — нажмите «Буфер», чтобы разрешить запись изображения");
+							}
+						}
+					}
+				} else if (remoteResponse.status !== 204 && !remoteResponse.ok) {
+					throw new Error(`Буфер изображений: HTTP ${remoteResponse.status}`);
 				}
 			} catch {
 				if (!clipboardPermissionErrorRef.current) {
@@ -2216,7 +2288,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			window.clearInterval(timer);
 			clipboardPollBusyRef.current = false;
 		};
-	}, [clipboardSyncEnabled, sessionId, sendInput]);
+	}, [clipboardSyncEnabled, sessionId, sendInput, csrf]);
 
 	function armPointerMoveTimer(delayMs: number) {
 		if (pointerMoveTimer.current) return;
@@ -3072,7 +3144,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		const now = performance.now();
 		// Some Android keyboards emit both keydown and beforeinput for one press.
 		// Keep the two paths as fallbacks while de-duplicating the same deletion.
-		if (now - mobileBoundaryDeleteAt.current < 36) return;
+		// Twelve milliseconds still collapses the duplicate keydown/beforeinput
+		// pair emitted for one tap, but no longer drops legitimate fast key-repeat
+		// events from Samsung/Gboard (often 25-35 ms apart).
+		if (now - mobileBoundaryDeleteAt.current < 12) return;
 		mobileBoundaryDeleteAt.current = now;
 		sendVirtualKeyTap(keyCode);
 	}
@@ -3124,21 +3199,42 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		}
 		try {
 			if (!navigator.clipboard?.readText || !navigator.clipboard?.writeText) throw new Error("Этот браузер не поддерживает общий буфер");
+			if (clipboardPendingRemoteImageRef.current) {
+				await writeClipboardPNG(clipboardPendingRemoteImageRef.current);
+				clipboardLastLocalImageRef.current = await clipboardBlobFingerprint(clipboardPendingRemoteImageRef.current);
+				clipboardPendingRemoteImageRef.current = null;
+			}
 			// Read while the button click still owns transient browser activation.
 			// Awaiting the control API first makes Safari/Firefox discard that grant
 			// and show a permission prompt again for the very same user action.
-			const text = await navigator.clipboard.readText();
-			if (new TextEncoder().encode(text).byteLength > 32<<10) throw new Error("Текст в буфере больше 32 КБ — передайте его как файл");
+			let image: Blob | null = null;
+			let text = "";
+			if (navigator.clipboard.read) {
+				const items = await navigator.clipboard.read();
+				for (const item of items) {
+					if (item.types.includes("image/png")) {
+						image = await item.getType("image/png");
+						break;
+					}
+				}
+			}
+			if (!image) text = await navigator.clipboard.readText();
+			if (!image && new TextEncoder().encode(text).byteLength > 32<<10) throw new Error("Текст в буфере больше 32 КБ — передайте его как файл");
 			await activateRemoteControl();
 			clipboardLastLocalRef.current = text;
 			clipboardLastRemoteAckRef.current = 0;
 			clipboardPermissionErrorRef.current = false;
 			clipboardSyncEnabledRef.current = true;
 			setClipboardSyncEnabled(true);
-			sendInput({ type: "clipboard_write", text });
+			if (image) {
+				await uploadLocalClipboardImage(image);
+				clipboardLastLocalImageRef.current = await clipboardBlobFingerprint(image);
+			} else {
+				sendInput({ type: "clipboard_write", text });
+			}
 			sendInput({ type: "clipboard_read" });
 			setSASFeedbackError(false);
-			setSASFeedback("Общий буфер включён: текст синхронизируется в обе стороны");
+			setSASFeedback("Общий буфер включён: текст и PNG-изображения синхронизируются в обе стороны");
 			sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
 		} catch (reason) {
 			clipboardSyncEnabledRef.current = false;
@@ -3147,6 +3243,26 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			setSASFeedbackError(true);
 			setSASFeedback(message);
 			setError(message);
+		}
+	}
+
+	async function uploadLocalClipboardImage(image: Blob) {
+		if (image.size < 1 || image.size > 12<<20) throw new Error("PNG в буфере больше 12 МБ — передайте его как файл");
+		const response = await fetch(`/api/desktop-sessions/${sessionId}/clipboard-image`, {
+			method: "POST",
+			credentials: "same-origin",
+			headers: { "Content-Type": "image/png", "X-CSRF-Token": csrf },
+			body: image,
+		});
+		if (!response.ok) {
+			let message = `Изображение буфера: HTTP ${response.status}`;
+			try {
+				const payload = await response.json() as { error?: string };
+				if (payload.error) message = payload.error;
+			} catch {
+				// Keep the bounded HTTP error when an intermediary returns non-JSON.
+			}
+			throw new Error(message);
 		}
 	}
 
@@ -3167,17 +3283,23 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error("Не удалось сформировать PNG")), "image/png"));
 			const clipboardWrite = navigator.clipboard?.write?.bind(navigator.clipboard);
 			if (clipboardWrite && typeof ClipboardItem !== "undefined") {
-				await clipboardWrite([new ClipboardItem({ "image/png": blob })]);
-				const textSyncWasEnabled = clipboardSyncEnabledRef.current;
-				if (textSyncWasEnabled) {
-					clipboardSyncEnabledRef.current = false;
-					setClipboardSyncEnabled(false);
+				try {
+					await clipboardWrite([new ClipboardItem({ "image/png": blob })]);
+					const textSyncWasEnabled = clipboardSyncEnabledRef.current;
+					if (textSyncWasEnabled) {
+						clipboardSyncEnabledRef.current = false;
+						setClipboardSyncEnabled(false);
+					}
+					window.clearTimeout(sasFeedbackTimer.current);
+					setSASFeedbackError(false);
+					setSASFeedback(`Снимок ${canvas.width}×${canvas.height} скопирован в буфер этого компьютера${textSyncWasEnabled ? "; общий текстовый буфер приостановлен, чтобы сохранить PNG" : ""}`);
+					sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
+					return;
+				} catch {
+					// Clipboard image writes require a transient browser permission and are
+					// commonly rejected by Firefox/Safari/managed Chromium. Download the
+					// already-created PNG instead of turning a usable screenshot into an error.
 				}
-				window.clearTimeout(sasFeedbackTimer.current);
-				setSASFeedbackError(false);
-				setSASFeedback(`Снимок ${canvas.width}×${canvas.height} скопирован в буфер этого компьютера${textSyncWasEnabled ? "; общий текстовый буфер приостановлен, чтобы сохранить PNG" : ""}`);
-				sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
-				return;
 			}
 			const safeDevice = device.name.replace(/[^\p{L}\p{N}_.-]+/gu, "-").replace(/^-+|-+$/g, "") || "device";
 			const link = document.createElement("a");
@@ -3187,7 +3309,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			link.click();
 			window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 			setSASFeedbackError(false);
-			setSASFeedback("Браузер не поддерживает изображения в буфере — снимок скачан как PNG");
+			setSASFeedback("Браузер не разрешил изображение в буфере — снимок скачан как PNG");
 		} catch (reason) {
 			const message = reason instanceof Error ? reason.message : "Не удалось скопировать снимок";
 			setSASFeedbackError(true);

@@ -187,6 +187,7 @@ type desktopInputAck struct {
 	Type  string    `json:"type"`
 	Error string    `json:"error"`
 	Value string    `json:"value,omitempty"`
+	Mime  string    `json:"mime,omitempty"`
 	At    time.Time `json:"at"`
 }
 
@@ -448,6 +449,7 @@ func (s *server) deleteDesktopFrame(sessionID string) {
 	s.desktopAgentSeen.Delete(sessionID)
 	s.desktopInputAcks.Delete(sessionID)
 	s.desktopClipboardAcks.Delete(sessionID)
+	s.desktopClipboardImages.Delete(sessionID)
 	s.desktopViewerTouches.Delete(sessionID)
 	s.desktopSessionRuntime.Delete(sessionID)
 	s.desktopInputQueues.Delete(sessionID)
@@ -1017,6 +1019,9 @@ func validDesktopInput(event desktopInputEvent) bool {
 		return event.Action == "" && event.Button == "" && len(event.Text) <= 32<<10 && !strings.ContainsRune(event.Text, '\x00') && event.X == 0 && event.Y == 0 && event.Delta == 0 && event.KeyCode == 0
 	case "clipboard_read":
 		return event.Action == "" && event.Button == "" && event.Text == "" && event.X == 0 && event.Y == 0 && event.Delta == 0 && event.KeyCode == 0
+	case "clipboard_image_write":
+		sequence, err := strconv.ParseUint(event.Text, 10, 64)
+		return err == nil && sequence > 0 && event.Action == "" && event.Button == "" && event.X == 0 && event.Y == 0 && event.Delta == 0 && event.KeyCode == 0
 	case "sas":
 		// Secure Attention Sequence is deliberately a separate privileged event;
 		// accepting modifiers or coordinates here would make the wire contract
@@ -1565,6 +1570,7 @@ func (s *server) desktopAgentStatus(w http.ResponseWriter, r *http.Request) {
 		InputType  string `json:"inputType"`
 		InputError string `json:"inputError"`
 		InputValue string `json:"inputValue"`
+		InputMime  string `json:"inputMime"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		return
@@ -1574,6 +1580,7 @@ func (s *server) desktopAgentStatus(w http.ResponseWriter, r *http.Request) {
 		input.Error = input.Error[:500]
 	}
 	input.InputType = strings.TrimSpace(strings.ToLower(input.InputType))
+	input.InputMime = strings.TrimSpace(strings.ToLower(input.InputMime))
 	input.InputError = strings.TrimSpace(input.InputError)
 	if len(input.InputError) > 500 {
 		input.InputError = input.InputError[:500]
@@ -1582,8 +1589,9 @@ func (s *server) desktopAgentStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Содержимое удалённого буфера слишком велико")
 		return
 	}
-	validAcknowledgementType := input.InputType == "sas" || input.InputType == "clipboard_read" || input.InputType == "clipboard_write"
-	if input.InputID < 0 || (input.InputID > 0 && !validAcknowledgementType) || (input.InputID == 0 && (input.InputType != "" || input.InputError != "" || input.InputValue != "")) {
+	validAcknowledgementType := input.InputType == "sas" || input.InputType == "clipboard_read" || input.InputType == "clipboard_write" || input.InputType == "clipboard_image_write"
+	validMime := input.InputMime == "" || (input.InputType == "clipboard_read" && input.InputMime == "image/png")
+	if input.InputID < 0 || (input.InputID > 0 && (!validAcknowledgementType || !validMime)) || (input.InputID == 0 && (input.InputType != "" || input.InputError != "" || input.InputValue != "" || input.InputMime != "")) {
 		writeError(w, http.StatusBadRequest, "Некорректное подтверждение команды удалённого управления")
 		return
 	}
@@ -1599,7 +1607,7 @@ func (s *server) desktopAgentStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.desktopAgentSeen.Store(sessionID, time.Now().UTC())
 	if input.InputID > 0 {
-		ack := desktopInputAck{ID: input.InputID, Type: input.InputType, Error: input.InputError, Value: input.InputValue, At: time.Now().UTC()}
+		ack := desktopInputAck{ID: input.InputID, Type: input.InputType, Error: input.InputError, Value: input.InputValue, Mime: input.InputMime, At: time.Now().UTC()}
 		if strings.HasPrefix(input.InputType, "clipboard_") {
 			s.desktopClipboardAcks.Store(sessionID, ack)
 		} else {

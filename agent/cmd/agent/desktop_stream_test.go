@@ -137,7 +137,7 @@ func TestDesktopInputDispatcherSuppressesRestoredDuplicateIDs(t *testing.T) {
 	var latestInput atomic.Int64
 	var activeSession atomic.Value
 	activeSession.Store("session-a")
-	go runDesktopStreamInputDispatcher(ctx, batches, tasks, &latestCapture, &latestInput, &activeSession)
+	go runDesktopStreamInputDispatcher(ctx, nil, batches, tasks, &latestCapture, &latestInput, &activeSession)
 
 	batches <- desktopInputBatch{SessionID: "session-a", Events: []desktopInput{{ID: 10, Type: "pointer", Action: "down", Button: "left", X: 100, Y: 100}, {ID: 11, Type: "pointer", Action: "up", Button: "left", X: 100, Y: 100}}}
 	select {
@@ -170,7 +170,7 @@ func TestDesktopInputDispatcherResetsIDsForNewSessionAndDropsStaleSession(t *tes
 	var latestInput atomic.Int64
 	var activeSession atomic.Value
 	activeSession.Store("session-a")
-	go runDesktopStreamInputDispatcher(ctx, batches, tasks, &latestCapture, &latestInput, &activeSession)
+	go runDesktopStreamInputDispatcher(ctx, nil, batches, tasks, &latestCapture, &latestInput, &activeSession)
 
 	batches <- desktopInputBatch{SessionID: "session-a", Events: []desktopInput{{ID: 90, Type: "key", Action: "down", KeyCode: 65}}}
 	select {

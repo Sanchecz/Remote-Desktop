@@ -104,6 +104,22 @@ test("does not synthesize dead or unidentified composition keys", () => {
 	assert.deepEqual(planRemoteKeyboardInput(event({ code: "", key: "Unidentified" }), "down", new Set()), { handled: false });
 });
 
+test("uses semantic editing keys when a browser omits the physical code", () => {
+	const textKeys = new Set<string>();
+	assert.deepEqual(planRemoteKeyboardInput(event({ code: "", key: "Backspace" }), "down", textKeys), {
+		handled: true,
+		input: { type: "key", action: "down", keyCode: 8 },
+	});
+	assert.deepEqual(planRemoteKeyboardInput(event({ code: "", key: "Backspace" }), "up", textKeys), {
+		handled: true,
+		input: { type: "key", action: "up", keyCode: 8 },
+	});
+	assert.deepEqual(planRemoteKeyboardInput(event({ code: "", key: "Delete" }), "down", textKeys), {
+		handled: true,
+		input: { type: "key", action: "down", keyCode: 46 },
+	});
+});
+
 test("chunks pasted Unicode text by code points without splitting surrogate pairs", () => {
 	const source = "а".repeat(127) + "👋" + "бв";
 	const chunks = chunkRemoteText(source);

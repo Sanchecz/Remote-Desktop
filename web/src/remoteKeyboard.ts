@@ -119,7 +119,11 @@ export function planRemoteKeyboardInput(
 		return { handled: true, input: { type: "text", text: event.key } };
 	}
 
-	const keyCode = browserCodeToVirtualKey(event.code);
+	// Firefox, Android WebView and some VDI browser paths intermittently expose an
+	// empty physical `code` for editing keys while the semantic `key` remains
+	// correct. Falling back here keeps Backspace/Delete physical and prevents the
+	// browser from consuming them locally.
+	const keyCode = browserCodeToVirtualKey(event.code || event.key);
 	if (!keyCode) return { handled: false };
 	return { handled: true, input: { type: "key", action, keyCode } };
 }

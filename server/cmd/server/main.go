@@ -52,6 +52,7 @@ type server struct {
 	desktopAgentSeen        sync.Map
 	desktopInputAcks        sync.Map
 	desktopClipboardAcks    sync.Map
+	desktopClipboardImages  sync.Map
 	desktopViewerTouches    sync.Map
 	desktopSessionAccess    sync.Map
 	desktopSessionRuntime   sync.Map
@@ -422,6 +423,8 @@ func main() {
 	r.Get("/api/desktop/agent/sessions/{id}/stream", s.desktopAgentFrameStream)
 	r.Post("/api/desktop/agent/sessions/{id}/status", s.desktopAgentStatus)
 	r.Get("/api/desktop/agent/sessions/{id}/inputs", s.desktopAgentInputs)
+	r.Post("/api/desktop/agent/sessions/{id}/clipboard-image", s.desktopAgentUploadClipboardImage)
+	r.Get("/api/desktop/agent/sessions/{id}/clipboard-image/{sequence}", s.desktopAgentDownloadClipboardImage)
 	r.Get("/api/agent/file-transfers/next", s.agentNextFileTransfer)
 	r.Get("/api/agent/file-transfers/{id}", s.agentFileTransferStatus)
 	r.Get("/api/agent/file-transfers/{id}/data", s.agentDownloadTransferChunk)
@@ -450,6 +453,8 @@ func main() {
 		r.With(s.requireCSRF).Post("/jobs/{id}/cancel", s.cancelDeviceJob)
 		r.Get("/desktop-sessions/{id}", s.desktopSessionStatus)
 		r.Get("/desktop-sessions/{id}/frame", s.desktopSessionFrame)
+		r.Get("/desktop-sessions/{id}/clipboard-image", s.desktopSessionClipboardImage)
+		r.With(s.requireCSRF).Post("/desktop-sessions/{id}/clipboard-image", s.desktopSessionUploadClipboardImage)
 		r.Get("/desktop-sessions/{id}/stream", s.desktopSessionStream)
 		r.With(s.requireCSRF).Patch("/desktop-sessions/{id}", s.updateDesktopSession)
 		r.With(s.requireCSRF).Post("/desktop-sessions/{id}/input", s.desktopSessionInput)
