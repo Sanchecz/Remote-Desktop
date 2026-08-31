@@ -64,7 +64,7 @@ import {
   X
 } from "lucide-react";
 import { browserCodeToVirtualKey, chunkRemoteText, planRemoteBoundaryDeletion, planRemoteKeyboardInput, planRemoteMobileBeforeInput, planRemoteTextReconciliation } from "./remoteKeyboard";
-import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, canReleaseRemoteTouchSuppression, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fillRemoteFrame, fitRemoteFrame, isRemoteTwoFingerTap, remoteCursorVisualPointForLayer, remotePointerTapActions, remotePointFromClient, reprojectRemotePoint, shouldPresentDecodedRemoteFrame, stabilizeRemoteTrackpadMotion, stableRemoteTrackpadSamples } from "./remoteCamera";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, canReleaseRemoteTouchSuppression, canStartRemoteRightClick, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fillRemoteFrame, fitRemoteFrame, isRemoteTwoFingerTap, remoteCursorVisualPointForLayer, remotePointerTapActions, remotePointFromClient, reprojectRemotePoint, shouldPresentDecodedRemoteFrame, stabilizeRemoteTrackpadMotion, stableRemoteTrackpadSamples } from "./remoteCamera";
 import { LatestPointerCadence, remotePointerCadenceMillis } from "./remotePointerCadence";
 import { bindRemoteInputCoordinates, remoteInputAckID, remoteInputBatchID, remoteInputClientID, restoreRemoteInputBatch, shouldRetryRemoteInputDelivery, takePendingRemoteInputBatches, type PendingRemoteInputBatch } from "./remoteInputDelivery";
 import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
@@ -231,7 +231,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.34";
+const LATEST_AGENT_VERSION = "1.0.35";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1247,7 +1247,7 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
   }, [device.id, csrf, supported]);
 
   const unavailableReason = !device.online ? "Агент не в сети" : !remoteScreenSupportedOS(device.os) ? "Доступно для Windows и Android" : !desktopCompatible ? `Обновите Agent ${device.agentVersion || "старой версии"} до 0.6.0` : "Предпросмотр недоступен";
-  return <section className="remote-preview-card"><header><div><span className="eyebrow">УДАЛЁННЫЙ ДОСТУП</span><strong><ScreenShare size={18} /> Живой экран</strong><small>{supported ? frameURL ? "Предпросмотр онлайн · управление выключено" : connected ? "Agent подключён · ожидаем первый кадр" : "Подключаем защищённый предпросмотр…" : unavailableReason}</small></div><span className={`preview-live ${connected && !!frameURL ? "active" : ""}`}><span />{connected && frameURL ? "LIVE" : "WAIT"}</span></header><button type="button" className="remote-preview-screen" disabled={!supported || !sessionId || !frameURL} onClick={() => { if (device.os.toLowerCase().includes("windows")) primeRemoteClipboardFromConnectionGesture(); handedOff.current = true; onConnect(sessionId); }}>{frameURL ? <img ref={previewImageRef} src={frameURL} draggable={false} onError={() => { setFrameURL(""); setError("Получен повреждённый кадр — ожидаем следующий"); }} /> : <span><Monitor size={38} /><strong>{error || (supported ? "Ожидаем изображение от Agent" : unavailableReason)}</strong><small>{desktopCompatible ? "Диагностика обновляется автоматически" : "Скачайте новый агент из раздела токенов"}</small></span>}<b><MousePointer2 size={17} /> Открыть подключение</b></button><footer><ShieldCheck size={14} /> Пассивный предпросмотр журналируется, но не показывает всплывающее уведомление. Оно появится при первом управляющем действии.</footer></section>;
+  return <section className="remote-preview-card"><header><div><span className="eyebrow">УДАЛЁННЫЙ ДОСТУП</span><strong><ScreenShare size={18} /> Живой экран</strong><small>{supported ? frameURL ? "Предпросмотр онлайн · управление выключено" : connected ? "Agent подключён · ожидаем первый кадр" : "Подключаем защищённый предпросмотр…" : unavailableReason}</small></div><span className={`preview-live ${connected && !!frameURL ? "active" : ""}`}><span />{connected && frameURL ? "LIVE" : "WAIT"}</span></header><button type="button" className="remote-preview-screen" disabled={!supported || !sessionId || !frameURL} onContextMenu={(event) => event.preventDefault()} onClick={() => { if (device.os.toLowerCase().includes("windows")) primeRemoteClipboardFromConnectionGesture(); handedOff.current = true; onConnect(sessionId); }}>{frameURL ? <img ref={previewImageRef} src={frameURL} draggable={false} onError={() => { setFrameURL(""); setError("Получен повреждённый кадр — ожидаем следующий"); }} /> : <span><Monitor size={38} /><strong>{error || (supported ? "Ожидаем изображение от Agent" : unavailableReason)}</strong><small>{desktopCompatible ? "Диагностика обновляется автоматически" : "Скачайте новый агент из раздела токенов"}</small></span>}<b><MousePointer2 size={17} /> Открыть подключение</b></button><footer><ShieldCheck size={14} /> Пассивный предпросмотр журналируется, но не показывает всплывающее уведомление. Оно появится при первом управляющем действии.</footer></section>;
 }
 
 function capturePointerSafely(target: Element, pointerId: number) {
@@ -1492,16 +1492,17 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const directGestureViewportRevision = useRef(0);
 	const pinchGestureViewportRevision = useRef(0);
   const trackpadCursor = useRef({ x: 0, y: 0, frameWidth: 0, frameHeight: 0, ready: false });
-	const trackpadGesture = useRef({ pointerId: -1, lastX: 0, lastY: 0, lastTime: 0, distance: 0, longPress: false, dragging: false, secondTap: false, suppressTap: false, timer: 0, pendingX: 0, pendingY: 0, pendingTimer: 0 });
+	const trackpadGesture = useRef({ pointerId: -1, lastX: 0, lastY: 0, lastTime: 0, distance: 0, longPress: false, dragging: false, secondTap: false, suppressTap: false, rightClickEligible: false, timer: 0, pendingX: 0, pendingY: 0, pendingTimer: 0 });
 	const lastTrackpadTap = useRef({ at: 0, clientX: 0, clientY: 0 });
-	const directGesture = useRef<{ pointerId: number; startX: number; startY: number; startRemoteX: number; startRemoteY: number; x: number; y: number; coordinateWidth: number; coordinateHeight: number; moved: boolean; leftDown: boolean; longPress: boolean; suppressTap: boolean; timer: number }>({ pointerId: -1, startX: 0, startY: 0, startRemoteX: 0, startRemoteY: 0, x: 0, y: 0, coordinateWidth: 1, coordinateHeight: 1, moved: false, leftDown: false, longPress: false, suppressTap: false, timer: 0 });
+	const directGesture = useRef<{ pointerId: number; startX: number; startY: number; startRemoteX: number; startRemoteY: number; x: number; y: number; coordinateWidth: number; coordinateHeight: number; moved: boolean; leftDown: boolean; longPress: boolean; suppressTap: boolean; rightClickEligible: boolean; timer: number }>({ pointerId: -1, startX: 0, startY: 0, startRemoteX: 0, startRemoteY: 0, x: 0, y: 0, coordinateWidth: 1, coordinateHeight: 1, moved: false, leftDown: false, longPress: false, suppressTap: false, rightClickEligible: false, timer: 0 });
+	const rightClickGestureArmed = useRef(false);
 	const heldMouseButton = useRef<"left" | "middle" | "right" | null>(null);
 	const lastMousePosition = useRef<{ x: number; y: number; coordinateWidth: number; coordinateHeight: number } | null>(null);
 	const controlEnabledRef = useRef(false);
 	const controlActivationRef = useRef<Promise<void> | null>(null);
 	const frameArrivalTimes = useRef<number[]>([]);
 	const activeTouches = useRef(new Map<number, { x: number; y: number }>());
-	const pinchGesture = useRef({ active: false, suppress: false, mode: "pending" as "pending" | "zoom" | "scroll", startDistance: 1, lastDistance: 1, lastMidX: 0, lastMidY: 0, wheelDistance: 0, midpointTravel: 0, startedAt: 0, rightClickSent: false });
+	const pinchGesture = useRef({ active: false, suppress: false, mode: "pending" as "pending" | "zoom" | "scroll", startDistance: 1, lastDistance: 1, lastMidX: 0, lastMidY: 0, wheelDistance: 0, midpointTravel: 0, startedAt: 0, rightClickSent: false, rightClickEligible: false });
 	const wheelAccumulator = useRef(0);
 	const inputQueue = useRef<Record<string, unknown>[]>([]);
 	const inputFlushTimer = useRef(0);
@@ -1752,6 +1753,14 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	useEffect(() => {
 		if (status?.controlEnabled) controlEnabledRef.current = true;
 	}, [status?.controlEnabled]);
+
+	useEffect(() => {
+		// The click/touch which opened this viewer must end before mobile right-click
+		// gestures become eligible. This also clears double-tap state when a preview
+		// is handed off to a new control session.
+		rightClickGestureArmed.current = false;
+		lastTrackpadTap.current = { at: 0, clientX: 0, clientY: 0 };
+	}, [sessionId]);
 
   useEffect(() => {
     let disposed = false;
@@ -2533,6 +2542,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		window.cancelAnimationFrame(pinchSuppressionAnimationFrame.current);
 		pinchSuppressionAnimationFrame.current = 0;
 		pinchGesture.current.suppress = false;
+		pinchGesture.current.rightClickEligible = false;
 	};
 
 	useEffect(() => () => {
@@ -2770,6 +2780,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			midpointTravel: 0,
 			startedAt: performance.now(),
 			rightClickSent: false,
+			rightClickEligible: canStartRemoteRightClick(controlEnabledRef.current, Boolean(frameURL && status?.agentConnected), rightClickGestureArmed.current),
 		};
 		pinchGestureViewportRevision.current = pointerViewportRevision.current;
 		if (directGesture.current.timer) window.clearTimeout(directGesture.current.timer);
@@ -2856,11 +2867,12 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		// Microsoft-style mouse mode: a quick two-finger tap is a right click.
 		// Pinch and two-finger scrolling are classified first, so releasing those
 		// gestures can never accidentally open a context menu.
-		if (gesture.active && !gesture.rightClickSent && isRemoteTwoFingerTap(gesture.mode, mobileTrackpadMode, cancelled, performance.now() - gesture.startedAt, gesture.midpointTravel)) {
+		if (gesture.active && gesture.rightClickEligible && !gesture.rightClickSent && isRemoteTwoFingerTap(gesture.mode, mobileTrackpadMode, cancelled, performance.now() - gesture.startedAt, gesture.midpointTravel)) {
 			gesture.rightClickSent = true;
 			sendPointerTap("right");
 		}
 		activeTouches.current.delete(pointerId);
+		if (!cancelled) rightClickGestureArmed.current = true;
 		if (activeTouches.current.size < 2) pinchGesture.current.active = false;
 		if (canReleaseRemoteTouchSuppression(activeTouches.current.size, pinchGesture.current.active)) {
 			window.cancelAnimationFrame(pinchSuppressionAnimationFrame.current);
@@ -3017,6 +3029,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (action === "down") {
 				clearPendingTrackpadMotion(false);
 				capturePointerSafely(event.currentTarget, event.pointerId);
+				const rightClickEligible = canStartRemoteRightClick(controlEnabledRef.current, Boolean(frameURL && status?.agentConnected), rightClickGestureArmed.current);
 				const previousTap = lastTrackpadTap.current;
 				const secondTap = performance.now() - previousTap.at < 330 && Math.hypot(event.clientX - previousTap.clientX, event.clientY - previousTap.clientY) < 48;
 				if (secondTap) {
@@ -3025,19 +3038,19 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 					sendInput({ type: "pointer", action: "move", ...position });
 					sendInput({ type: "pointer", action: "down", button: "left", ...position });
 					trackpadGestureViewportRevision.current = pointerViewportRevision.current;
-					trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, lastTime: event.timeStamp, distance: 0, longPress: false, dragging: true, secondTap: true, suppressTap: false, timer: 0, pendingX: 0, pendingY: 0, pendingTimer: 0 };
+					trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, lastTime: event.timeStamp, distance: 0, longPress: false, dragging: true, secondTap: true, suppressTap: false, rightClickEligible: false, timer: 0, pendingX: 0, pendingY: 0, pendingTimer: 0 };
 					positionLocalCursor(trackpadCursor.current, size);
 					return;
 				}
-				const timer = window.setTimeout(() => {
+				const timer = rightClickEligible ? window.setTimeout(() => {
 					const gesture = trackpadGesture.current;
-					if (gesture.pointerId !== event.pointerId || gesture.distance > 10 || pinchGesture.current.active) return;
+					if (gesture.pointerId !== event.pointerId || !gesture.rightClickEligible || gesture.distance > 10 || pinchGesture.current.active) return;
 					gesture.longPress = true;
 					lastTrackpadTap.current.at = 0;
 					sendPointerTap("right");
-				}, 2000);
+				}, 2000) : 0;
 				trackpadGestureViewportRevision.current = pointerViewportRevision.current;
-				trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, lastTime: event.timeStamp, distance: 0, longPress: false, dragging: false, secondTap: false, suppressTap: false, timer, pendingX: 0, pendingY: 0, pendingTimer: 0 };
+				trackpadGesture.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY, lastTime: event.timeStamp, distance: 0, longPress: false, dragging: false, secondTap: false, suppressTap: false, rightClickEligible, timer, pendingX: 0, pendingY: 0, pendingTimer: 0 };
 				positionLocalCursor(trackpadCursor.current, size);
 				return;
 			}
@@ -3070,11 +3083,12 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (action === "down") {
 				capturePointerSafely(event.currentTarget, event.pointerId);
 				directGestureViewportRevision.current = pointerViewportRevision.current;
-				directGesture.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startRemoteX: position.x, startRemoteY: position.y, x: position.x, y: position.y, coordinateWidth: position.coordinateWidth, coordinateHeight: position.coordinateHeight, moved: false, leftDown: false, longPress: false, suppressTap: false, timer: window.setTimeout(() => {
-					const gesture = directGesture.current; if (gesture.pointerId !== event.pointerId || gesture.moved) return;
+				const rightClickEligible = canStartRemoteRightClick(controlEnabledRef.current, Boolean(frameURL && status?.agentConnected), rightClickGestureArmed.current);
+				directGesture.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startRemoteX: position.x, startRemoteY: position.y, x: position.x, y: position.y, coordinateWidth: position.coordinateWidth, coordinateHeight: position.coordinateHeight, moved: false, leftDown: false, longPress: false, suppressTap: false, rightClickEligible, timer: rightClickEligible ? window.setTimeout(() => {
+					const gesture = directGesture.current; if (gesture.pointerId !== event.pointerId || !gesture.rightClickEligible || gesture.moved) return;
 					const current = { x: gesture.x, y: gesture.y, coordinateWidth: gesture.coordinateWidth, coordinateHeight: gesture.coordinateHeight };
 					gesture.longPress = true; sendInput({ type: "pointer", action: "move", ...current }); sendInput({ type: "pointer", action: "down", button: "right", ...current }); sendInput({ type: "pointer", action: "up", button: "right", ...current });
-				}, 2000) };
+				}, 2000) : 0 };
 				return;
 			}
 			const gesture = directGesture.current;
@@ -3105,6 +3119,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			// lostpointercapture synchronously or immediately afterwards. The dedicated
 			// handler must only synthesize pointer-up for an actually interrupted press.
 			heldMouseButton.current = null;
+			rightClickGestureArmed.current = true;
 			releasePointerSafely(event.currentTarget, event.pointerId);
 		}
 		sendInput({ type: "pointer", action, button, ...position });

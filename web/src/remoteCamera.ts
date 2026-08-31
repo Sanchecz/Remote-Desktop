@@ -16,6 +16,14 @@ export function remotePointerTapActions(button: "left" | "right"): RemotePointer
 	];
 }
 
+// A newly mounted viewer can inherit the tail of the gesture which opened it,
+// especially in Android WebView and mobile Safari. Never let that first contact
+// arm a long-press/two-finger right click. One completed neutral gesture proves
+// that subsequent contacts started inside the remote surface itself.
+export function canStartRemoteRightClick(controlEnabled: boolean, frameReady: boolean, neutralGestureCompleted: boolean): boolean {
+	return controlEnabled && frameReady && neutralGestureCompleted;
+}
+
 // Replacing an <img> source temporarily clears naturalWidth/naturalHeight in
 // several mobile browsers. Keep using the last fully decoded frame while that
 // happens; falling back straight to the rendered phone rectangle would move a

@@ -88,6 +88,63 @@ func TestDesktopInputStreamRetryResetsAfterSuccessfulHandshake(t *testing.T) {
 	}
 }
 
+func TestDesktopOfferBoundariesRequireNeutralInput(t *testing.T) {
+	empty := desktopSessionOffer{}
+	preview := desktopSessionOffer{ID: "session-a", TargetFPS: 15}
+	control := desktopSessionOffer{ID: "session-a", ControlEnabled: true, TargetFPS: 15}
+	presentation := desktopSessionOffer{ID: "session-a", ControlEnabled: true, TargetFPS: 60, CursorVisible: true}
+	disabled := desktopSessionOffer{ID: "session-a", TargetFPS: 60, CursorVisible: true}
+	next := desktopSessionOffer{ID: "session-b", ControlEnabled: true, TargetFPS: 15}
+	if desktopOfferRequiresInputReset(empty, preview) {
+		t.Fatal("the first preview must not inject bare mouse-up packets")
+	}
+	if desktopOfferRequiresInputReset(preview, control) {
+		t.Fatal("preview to control activation must not synthesize a right-button release")
+	}
+	if desktopOfferRequiresInputReset(control, presentation) {
+		t.Fatal("FPS and cursor presentation changes are not input boundaries")
+	}
+	if !desktopOfferRequiresInputReset(presentation, disabled) {
+		t.Fatal("disabling active control must release genuinely held input")
+	}
+	if !desktopOfferRequiresInputReset(disabled, next) {
+		t.Fatal("a new session must not inherit held input from the old session")
+	}
+	if desktopOfferRequiresInputReset(next, next) {
+		t.Fatal("an unchanged offer must not inject redundant release events")
+	}
+}
+
+func TestDesktopInputStateTracksOnlySuccessfulRemoteDowns(t *testing.T) {
+	previousMouse := desktopHeldMouseButtons.Swap(0)
+	previousModifiers := desktopHeldModifierKeys.Swap(0)
+	defer desktopHeldMouseButtons.Store(previousMouse)
+	defer desktopHeldModifierKeys.Store(previousModifiers)
+
+	rememberDesktopMouseButton("right", "up")
+	if desktopHeldMouseButtons.Load() != 0 {
+		t.Fatal("an orphan right-button up must not create held state")
+	}
+	rememberDesktopMouseButton("right", "down")
+	if desktopHeldMouseButtons.Load() != desktopHeldMouseRight {
+		t.Fatalf("right-button down was not tracked: %b", desktopHeldMouseButtons.Load())
+	}
+	rememberDesktopMouseButton("right", "up")
+	if desktopHeldMouseButtons.Load() != 0 {
+		t.Fatal("right-button up did not clear held state")
+	}
+	rememberDesktopModifier(0x11, "down")
+	rememberDesktopModifier(0x12, "down")
+	if desktopHeldModifierKeys.Load() != desktopHeldKeyControl|desktopHeldKeyAlt {
+		t.Fatalf("modifier state was not tracked: %b", desktopHeldModifierKeys.Load())
+	}
+	rememberDesktopModifier(0x11, "up")
+	rememberDesktopModifier(0x12, "up")
+	if desktopHeldModifierKeys.Load() != 0 {
+		t.Fatal("modifier releases did not clear held state")
+	}
+}
+
 func TestDecodeDesktopInputStreamMessage(t *testing.T) {
 	events, err := decodeDesktopInputStreamMessage([]byte(`{"events":[{"id":7,"event":{"type":"pointer","action":"move","x":123,"y":456}},{"id":8,"event":{"type":"key","action":"down","keyCode":13}},{"id":9,"event":{"type":"text","text":"?:Я+👋"}}]}`))
 	if err != nil {

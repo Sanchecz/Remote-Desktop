@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, canReleaseRemoteTouchSuppression, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fillRemoteFrame, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remoteCursorVisualPoint, remoteCursorVisualPointForLayer, remotePointerTapActions, remotePointFromClient, reprojectRemotePoint, shouldPresentDecodedRemoteFrame, stabilizeRemoteTrackpadMotion, stableRemoteTrackpadDelta, stableRemoteTrackpadSamples } from "../src/remoteCamera.ts";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, canReleaseRemoteTouchSuppression, canStartRemoteRightClick, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fillRemoteFrame, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remoteCursorVisualPoint, remoteCursorVisualPointForLayer, remotePointerTapActions, remotePointFromClient, reprojectRemotePoint, shouldPresentDecodedRemoteFrame, stabilizeRemoteTrackpadMotion, stableRemoteTrackpadDelta, stableRemoteTrackpadSamples } from "../src/remoteCamera.ts";
 
 test("a remote pointer tap contains exactly one press and one release", () => {
 	assert.deepEqual(remotePointerTapActions("left"), [
@@ -11,6 +11,13 @@ test("a remote pointer tap contains exactly one press and one release", () => {
 		{ action: "down", button: "right" },
 		{ action: "up", button: "right" },
 	]);
+});
+
+test("the gesture which opens a remote viewer can never become a right click", () => {
+	assert.equal(canStartRemoteRightClick(true, true, false), false);
+	assert.equal(canStartRemoteRightClick(false, true, true), false);
+	assert.equal(canStartRemoteRightClick(true, false, true), false);
+	assert.equal(canStartRemoteRightClick(true, true, true), true);
 });
 
 test("a frame source swap keeps the last decoded coordinate space", () => {

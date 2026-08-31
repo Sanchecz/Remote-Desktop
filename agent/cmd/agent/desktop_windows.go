@@ -148,6 +148,14 @@ type desktopSessionOffer struct {
 	CursorVisible  bool   `json:"cursorVisible"`
 }
 
+func desktopOfferRequiresInputReset(previous, next desktopSessionOffer) bool {
+	// FPS, cursor composition and preview -> control activation are presentation
+	// changes, not input boundaries. Sending unconditional mouse-up packets for
+	// those changes made Windows open a context menu as soon as the viewer opened.
+	return (previous.ID != "" && previous.ID != next.ID) ||
+		(previous.ControlEnabled && !next.ControlEnabled)
+}
+
 type desktopOfferRefresh struct {
 	offer  desktopSessionOffer
 	active bool
@@ -239,6 +247,78 @@ type desktopInput struct {
 	TransportErr     error  `json:"-"`
 }
 
+const (
+	desktopHeldMouseLeft uint32 = 1 << iota
+	desktopHeldMouseRight
+	desktopHeldMouseMiddle
+)
+
+const (
+	desktopHeldKeyShift uint32 = 1 << iota
+	desktopHeldKeyControl
+	desktopHeldKeyAlt
+	desktopHeldKeyLeftWin
+	desktopHeldKeyRightWin
+)
+
+var desktopHeldMouseButtons atomic.Uint32
+var desktopHeldModifierKeys atomic.Uint32
+var desktopInputStateMu sync.Mutex
+
+func desktopMouseButtonStateMask(button string) uint32 {
+	switch button {
+	case "left":
+		return desktopHeldMouseLeft
+	case "right":
+		return desktopHeldMouseRight
+	case "middle":
+		return desktopHeldMouseMiddle
+	default:
+		return 0
+	}
+}
+
+func desktopModifierStateMask(virtualKey int) uint32 {
+	switch virtualKey {
+	case 0x10:
+		return desktopHeldKeyShift
+	case 0x11:
+		return desktopHeldKeyControl
+	case 0x12:
+		return desktopHeldKeyAlt
+	case 0x5B:
+		return desktopHeldKeyLeftWin
+	case 0x5C:
+		return desktopHeldKeyRightWin
+	default:
+		return 0
+	}
+}
+
+func rememberDesktopMouseButton(button, action string) {
+	mask := desktopMouseButtonStateMask(button)
+	if mask == 0 {
+		return
+	}
+	if action == "down" {
+		desktopHeldMouseButtons.Or(mask)
+	} else if action == "up" {
+		desktopHeldMouseButtons.And(^mask)
+	}
+}
+
+func rememberDesktopModifier(virtualKey int, action string) {
+	mask := desktopModifierStateMask(virtualKey)
+	if mask == 0 {
+		return
+	}
+	if action == "down" {
+		desktopHeldModifierKeys.Or(mask)
+	} else if action == "up" {
+		desktopHeldModifierKeys.And(^mask)
+	}
+}
+
 type desktopInputBatch struct {
 	SessionID string
 	Access    desktopAgentAccess
@@ -278,7 +358,9 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 	// frame deadline while preserving support for winlogon/UAC desktops.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	defer resetDesktopInputState()
 	surface := &desktopInputSurface{}
+	lastSessionID := ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -287,6 +369,13 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 			currentSessionID := desktopAtomicString(activeSession)
 			if task.sessionID == "" || task.sessionID != currentSessionID {
 				continue
+			}
+			if task.sessionID != lastSessionID {
+				// Reset on the same locked OS thread immediately before the first event
+				// of a new session. An old disconnected viewer can no longer leak a held
+				// button into the new viewer, even if its final packet was lost.
+				resetDesktopInputState()
+				lastSessionID = task.sessionID
 			}
 			// A secure-desktop transition can make SyncIfStale take noticeably
 			// longer than a normal SendInput call. Collapse everything that arrived
@@ -639,6 +728,10 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 	// thread so it can follow default <-> winlogon transitions reliably.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	// Network loss or a browser disappearing cannot be trusted to deliver the
+	// matching pointer/key releases. Always leave Windows with neutral input when
+	// this worker exits; the same reset also runs at every offer boundary below.
+	defer resetDesktopInputState()
 	// Windows otherwise rounds short waits to the default ~15.6 ms timer tick.
 	// That quantises a requested 60 FPS loop into 31/47/62 ms steps even when
 	// DXGI and TurboJPEG finish in a few milliseconds. Request a 1 ms timer for
@@ -746,9 +839,13 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			}
 		}
 		if err != nil {
+			activeInputSession.Store("")
+			if currentOffer.ID != "" {
+				resetDesktopInputState()
+				currentOffer = desktopSessionOffer{}
+			}
 			publishInputStreamTarget(desktopInputStreamTarget{})
 			offerActive = false
-			activeInputSession.Store("")
 			setDesktopSessionState(false, false, "")
 			if !desktopWait(ctx, 2*time.Second, &waitTimer) {
 				return
@@ -764,9 +861,13 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			case refreshed := <-offerResults:
 				offerFetchInFlight.Store(false)
 				if refreshed.err != nil || !refreshed.active {
+					activeInputSession.Store("")
+					if currentOffer.ID != "" {
+						resetDesktopInputState()
+						currentOffer = desktopSessionOffer{}
+					}
 					publishInputStreamTarget(desktopInputStreamTarget{})
 					offerActive = false
-					activeInputSession.Store("")
 					setDesktopSessionState(false, false, "")
 					lastReportedError = ""
 					lastReportedAt = time.Time{}
@@ -775,7 +876,8 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 					}
 					continue
 				}
-				if currentOffer.ID != refreshed.offer.ID || currentOffer.ControlEnabled != refreshed.offer.ControlEnabled || currentOffer.TargetFPS != refreshed.offer.TargetFPS || currentOffer.CursorVisible != refreshed.offer.CursorVisible {
+				if desktopOfferRequiresInputReset(currentOffer, refreshed.offer) {
+					activeInputSession.Store("")
 					resetDesktopInputState()
 				}
 				currentOffer = refreshed.offer
@@ -786,9 +888,13 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			offer, active, offerErr := fetchDesktopOffer(ctx, controlClient, access)
 			lastOfferAt = time.Now()
 			if offerErr != nil || !active {
+				activeInputSession.Store("")
+				if currentOffer.ID != "" {
+					resetDesktopInputState()
+					currentOffer = desktopSessionOffer{}
+				}
 				publishInputStreamTarget(desktopInputStreamTarget{})
 				offerActive = false
-				activeInputSession.Store("")
 				setDesktopSessionState(false, false, "")
 				lastReportedError = ""
 				lastReportedAt = time.Time{}
@@ -796,6 +902,13 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 					return
 				}
 				continue
+			}
+			if desktopOfferRequiresInputReset(currentOffer, offer) {
+				// This is the critical new-session boundary. The previous code
+				// reset only background refreshes, so a right button whose `up` was lost
+				// with the old viewer could remain pressed into the next connection.
+				activeInputSession.Store("")
+				resetDesktopInputState()
 			}
 			currentOffer = offer
 			offerActive = true
@@ -2759,7 +2872,13 @@ func executeDesktopInput(event desktopInput, capture desktopCapture) error {
 			}
 			if buttonFlags, ok := flags[event.Button]; ok {
 				if flag, ok := buttonFlags[event.Action]; ok {
-					return sendDesktopMouseInput(desktopWindowsMouseInput{Flags: flag})
+					desktopInputStateMu.Lock()
+					defer desktopInputStateMu.Unlock()
+					if err := sendDesktopMouseInput(desktopWindowsMouseInput{Flags: flag}); err != nil {
+						return err
+					}
+					rememberDesktopMouseButton(event.Button, event.Action)
+					return nil
 				}
 			}
 		}
@@ -2773,7 +2892,13 @@ func executeDesktopInput(event desktopInput, capture desktopCapture) error {
 		if strings.EqualFold(event.Action, "up") {
 			flags |= 0x0002
 		}
-		return sendDesktopVirtualKey(uint16(event.KeyCode), flags)
+		desktopInputStateMu.Lock()
+		defer desktopInputStateMu.Unlock()
+		if err := sendDesktopVirtualKey(uint16(event.KeyCode), flags); err != nil {
+			return err
+		}
+		rememberDesktopModifier(event.KeyCode, event.Action)
+		return nil
 	case "text":
 		for _, codeUnit := range utf16.Encode([]rune(event.Text)) {
 			if err := sendDesktopUnicodeKey(codeUnit, false); err != nil {
@@ -2822,13 +2947,34 @@ func sendDesktopSecureAttentionSequence() error {
 
 func resetDesktopInputState() {
 	// Browser focus changes and interrupted requests can otherwise leave a
-	// modifier or mouse button pressed remotely. Reset stateful inputs whenever
-	// the stream mode/session changes so control cannot remain apparently frozen.
-	for _, flag := range []uint32{0x0004, 0x0010, 0x0040} { // left/right/middle up
-		_ = sendDesktopMouseInput(desktopWindowsMouseInput{Flags: flag})
+	// modifier or mouse button pressed remotely. Release only inputs for which
+	// this Agent successfully emitted `down`: a bare RIGHTUP is observable by
+	// Windows applications and was the source of the context menu on connection.
+	desktopInputStateMu.Lock()
+	defer desktopInputStateMu.Unlock()
+	mouseButtons := desktopHeldMouseButtons.Swap(0)
+	for _, held := range []struct {
+		mask uint32
+		flag uint32
+	}{{desktopHeldMouseLeft, 0x0004}, {desktopHeldMouseRight, 0x0010}, {desktopHeldMouseMiddle, 0x0040}} {
+		if mouseButtons&held.mask == 0 {
+			continue
+		}
+		if err := sendDesktopMouseInput(desktopWindowsMouseInput{Flags: held.flag}); err != nil {
+			desktopHeldMouseButtons.Or(held.mask)
+		}
 	}
-	for _, virtualKey := range []uint16{0x10, 0x11, 0x12, 0x5B, 0x5C} { // Shift/Ctrl/Alt/Win
-		_ = sendDesktopVirtualKey(virtualKey, 0x0002)
+	modifiers := desktopHeldModifierKeys.Swap(0)
+	for _, held := range []struct {
+		mask       uint32
+		virtualKey uint16
+	}{{desktopHeldKeyShift, 0x10}, {desktopHeldKeyControl, 0x11}, {desktopHeldKeyAlt, 0x12}, {desktopHeldKeyLeftWin, 0x5B}, {desktopHeldKeyRightWin, 0x5C}} {
+		if modifiers&held.mask == 0 {
+			continue
+		}
+		if err := sendDesktopVirtualKey(held.virtualKey, 0x0002); err != nil {
+			desktopHeldModifierKeys.Or(held.mask)
+		}
 	}
 }
 
