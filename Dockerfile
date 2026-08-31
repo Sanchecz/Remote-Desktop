@@ -38,14 +38,14 @@ RUN /go/bin/goversioninfo -64 -icon=assets/genesisit.ico -application-icon=asset
       -o=cmd/agent/rsrc_windows_amd64.syso -company=RemoteIt -description="RemoteIt Agent" \
 	-file-version=1.0.24.0 -product-version=1.0.24.0 -product-name=RemoteIt \
       -internal-name=RemoteItAgent -original-name=RemoteIt-Agent-Setup.exe \
-	  -ver-major=1 -ver-minor=0 -ver-patch=23 -ver-build=0 \
-	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=23 -product-ver-build=0 assets/versioninfo.json && \
+	  -ver-major=1 -ver-minor=0 -ver-patch=24 -ver-build=0 \
+	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=24 -product-ver-build=0 assets/versioninfo.json && \
     /go/bin/goversioninfo -64 -icon=assets/genesisit.ico -application-icon=assets/genesisit.ico -manifest=assets/genesisit.exe.manifest \
       -o=cmd/console/rsrc_windows_amd64.syso -company=RemoteIt -description="RemoteIt Console" \
 	-file-version=1.0.24.0 -product-version=1.0.24.0 -product-name=RemoteIt \
       -internal-name=RemoteItConsole -original-name=RemoteIt-Console.exe \
-	  -ver-major=1 -ver-minor=0 -ver-patch=23 -ver-build=0 \
-	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=23 -product-ver-build=0 assets/versioninfo.json && \
+	  -ver-major=1 -ver-minor=0 -ver-patch=24 -ver-build=0 \
+	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=24 -product-ver-build=0 assets/versioninfo.json && \
     go mod download && go vet -mod=readonly ./... && go test -mod=readonly ./... && mkdir -p /out && \
     CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
       CGO_CFLAGS="-I/opt/libjpeg-turbo-windows/include" \
