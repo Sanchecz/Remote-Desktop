@@ -8,6 +8,7 @@ import {
 	Camera,
   CheckCircle2,
   ChevronDown,
+	ChevronLeft,
 	ChevronUp,
 	CircleHelp,
   CircleUserRound,
@@ -1291,6 +1292,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
 	const [filesOpen, setFilesOpen] = useState(false);
 	const [screenScale, setScreenScale] = useState<RemoteScaleMode>("fit");
+	const [streamStatsCollapsed, setStreamStatsCollapsed] = useState(false);
 	// Auto is the default on every client. The Agent starts Auto at 30 FPS,
 	// raises it to 60 on a consistently fast channel and falls back to 15 when
 	// capture or upload cost cannot sustain the target without queueing frames.
@@ -3284,7 +3286,11 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 						{localCursorVisible && <span ref={localCursorRef} className="remote-local-cursor" aria-hidden="true"><MousePointer2 size={22} strokeWidth={2.4} /></span>}
 					</div>
 				</div>
-				<span className="remote-stream-stats" title={status?.captureDiagnostics ? `${status.captureDiagnostics.captureBackend}: захват ${status.captureDiagnostics.captureMillis} мс, копирование ${status.captureDiagnostics.copyMillis} мс, масштаб ${status.captureDiagnostics.scaleMillis} мс, JPEG ${status.captureDiagnostics.encodeMillis} мс` : ""}><b>HD</b><span>{latencyMs || "—"} мс</span><em>{frameFPS || "—"} FPS</em><em>{camera.zoom > 1 ? `${Math.round(camera.zoom * 100)}%` : screenScale === "fit" ? "ВЕСЬ ЭКРАН" : screenScale === "fill" ? "ЗАПОЛНЕНО" : "1:1"}</em></span>
+				<span className={`remote-stream-stats ${streamStatsCollapsed ? "collapsed" : ""}`} title={status?.captureDiagnostics ? `${status.captureDiagnostics.captureBackend}: захват ${status.captureDiagnostics.captureMillis} мс, копирование ${status.captureDiagnostics.copyMillis} мс, масштаб ${status.captureDiagnostics.scaleMillis} мс, JPEG ${status.captureDiagnostics.encodeMillis} мс` : ""}>
+					<b>HD</b>
+					<span className="remote-stream-stats-details"><span>{latencyMs || "—"} мс</span><em>{frameFPS || "—"} FPS</em><em>{camera.zoom > 1 ? `${Math.round(camera.zoom * 100)}%` : screenScale === "fit" ? "ВЕСЬ ЭКРАН" : screenScale === "fill" ? "ЗАПОЛНЕНО" : "1:1"}</em></span>
+					<button type="button" className="remote-stream-stats-toggle" onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setStreamStatsCollapsed((current) => !current); }} aria-expanded={!streamStatsCollapsed} aria-label={streamStatsCollapsed ? "Развернуть показатели соединения" : "Свернуть показатели соединения"} title={streamStatsCollapsed ? "Развернуть показатели" : "Свернуть показатели"}><ChevronLeft size={12} /></button>
+				</span>
 			</> : <div className="remote-screen-wait"><ScreenShare size={42} /><strong>{starting ? "Создаём сеанс…" : "Ожидаем первый кадр"}</strong><span>На удалённом компьютере должен быть запущен RemoteIt Agent 0.9.26 или новее.</span></div>}
 		</div>
 		{!compactRemoteClient && fullscreenActive && <nav className="remote-desktop-fullscreen-tools" aria-label="Управление полноэкранным сеансом">
