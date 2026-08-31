@@ -716,8 +716,8 @@ func (s *server) startDesktopSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "Агент устройства сейчас не в сети")
 		return
 	}
-	if !strings.Contains(strings.ToLower(osName), "windows") {
-		writeError(w, http.StatusConflict, "Удалённый экран в этой версии доступен для Windows")
+	if !desktopOSSupportsRemoteScreen(osName) {
+		writeError(w, http.StatusConflict, "Удалённый экран доступен для Windows и Android Agent")
 		return
 	}
 	tx, err := s.db.Begin(r.Context())
@@ -737,6 +737,11 @@ func (s *server) startDesktopSession(w http.ResponseWriter, r *http.Request) {
 	s.storeDesktopRuntime(sessionID, desktopSessionRuntimeState{DeviceID: deviceID, Control: controlEnabled, TargetFPS: targetFPS, CursorVisible: cursorVisible, ValidatedAt: time.Now().UTC()})
 	s.audit(r.Context(), a, nil, "desktop.started", "device", deviceID, clientIP(r), map[string]any{"sessionId": sessionID, "deviceName": name, "control": controlEnabled, "targetFps": targetFPS, "cursorVisible": cursorVisible})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": sessionID, "deviceId": deviceID, "status": "active", "controlEnabled": controlEnabled, "targetFps": targetFPS, "cursorVisible": cursorVisible})
+}
+
+func desktopOSSupportsRemoteScreen(osName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(osName))
+	return strings.Contains(normalized, "windows") || strings.Contains(normalized, "android")
 }
 
 func (s *server) requireDesktopSessionAccess(w http.ResponseWriter, r *http.Request, sessionID string) bool {

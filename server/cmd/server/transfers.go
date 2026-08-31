@@ -55,6 +55,27 @@ func (s *server) signalTransferProgress(id string) {
 	}
 }
 
+// transferOfferSignal wakes the one long-poll held by an Agent as soon as a
+// new file transfer becomes consumable. This removes the former 0-3 second
+// start delay without increasing idle database polling across all devices.
+func (s *server) transferOfferSignal(deviceID string) chan struct{} {
+	if value, ok := s.transferOfferSignals.Load(deviceID); ok {
+		if signal, valid := value.(chan struct{}); valid {
+			return signal
+		}
+	}
+	signal := make(chan struct{}, 1)
+	actual, _ := s.transferOfferSignals.LoadOrStore(deviceID, signal)
+	return actual.(chan struct{})
+}
+
+func (s *server) signalTransferOffer(deviceID string) {
+	select {
+	case s.transferOfferSignal(deviceID) <- struct{}{}:
+	default:
+	}
+}
+
 func (s *server) deleteTransferProgressSignal(id string) {
 	s.transferProgressSignals.Delete(id)
 }
@@ -165,6 +186,7 @@ func (s *server) createFileTransfer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Не удалось создать передачу")
 		return
 	}
+	s.signalTransferOffer(deviceID)
 	s.audit(r.Context(), a, nil, "file_transfer.created", "device", deviceID, clientIP(r), map[string]any{"transferId": transfer.ID, "direction": in.Direction, "size": in.Size})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": transfer.ID, "status": status, "size": in.Size, "received": 0, "expiresAt": transfer.ExpiresAt})
 }
@@ -308,6 +330,7 @@ func (s *server) uploadTransferChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.signalTransferProgress(t.ID)
+	s.signalTransferOffer(t.DeviceID)
 	writeJSON(w, http.StatusOK, map[string]any{"received": next, "size": t.Size})
 }
 
@@ -342,6 +365,7 @@ func (s *server) readyFileTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.signalTransferProgress(t.ID)
+	s.signalTransferOffer(t.DeviceID)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -394,23 +418,52 @@ func (s *server) cancelFileTransfer(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *server) claimNextFileTransfer(ctx context.Context, deviceID string) (fileTransfer, error) {
+	var t fileTransfer
+	err := s.db.QueryRow(ctx, `UPDATE remote_file_transfers SET status='transferring',started_at=COALESCE(started_at,now()),updated_at=now() WHERE id=(SELECT id FROM remote_file_transfers WHERE device_id=$1 AND status='queued' AND expires_at>now() AND (direction<>'to_device' OR received_bytes>0 OR source_ready=true) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id,direction,file_name,remote_path,size_bytes,received_bytes,status`, deviceID).Scan(&t.ID, &t.Direction, &t.Name, &t.RemotePath, &t.Size, &t.Received, &t.Status)
+	return t, err
+}
+
 func (s *server) agentNextFileTransfer(w http.ResponseWriter, r *http.Request) {
 	deviceID, ok := s.authenticateTransferAgent(w, r)
 	if !ok {
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), `UPDATE remote_file_transfers SET status='queued',updated_at=now() WHERE device_id=$1 AND status='transferring' AND updated_at<now()-interval '5 minutes'`, deviceID)
-	var t fileTransfer
-	err := s.db.QueryRow(r.Context(), `UPDATE remote_file_transfers SET status='transferring',started_at=COALESCE(started_at,now()),updated_at=now() WHERE id=(SELECT id FROM remote_file_transfers WHERE device_id=$1 AND status='queued' AND expires_at>now() AND (direction<>'to_device' OR received_bytes>0 OR source_ready=true) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id,direction,file_name,remote_path,size_bytes,received_bytes,status`, deviceID).Scan(&t.ID, &t.Direction, &t.Name, &t.RemotePath, &t.Size, &t.Received, &t.Status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		w.WriteHeader(http.StatusNoContent)
-		return
+	for attempt := 0; attempt < 2; attempt++ {
+		t, err := s.claimNextFileTransfer(r.Context(), deviceID)
+		if err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"id": t.ID, "direction": t.Direction, "name": t.Name, "remotePath": t.RemotePath, "size": t.Size, "received": t.Received})
+			return
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "Не удалось получить передачу")
+			return
+		}
+		if attempt == 1 {
+			break
+		}
+		timer := time.NewTimer(20 * time.Second)
+		select {
+		case <-r.Context().Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		case <-s.transferOfferSignal(deviceID):
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
+		}
 	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Не удалось получить передачу")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": t.ID, "direction": t.Direction, "name": t.Name, "remotePath": t.RemotePath, "size": t.Size, "received": t.Received})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) loadAgentTransfer(r *http.Request, deviceID string) (fileTransfer, error) {

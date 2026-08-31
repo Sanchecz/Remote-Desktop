@@ -1,0 +1,3 @@
+-keep class ru.supportgenesis.remoteit.agent.MainActivity { *; }
+-keep class ru.supportgenesis.remoteit.agent.ScreenShareService { *; }
+-keep class ru.supportgenesis.remoteit.agent.RemoteControlAccessibilityService { *; }

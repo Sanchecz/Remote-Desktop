@@ -82,3 +82,15 @@ func desktopProfileForFPS(targetFPS int) desktopCaptureProfile {
 		return desktopCaptureProfile{maxWidth: 3840, quality: 92, chroma: desktopJPEGChroma444}
 	}
 }
+
+// desktopProfileForCapture keeps Auto transport-aware while allowing an
+// explicitly selected 60 FPS session to preserve the native detail of common
+// 2256/2560 px notebooks. Explicit 60 FPS is a quality-first request: when the
+// path cannot carry every frame, the latest-only transport drops an obsolete
+// frame instead of permanently reducing every following JPEG to 1920/q79.
+func desktopProfileForCapture(targetFPS int, preserveDetail bool) desktopCaptureProfile {
+	if targetFPS >= 60 && preserveDetail {
+		return desktopCaptureProfile{maxWidth: 2560, quality: 90, chroma: desktopJPEGChroma444}
+	}
+	return desktopProfileForFPS(targetFPS)
+}

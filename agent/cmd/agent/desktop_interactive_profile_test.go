@@ -117,3 +117,20 @@ func TestDesktopRealtimeScalerIsReservedForSixtyFPSMotion(t *testing.T) {
 		t.Fatal("idle frames must always use the higher-quality scaler")
 	}
 }
+
+func TestDesktopExplicitSixtyKeepsNotebookGeometryAndSharpScaler(t *testing.T) {
+	width, height := desktopOutputGeometryMode(2256, 1504, 60, true, false, true)
+	if width != 2256 || height != 1504 {
+		t.Fatalf("explicit 60 FPS notebook geometry = %dx%d", width, height)
+	}
+	profile := desktopProfileForInteractionMode(60, true, false, width, true)
+	if profile.maxWidth != 2560 || profile.quality != 90 || profile.chroma != desktopJPEGChroma444 {
+		t.Fatalf("explicit 60 FPS motion lost sharpness: %#v", profile)
+	}
+	if desktopUseRealtimeScalerMode(60, true, true) {
+		t.Fatal("explicit sharp 60 FPS must not use the low-quality realtime scaler")
+	}
+	if !desktopUseRealtimeScalerMode(60, true, false) {
+		t.Fatal("Auto-promoted 60 FPS must retain its bounded low-latency scaler")
+	}
+}

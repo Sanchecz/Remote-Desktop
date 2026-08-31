@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "RemoteIt"
 include(":app")
+include(":agentapp")

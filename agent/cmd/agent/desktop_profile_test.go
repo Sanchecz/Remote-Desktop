@@ -38,6 +38,17 @@ func TestDesktopProfileForFPS(t *testing.T) {
 	}
 }
 
+func TestDesktopExplicitSixtyPreservesDetailWithoutChangingAutoBudget(t *testing.T) {
+	explicit := desktopProfileForCapture(60, true)
+	if explicit.maxWidth != 2560 || explicit.quality != 90 || explicit.chroma != desktopJPEGChroma444 {
+		t.Fatalf("explicit 60 FPS lost detail: %#v", explicit)
+	}
+	automatic := desktopProfileForCapture(60, false)
+	if automatic.maxWidth != 1920 || automatic.quality != 79 || automatic.chroma != desktopJPEGChroma422 {
+		t.Fatalf("Auto-promoted 60 FPS lost its bounded profile: %#v", automatic)
+	}
+}
+
 func TestDesktopProfileForInteractionKeepsGeometryAndRestoresSharpness(t *testing.T) {
 	sharp := desktopProfileForInteraction(30, false, false, 2560)
 	motion := desktopProfileForInteraction(30, true, false, 2560)

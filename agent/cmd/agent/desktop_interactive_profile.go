@@ -20,13 +20,17 @@ func desktopInteractionIsActive(controlEnabled bool, lastInputAt, now time.Time)
 // sharp 4:4:4 chroma while the pointer moves; a genuinely constrained link must
 // retain the smaller 4:2:2 profile until it recovers.
 func desktopProfileForInteraction(targetFPS int, interactive, constrained bool, outputWidth int) desktopCaptureProfile {
+	return desktopProfileForInteractionMode(targetFPS, interactive, constrained, outputWidth, false)
+}
+
+func desktopProfileForInteractionMode(targetFPS int, interactive, constrained bool, outputWidth int, preserveDetail bool) desktopCaptureProfile {
 	// Auto is a 30 FPS mode until the adaptive controller has enough evidence
 	// to select 15 or 60. Treating its API value (0) as "below 15" produced a
 	// needless 4:4:4 bandwidth spike during the first interactive frames.
 	if targetFPS == 0 {
 		targetFPS = 30
 	}
-	profile := desktopProfileForFPS(targetFPS)
+	profile := desktopProfileForCapture(targetFPS, preserveDetail)
 	if constrained {
 		// Congestion is sustained evidence from the cadence controller, not merely
 		// a recent click. Keep the established recovery profile even on smaller
@@ -79,10 +83,17 @@ func desktopProfileForInteraction(targetFPS int, interactive, constrained bool, 
 }
 
 func desktopInteractionWidth(targetFPS, profileWidth int) int {
+	return desktopInteractionWidthMode(targetFPS, profileWidth, false)
+}
+
+func desktopInteractionWidthMode(targetFPS, profileWidth int, preserveDetail bool) int {
 	if targetFPS == 0 {
 		targetFPS = 30
 	}
 	if targetFPS >= 60 {
+		if preserveDetail {
+			return min(profileWidth, 2560)
+		}
 		return min(profileWidth, 1920)
 	}
 	if targetFPS <= 15 {
@@ -97,11 +108,15 @@ func desktopInteractionWidth(targetFPS, profileWidth int) int {
 // changing one dimension independently or from alternating between the native
 // notebook surface and a differently-strided cursor surface.
 func desktopOutputGeometry(baseWidth, baseHeight, targetFPS int, interactive, constrained bool) (int, int) {
+	return desktopOutputGeometryMode(baseWidth, baseHeight, targetFPS, interactive, constrained, false)
+}
+
+func desktopOutputGeometryMode(baseWidth, baseHeight, targetFPS int, interactive, constrained, preserveDetail bool) (int, int) {
 	if baseWidth <= 0 || baseHeight <= 0 {
 		return 0, 0
 	}
 	width := baseWidth
-	interactionWidth := desktopInteractionWidth(targetFPS, baseWidth)
+	interactionWidth := desktopInteractionWidthMode(targetFPS, baseWidth, preserveDetail)
 	if (interactive || constrained) && width > interactionWidth {
 		width = interactionWidth
 	}
@@ -113,5 +128,9 @@ func desktopOutputGeometry(baseWidth, baseHeight, targetFPS int, interactive, co
 // the realtime path there made text and thin UI lines visibly pixelated during
 // every mouse movement even on a healthy connection.
 func desktopUseRealtimeScaler(targetFPS int, interactive bool) bool {
-	return interactive && targetFPS >= 60
+	return desktopUseRealtimeScalerMode(targetFPS, interactive, false)
+}
+
+func desktopUseRealtimeScalerMode(targetFPS int, interactive, preserveDetail bool) bool {
+	return interactive && targetFPS >= 60 && !preserveDetail
 }

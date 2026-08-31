@@ -207,7 +207,7 @@ type desktopInputTask struct {
 }
 
 type desktopInputTaskResult struct {
-	err                   error
+	err                 error
 	acknowledgedResults []desktopAcknowledgedInputResult
 }
 
@@ -542,6 +542,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 	lastCapture := desktopCapture{}
 	lastFrameEnqueuedAt := time.Time{}
 	nextFrameAt := time.Time{}
+	lastCaptureInterval := time.Duration(0)
 	currentOffer := desktopSessionOffer{}
 	offerActive := false
 	lastOfferAt := time.Time{}
@@ -679,6 +680,7 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			lastFrameEnqueuedAt = time.Time{}
 			latestCapture.Store(desktopCapture{})
 			nextFrameAt = time.Time{}
+			lastCaptureInterval = 0
 			autoCadence.Reset()
 		}
 		// Execute pushed input on this locked OS thread. Besides removing the old
@@ -798,19 +800,23 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			effectiveFPS = 30
 		}
 		captureInterval := desktopCaptureInterval(effectiveFPS)
+		if captureInterval != lastCaptureInterval {
+			// A user FPS change (or an Auto promotion/demotion) starts a fresh
+			// cadence immediately. Carrying a deadline from the previous mode can
+			// otherwise leave one conspicuously long or short transition frame.
+			nextFrameAt = time.Time{}
+			lastCaptureInterval = captureInterval
+		}
 		captureErr := error(nil)
 		if nextFrameAt.IsZero() {
 			nextFrameAt = time.Now()
 		}
 		if len(lastCapture.JPEG) == 0 || !time.Now().Before(nextFrameAt) {
 			frameStartedAt := time.Now()
-			// Pace from an absolute deadline rather than capture start. Starting a
-			// fresh interval after each frame adds capture+encode overhead to every
-			// period (30 FPS became ~24, 60 became ~40). Advance through missed
-			// deadlines without queuing stale work, preserving low latency.
-			for !nextFrameAt.After(frameStartedAt) {
-				nextFrameAt = nextFrameAt.Add(captureInterval)
-			}
+			// Pace from this frame's actual start. If a VDI capture is late, do not
+			// follow the long gap with a catch-up burst: that alternating rhythm is
+			// perceived as a much stronger jerk than an honest dropped frame.
+			nextFrameAt = desktopNextFrameDeadline(frameStartedAt, captureInterval)
 			// The dedicated input worker checks winlogon/UAC transitions every 100 ms.
 			// Capture only needs a slower safety check: OpenInputDesktop and querying
 			// its object name can consume most of one 16.7 ms frame on virtual display
@@ -845,7 +851,11 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 				// pressure by reusing the bounded high-quality motion surface. The old
 				// 15 FPS fallback selected an even heavier 4K profile and could trap a
 				// slow VDI host at only a few real frames per second.
-				capture, captureErr = capturer.CaptureJPEG(captureProfileFPS, interactive, constrained, offer.CursorVisible, desktopRequiresSecureCapture(inputSurface.name))
+				// An explicit 60 FPS selection is quality-first. Auto-promoted 60 FPS
+				// remains bounded so it can demote cleanly when the host or link cannot
+				// sustain the sharper profile.
+				preserveDetail := offer.TargetFPS == 60
+				capture, captureErr = capturer.CaptureJPEG(captureProfileFPS, interactive, constrained, preserveDetail, offer.CursorVisible, desktopRequiresSecureCapture(inputSurface.name))
 			}
 			if captureErr == nil {
 				// Desktop Duplication reports when the surface did not change. Do not
@@ -1914,7 +1924,7 @@ func (capturer *desktopCapturer) Close() {
 	*capturer = desktopCapturer{}
 }
 
-func (capturer *desktopCapturer) ensure(targetFPS int) error {
+func (capturer *desktopCapturer) ensure(targetFPS int, preserveDetail bool) error {
 	screenX, _, _ := procGetSystemMetrics.Call(76)
 	screenY, _, _ := procGetSystemMetrics.Call(77)
 	screenWidth, _, _ := procGetSystemMetrics.Call(78)
@@ -1924,10 +1934,10 @@ func (capturer *desktopCapturer) ensure(targetFPS int) error {
 	if fullWidth <= 0 || fullHeight <= 0 || fullWidth > 12000 || fullHeight > 12000 {
 		return errors.New("некорректный размер рабочего стола")
 	}
-	profile := desktopProfileForFPS(targetFPS)
+	profile := desktopProfileForCapture(targetFPS, preserveDetail)
 	width := min(fullWidth, profile.maxWidth)
 	height := max(1, fullHeight*width/fullWidth)
-	interactionWidth := desktopInteractionWidth(targetFPS, width)
+	interactionWidth := desktopInteractionWidthMode(targetFPS, width, preserveDetail)
 	if capturer.screenDC != 0 && capturer.screenX == x && capturer.screenY == y && capturer.screenWidth == fullWidth && capturer.screenHeight == fullHeight && capturer.width == width && capturer.height == height && capturer.interactionWidth == interactionWidth {
 		return nil
 	}
@@ -2038,8 +2048,8 @@ func (capturer *desktopCapturer) copyGDISurface() (string, bool) {
 	return "-stretch-color", copied != 0
 }
 
-func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constrained bool, cursorVisible bool, secureDesktop bool) (desktopCapture, error) {
-	if err := capturer.ensure(targetFPS); err != nil {
+func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constrained, preserveDetail bool, cursorVisible bool, secureDesktop bool) (desktopCapture, error) {
+	if err := capturer.ensure(targetFPS, preserveDetail); err != nil {
 		return desktopCapture{}, err
 	}
 	// During active mouse/keyboard input prefer immediate motion over spending
@@ -2063,8 +2073,8 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constra
 	}
 	framePixels := capturer.dxgiPixels
 	frameWidth, frameHeight := capturer.screenWidth, capturer.screenHeight
-	desiredWidth, desiredHeight := desktopOutputGeometry(capturer.width, capturer.height, targetFPS, interactive, constrained)
-	profile := desktopProfileForInteraction(targetFPS, interactive, constrained, desiredWidth)
+	desiredWidth, desiredHeight := desktopOutputGeometryMode(capturer.width, capturer.height, targetFPS, interactive, constrained, preserveDetail)
+	profile := desktopProfileForInteractionMode(targetFPS, interactive, constrained, desiredWidth, preserveDetail)
 	fastResult := -1
 	cursor := currentDesktopCursorState()
 	// Desktop Duplication operates at the native output resolution. The former
@@ -2124,11 +2134,11 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constra
 			// retry once in the same capture request, instead of showing a permanent
 			// "не удалось скопировать экран" state for an otherwise healthy Agent.
 			capturer.Close()
-			if err := capturer.ensure(targetFPS); err != nil {
+			if err := capturer.ensure(targetFPS, preserveDetail); err != nil {
 				return desktopCapture{}, fmt.Errorf("не удалось переподключить захват VDI: %w", err)
 			}
-			desiredWidth, desiredHeight = desktopOutputGeometry(capturer.width, capturer.height, targetFPS, interactive, constrained)
-			profile = desktopProfileForInteraction(targetFPS, interactive, constrained, desiredWidth)
+			desiredWidth, desiredHeight = desktopOutputGeometryMode(capturer.width, capturer.height, targetFPS, interactive, constrained, preserveDetail)
+			profile = desktopProfileForInteractionMode(targetFPS, interactive, constrained, desiredWidth, preserveDetail)
 			framePixels = capturer.pixels
 			frameWidth, frameHeight = capturer.width, capturer.height
 			copyBackend, copied = capturer.copyGDISurface()
@@ -2158,7 +2168,7 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constra
 			}
 		}
 		scaleOK := false
-		if desktopUseRealtimeScaler(targetFPS, interactive) {
+		if desktopUseRealtimeScalerMode(targetFPS, interactive, preserveDetail) {
 			scaleOK = scaleDesktopBGRARealtime(framePixels, frameWidth, frameHeight, targetPixels, desiredWidth, desiredHeight, scaleX, scaleWeight)
 			captureBackend += "-realtime-scale"
 		} else {

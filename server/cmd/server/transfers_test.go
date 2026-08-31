@@ -190,3 +190,23 @@ func TestTransferProgressSignalWakesImmediatelyAndCoalesces(t *testing.T) {
 		t.Fatal("terminal transfer signal was not removed from the registry")
 	}
 }
+
+func TestTransferOfferSignalWakesAgentAndCoalesces(t *testing.T) {
+	s := &server{}
+	signal := s.transferOfferSignal("device-a")
+	s.signalTransferOffer("device-a")
+	s.signalTransferOffer("device-a")
+	select {
+	case <-signal:
+	default:
+		t.Fatal("new transfer did not wake the waiting Agent")
+	}
+	select {
+	case <-signal:
+		t.Fatal("duplicate transfer offers were not coalesced")
+	default:
+	}
+	if signal == s.transferOfferSignal("device-b") {
+		t.Fatal("unrelated devices share one transfer wake-up")
+	}
+}

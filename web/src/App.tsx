@@ -228,7 +228,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.25";
+const LATEST_AGENT_VERSION = "1.0.26";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -320,6 +320,19 @@ function Login({ onLogin, theme, onTheme }: { onLogin: (user: User, csrf: string
 		} finally { setInstallLoading(false); }
 	}
 
+	async function downloadPublicAndroidAgent() {
+		setInstallLoading(true); setInstallError("");
+		try {
+			await navigator.clipboard?.writeText(installCode.trim()).catch(() => undefined);
+			const anchor = document.createElement("a");
+			anchor.href = "/downloads/RemoteIt-Agent-Android.apk";
+			anchor.download = "RemoteIt-Agent-Android.apk";
+			anchor.click();
+		} catch (reason) {
+			setInstallError(reason instanceof Error ? reason.message : "Не удалось скачать Android Agent");
+		} finally { setInstallLoading(false); }
+	}
+
   return (
     <main className="login-page">
       <div className="login-glow login-glow-one" />
@@ -347,7 +360,7 @@ function Login({ onLogin, theme, onTheme }: { onLogin: (user: User, csrf: string
 		<form className="public-install-form" onSubmit={resolveInstallCode}>
 			<label><span>Код установки</span><div className="input-wrap"><Download size={18} /><input value={installCode} onChange={(event) => { setInstallCode(event.target.value); setInstallInfo(null); setInstallError(""); }} placeholder="Вставьте код от администратора" autoFocus={Boolean(installCode)} required /></div></label>
 			{installError && <div className="form-error">{installError}</div>}
-			{installInfo ? <div className="public-install-result"><div className="public-install-result-head"><span className="status-dot" /><div><strong>{installInfo.name}</strong><small>Группа «{installInfo.group}» · осталось установок: {installInfo.remaining}</small></div></div><div className="public-install-platforms"><button type="button" onClick={() => void downloadPublicAgent("windows")} disabled={installLoading}><DeviceOSIcon os="Windows" size={25} /><span>Windows<small>готовый EXE</small></span></button><button type="button" onClick={() => void downloadPublicAgent("macos")} disabled={installLoading}><DeviceOSIcon os="macOS" size={25} /><span>macOS<small>установщик SH</small></span></button><button type="button" onClick={() => void downloadPublicAgent("linux")} disabled={installLoading}><DeviceOSIcon os="Linux" size={25} /><span>Linux<small>установщик SH</small></span></button></div><p>Agent запросит имя компьютера и автоматически появится в панели администратора.</p></div> : <button className="secondary-button public-install-submit" disabled={installLoading}>{installLoading ? <RefreshCw className="spin" size={17} /> : <Download size={17} />} Получить Agent</button>}
+			{installInfo ? <div className="public-install-result"><div className="public-install-result-head"><span className="status-dot" /><div><strong>{installInfo.name}</strong><small>Группа «{installInfo.group}» · осталось установок: {installInfo.remaining}</small></div></div><div className="public-install-platforms"><button type="button" onClick={() => void downloadPublicAgent("windows")} disabled={installLoading}><DeviceOSIcon os="Windows" size={25} /><span>Windows<small>готовый EXE</small></span></button><button type="button" onClick={() => void downloadPublicAgent("macos")} disabled={installLoading}><DeviceOSIcon os="macOS" size={25} /><span>macOS<small>установщик SH</small></span></button><button type="button" onClick={() => void downloadPublicAgent("linux")} disabled={installLoading}><DeviceOSIcon os="Linux" size={25} /><span>Linux<small>установщик SH</small></span></button><button type="button" onClick={() => void downloadPublicAndroidAgent()} disabled={installLoading}><DeviceOSIcon os="Android" size={25} /><span>Android Agent<small>APK · код скопирован</small></span></button></div><p>Agent запросит имя устройства и автоматически появится в панели администратора. Для Android вставьте скопированный код и разрешите показ экрана.</p></div> : <button className="secondary-button public-install-submit" disabled={installLoading}>{installLoading ? <RefreshCw className="spin" size={17} /> : <Download size={17} />} Получить Agent</button>}
 		</form>
         <footer><span><span className="status-dot" /> supportgenesis.ru</span><ThemeSwitcher theme={theme} onChange={onTheme} compact /></footer>
       </section>
@@ -680,8 +693,13 @@ function DeviceOSIcon({ os, size = 19 }: { os: string; size?: number }) {
 	return <Monitor size={size} aria-label={os || "Компьютер"} />;
 }
 
+function remoteScreenSupportedOS(os: string) {
+	const normalized = os.toLowerCase();
+	return normalized.includes("windows") || normalized.includes("android");
+}
+
 function DeviceRow({ device, onOpen, onRemote }: { device: Device; onOpen: () => void; onRemote: () => void }) {
-  const remoteAvailable = device.accessGranted && device.online && device.os.toLowerCase().includes("windows") && versionAtLeast(device.agentVersion, "0.6.0");
+  const remoteAvailable = device.accessGranted && device.online && remoteScreenSupportedOS(device.os) && versionAtLeast(device.agentVersion, "0.6.0");
   const remoteTitle = !device.accessGranted ? "Сначала разблокируйте устройство" : remoteAvailable ? "Открыть удалённый доступ" : "Удалённый доступ сейчас недоступен";
   const oldAgent = !versionAtLeast(device.agentVersion, LATEST_AGENT_VERSION);
   return <tr><td><div className="device-name"><span className={`device-icon ${device.online ? "online" : ""}`}><DeviceOSIcon os={device.os} /></span><div><strong>{device.name}{device.accessProtected && <LockKeyhole className="inline-device-lock" size={13} aria-label="Защищено паролем" />}</strong><small>{device.hostname || device.group}</small></div></div></td><td><code>{device.connectionCode}</code></td><td><div className="stacked"><strong>{device.os || "Неизвестно"}</strong><small>{device.osVersion || device.arch || "—"}{oldAgent ? ` · агент ${device.agentVersion || "старый"}` : ""}</small></div></td><td><div className="stacked"><strong>{device.publicIp || "—"}</strong><small>{device.localIps?.[0] || "нет локального IP"}</small></div></td><td>{device.currentUser || "—"}</td><td>{device.online ? "сейчас" : formatRelative(device.lastSeen)}</td><td><div className="device-status-stack"><span className={`status-pill ${device.online ? "is-online" : "is-offline"}`}><span />{device.online ? "В сети" : "Не в сети"}</span>{oldAgent && <span className="agent-version-warning">{device.agentVersion ? `Старый Agent ${device.agentVersion}` : "Версия Agent неизвестна"}</span>}</div></td><td><div className="row-actions"><button className="row-remote" aria-label={`Удалённый доступ — ${device.name}`} title={remoteTitle} disabled={!remoteAvailable} onClick={onRemote}><ScreenShare size={16} /><span>Подключиться</span></button><button className="row-menu" aria-label="Открыть устройство" onClick={onOpen}><MoreHorizontal size={18} /></button></div></td></tr>;
@@ -763,7 +781,7 @@ function RemoteControlPage({ devices, currentUser, csrf, initialDeviceId, onAcce
       <aside className="remote-device-list">
         <header><strong>Компьютеры</strong><small>{devices.filter((item) => item.online).length} в сети</small></header>
         <div>{devices.map((item) => {
-          const available = item.accessGranted && item.online && item.os.toLowerCase().includes("windows") && versionAtLeast(item.agentVersion, "0.6.0");
+          const available = item.accessGranted && item.online && remoteScreenSupportedOS(item.os) && versionAtLeast(item.agentVersion, "0.6.0");
           const availability = !item.accessGranted ? "нужен пароль" : available ? "готов к управлению" : item.online ? "удалённый экран недоступен" : "не в сети";
           return <button key={item.id} className={item.id === deviceId ? "active" : ""} aria-current={item.id === deviceId ? "true" : undefined} onClick={() => switchDevice(item.id)}><span className={`device-icon ${item.online ? "online" : ""}`}><DeviceOSIcon os={item.os} size={17} /></span><span><strong>{item.name}{item.accessProtected && <LockKeyhole size={12} />}</strong><small>{item.connectionCode} · {availability}</small></span><span className={`remote-device-dot ${available ? "ready" : ""}`} /></button>;
         })}</div>
@@ -1040,7 +1058,8 @@ function DeviceDrawer({ device, currentUser, csrf, onClose, onAccessChanged, onR
 	const [desktopSessionId, setDesktopSessionId] = useState("");
   const canOperate = currentUser.role !== "viewer" && device.accessGranted;
 	const canDelete = currentUser.role === "owner" || currentUser.role === "admin";
-	const supportsConfirmedUninstall = versionAtLeast(device.agentVersion, "0.6.0");
+	const supportsAgentJobs = !device.os.toLowerCase().includes("android");
+	const supportsConfirmedUninstall = supportsAgentJobs && versionAtLeast(device.agentVersion, "0.6.0");
 
   async function rename(event: FormEvent) {
     event.preventDefault(); setSaving(true); setError("");
@@ -1081,8 +1100,8 @@ function DeviceDrawer({ device, currentUser, csrf, onClose, onAccessChanged, onR
     {desktopSessionId && <RemoteDesktopModal device={device} csrf={csrf} initialSessionId={desktopSessionId} onClose={() => setDesktopSessionId("")} />}
     {canOperate && <form className="rename-form" onSubmit={rename}><label><span>Название в RemoteIt</span><input value={name} onChange={(event) => setName(event.target.value)} maxLength={64} required /></label><label><span>Группа</span><input value={group} onChange={(event) => setGroup(event.target.value)} maxLength={100} required /></label><div className="device-edit-actions"><button className="secondary-button" disabled={saving || (name.trim() === device.name && group.trim() === device.group)}><Save size={16} /> Сохранить</button></div>{error && <div className="form-error">{error}</div>}</form>}
     {canDelete && device.accessGranted && <section className="device-removal-card"><div><strong>Удаление устройства</strong><small>{supportsConfirmedUninstall ? "Можно дождаться подтверждённой деинсталляции Agent либо сразу убрать недоступный компьютер только из панели." : "Эту версию Agent нельзя деинсталлировать с подтверждением, но устройство можно сразу удалить только из панели."}</small></div>{device.pendingRemoval && <div className="notice limited-notice"><Clock3 size={17} /><span>Удаление Agent ожидает следующего подключения. Это не загрузка: команду можно оставить в очереди либо удалить запись из панели прямо сейчас.</span></div>}<div className="device-removal-actions"><button type="button" className="danger-button" disabled={saving || device.pendingRemoval || !supportsConfirmedUninstall} onClick={() => void removeDevice()}><Ban size={16} /> {supportsConfirmedUninstall ? "Удалить Agent и устройство" : "Подтверждённое удаление недоступно"}</button><button type="button" className="secondary-button forget-device-button" disabled={saving} onClick={() => void forgetDevice()}><Trash2 size={16} /> Удалить только из панели</button></div></section>}
-    {canOperate && <RemoteFiles device={device} csrf={csrf} />}
-    {canOperate && <RemoteConsole device={device} currentUser={currentUser} csrf={csrf} compact />}
+    {canOperate && supportsAgentJobs && <RemoteFiles device={device} csrf={csrf} />}
+    {canOperate && supportsAgentJobs && <RemoteConsole device={device} currentUser={currentUser} csrf={csrf} compact />}
   </div></aside></div>;
 }
 
@@ -1132,7 +1151,7 @@ async function desktopFrameBlob(response: Response): Promise<Blob | null> {
 
 function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csrf: string; onConnect: (sessionId: string) => void }) {
   const desktopCompatible = versionAtLeast(device.agentVersion, "0.6.0");
-  const supported = device.online && device.os.toLowerCase().includes("windows") && desktopCompatible;
+  const supported = device.online && remoteScreenSupportedOS(device.os) && desktopCompatible;
   const [sessionId, setSessionId] = useState("");
   const [frameURL, setFrameURL] = useState("");
   const [connected, setConnected] = useState(false);
@@ -1222,7 +1241,7 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
     return () => { disposed = true; frameSocket?.close(); window.clearTimeout(statusTimer); window.clearTimeout(frameTimer); window.clearTimeout(streamWatchdogTimer); if (currentURL) URL.revokeObjectURL(currentURL); if (createdId && !handedOff.current) void fetch(`/api/desktop-sessions/${createdId}`, { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": csrf } }); setSessionId(""); setFrameURL(""); setConnected(false); };
   }, [device.id, csrf, supported]);
 
-  const unavailableReason = !device.online ? "Агент не в сети" : !device.os.toLowerCase().includes("windows") ? "Доступно для Windows" : !desktopCompatible ? `Обновите Agent ${device.agentVersion || "старой версии"} до 0.6.0` : "Предпросмотр недоступен";
+  const unavailableReason = !device.online ? "Агент не в сети" : !remoteScreenSupportedOS(device.os) ? "Доступно для Windows и Android" : !desktopCompatible ? `Обновите Agent ${device.agentVersion || "старой версии"} до 0.6.0` : "Предпросмотр недоступен";
   return <section className="remote-preview-card"><header><div><span className="eyebrow">УДАЛЁННЫЙ ДОСТУП</span><strong><ScreenShare size={18} /> Живой экран</strong><small>{supported ? frameURL ? "Предпросмотр онлайн · управление выключено" : connected ? "Agent подключён · ожидаем первый кадр" : "Подключаем защищённый предпросмотр…" : unavailableReason}</small></div><span className={`preview-live ${connected && !!frameURL ? "active" : ""}`}><span />{connected && frameURL ? "LIVE" : "WAIT"}</span></header><button type="button" className="remote-preview-screen" disabled={!supported || !sessionId || !frameURL} onClick={() => { handedOff.current = true; onConnect(sessionId); }}>{frameURL ? <img ref={previewImageRef} src={frameURL} draggable={false} onError={() => { setFrameURL(""); setError("Получен повреждённый кадр — ожидаем следующий"); }} /> : <span><Monitor size={38} /><strong>{error || (supported ? "Ожидаем изображение от Agent" : unavailableReason)}</strong><small>{desktopCompatible ? "Диагностика обновляется автоматически" : "Скачайте новый агент из раздела токенов"}</small></span>}<b><MousePointer2 size={17} /> Открыть подключение</b></button><footer><ShieldCheck size={14} /> Пассивный предпросмотр журналируется, но не показывает всплывающее уведомление. Оно появится при первом управляющем действии.</footer></section>;
 }
 
@@ -1246,6 +1265,7 @@ function releasePointerSafely(target: Element, pointerId: number) {
 }
 
 function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embedded = false }: { device: Device; csrf: string; initialSessionId?: string; onClose: () => void; embedded?: boolean }) {
+	const targetWindows = device.os.toLowerCase().includes("windows");
   const [sessionId, setSessionId] = useState("");
   const [status, setStatus] = useState<DesktopSession | null>(null);
   const [frameURL, setFrameURL] = useState("");
@@ -3249,10 +3269,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<label className="remote-scale-control" title="Как разместить удалённый рабочий стол"><span>Вид</span><select value={screenScale} onChange={(event) => setScreenScale(event.target.value as RemoteScaleMode)}><option value="fit">Весь экран</option><option value="fill">Заполнить</option><option value="actual">1:1</option></select></label>
 				<button className="remote-header-tool" onClick={() => void toggleRemoteFullscreen()} title={fullscreenActive ? "Выйти из полноэкранного режима" : "На весь экран"}><Maximize2 size={17} /><span>{fullscreenActive ? "Свернуть" : "Полный экран"}</span></button>
 				<button className="remote-header-tool" onClick={() => void copyRemoteScreenshot()} title="Скопировать текущий кадр как PNG"><Camera size={17} /><span>Снимок</span></button>
-				<button className="remote-header-tool" onClick={() => void sendCtrlAltDelete()} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>
-				<button className={`remote-header-tool ${clipboardSyncEnabled ? "active" : ""}`} onClick={() => void toggleClipboardSync()} title={clipboardSyncEnabled ? "Остановить двусторонний буфер" : "Включить двусторонний буфер"}><Clipboard size={17} /><span>{clipboardSyncEnabled ? "Буфер · вкл" : "Общий буфер"}</span></button>
+				{targetWindows && <button className="remote-header-tool" onClick={() => void sendCtrlAltDelete()} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>}
+				{targetWindows && <button className={`remote-header-tool ${clipboardSyncEnabled ? "active" : ""}`} onClick={() => void toggleClipboardSync()} title={clipboardSyncEnabled ? "Остановить двусторонний буфер" : "Включить двусторонний буфер"}><Clipboard size={17} /><span>{clipboardSyncEnabled ? "Буфер · вкл" : "Общий буфер"}</span></button>}
 				<button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>
-				<button className="remote-header-tool" onClick={openRemoteFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>
+				{targetWindows && <button className="remote-header-tool" onClick={openRemoteFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>}
 				<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button>
 			</div>
 		</header>
@@ -3269,7 +3289,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		</div>
 		{!compactRemoteClient && fullscreenActive && <nav className="remote-desktop-fullscreen-tools" aria-label="Управление полноэкранным сеансом">
 			<button type="button" onClick={() => void copyRemoteScreenshot()} title="Скопировать снимок"><Camera size={18} /></button>
-			<button type="button" className={clipboardSyncEnabled ? "active" : ""} onClick={() => void toggleClipboardSync()} title={clipboardSyncEnabled ? "Остановить общий буфер" : "Включить общий буфер"}><Clipboard size={18} /></button>
+			{targetWindows && <button type="button" className={clipboardSyncEnabled ? "active" : ""} onClick={() => void toggleClipboardSync()} title={clipboardSyncEnabled ? "Остановить общий буфер" : "Включить общий буфер"}><Clipboard size={18} /></button>}
 			<button type="button" onClick={() => void toggleRemoteFullscreen()} title="Выйти из полноэкранного режима"><Maximize2 size={18} /></button>
 			<button type="button" className="danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /></button>
 		</nav>}
@@ -3282,7 +3302,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		</nav>}
 		{compactRemoteClient && controlsCollapsed && mobileDockHidden && <button type="button" className="remote-mobile-dock-reveal" onClick={() => setMobileDockHidden(false)} aria-label="Показать управление"><SlidersHorizontal size={18} /></button>}
 		{compactRemoteClient && controlsCollapsed && <button type="button" className="remote-mobile-fullscreen-fab" onClick={() => void toggleRemoteFullscreen()} aria-label={fullscreenActive ? "Выйти из полноэкранного режима" : "Открыть на весь экран"} title={fullscreenActive ? "Свернуть" : "На весь экран"}><Maximize2 size={19} /></button>}
-		{compactRemoteClient && controlsCollapsed && frameURL && <nav className="remote-mobile-scroll-rail" aria-label="Прокрутка удалённого экрана">
+		{compactRemoteClient && (controlsCollapsed || remoteViewport.landscape) && frameURL && <nav className="remote-mobile-scroll-rail" aria-label="Прокрутка удалённого экрана">
 			<button type="button" onPointerDown={(event) => startWheelRepeat(event, 1)} onPointerUp={(event) => stopWheelRepeat(event.pointerId)} onPointerCancel={(event) => stopWheelRepeat(event.pointerId)} onLostPointerCapture={(event) => stopWheelRepeat(event.pointerId)} onKeyDown={(event) => wheelKeyboard(event, 1)} aria-label="Прокрутить вверх; удерживайте для непрерывной прокрутки" title="Вверх · можно удерживать"><ChevronUp size={18} /></button>
 			<button type="button" onPointerDown={(event) => startWheelRepeat(event, -1)} onPointerUp={(event) => stopWheelRepeat(event.pointerId)} onPointerCancel={(event) => stopWheelRepeat(event.pointerId)} onLostPointerCapture={(event) => stopWheelRepeat(event.pointerId)} onKeyDown={(event) => wheelKeyboard(event, -1)} aria-label="Прокрутить вниз; удерживайте для непрерывной прокрутки" title="Вниз · можно удерживать"><ChevronDown size={18} /></button>
 		</nav>}
@@ -3296,12 +3316,12 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 					<button type="button" className={`remote-tool-button ${pointerMode === "direct" ? "active" : ""}`} aria-pressed={pointerMode === "direct"} onClick={() => selectPointerMode("direct")}><Hand size={16} /> Касание</button>
 				</div>
 				<button type="button" className={`remote-tool-button ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)}><Keyboard size={15} /> Клавиатура</button>
-				<button type="button" className="remote-tool-button" onClick={() => void sendCtrlAltDelete()}><Keyboard size={15} /> Ctrl+Alt+Del</button>
+				{targetWindows && <button type="button" className="remote-tool-button" onClick={() => void sendCtrlAltDelete()}><Keyboard size={15} /> Ctrl+Alt+Del</button>}
 				<button type="button" className="remote-tool-button" onClick={() => void toggleRemoteFullscreen()}><Maximize2 size={15} /> {fullscreenActive ? "Свернуть" : "Полный экран"}</button>
 				<button type="button" className="remote-tool-button" onClick={resetCamera}><Maximize2 size={15} /> По размеру</button>
 				<button type="button" className="remote-tool-button" onClick={() => void copyRemoteScreenshot()}><Camera size={15} /> Снимок</button>
-				<button type="button" className="remote-tool-button" onClick={openRemoteFiles}><Folder size={15} /> Файлы</button>
-				<button type="button" className={`remote-tool-button ${clipboardSyncEnabled ? "active" : ""}`} onClick={() => void toggleClipboardSync()}><Clipboard size={15} /> {clipboardSyncEnabled ? "Буфер включён" : "Общий буфер"}</button>
+				{targetWindows && <button type="button" className="remote-tool-button" onClick={openRemoteFiles}><Folder size={15} /> Файлы</button>}
+				{targetWindows && <button type="button" className={`remote-tool-button ${clipboardSyncEnabled ? "active" : ""}`} onClick={() => void toggleClipboardSync()}><Clipboard size={15} /> {clipboardSyncEnabled ? "Буфер включён" : "Общий буфер"}</button>}
 				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
 			</div>
 			<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button>
@@ -3344,16 +3364,19 @@ async function waitForLargeTransfer(id: string, onProgress: (transfer: LargeFile
     const transfer = await api<LargeFileTransfer>(`/api/file-transfers/${id}`, { signal }); onProgress(transfer);
     if (transfer.status === readyStatus || (readyStatus === "ready" && transfer.status === "completed")) return transfer;
     if (["failed", "cancelled", "expired"].includes(transfer.status)) throw new Error(transfer.error || "Передача файла прервана");
-    await abortableDelay(750, signal);
+		await abortableDelay(300, signal);
   }
 }
 
 async function waitForDeviceJob(deviceId: string, jobId: string): Promise<AgentJob> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+	const deadline = Date.now() + 100_000;
+	let delay = 250;
+	while (Date.now() < deadline) {
     const result = await api<{ jobs: AgentJob[] }>(`/api/devices/${deviceId}/jobs`);
     const job = result.jobs.find((item) => item.id === jobId);
     if (job && ["succeeded", "failed", "cancelled", "expired"].includes(job.status)) return job;
-    await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+		await new Promise((resolve) => window.setTimeout(resolve, delay));
+		delay = Math.min(1_000, delay + 125);
   }
   throw new Error("Агент не ответил за 100 секунд");
 }
@@ -3367,7 +3390,10 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [dragging, setDragging] = useState(false);
+	const [dragging, setDragging] = useState(false);
+	const [localDragging, setLocalDragging] = useState(false);
+	const [remoteDropTarget, setRemoteDropTarget] = useState("");
+	const [localFiles, setLocalFiles] = useState<File[]>([]);
   const [activeTransfer, setActiveTransfer] = useState<ActiveFileTransfer | null>(null);
   const uploadInput = useRef<HTMLInputElement>(null);
 	const transferController = useRef<AbortController | null>(null);
@@ -3429,9 +3455,9 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
     } finally { if (transferController.current === controller) transferController.current = null; setLoading(false); setActiveTransfer(null); }
   }
 
-  async function uploadFiles(files: File[]) {
+	async function uploadFiles(files: File[], destinationPath = path) {
 		if (!supportsLargeTransfers) return setError("Обновите RemoteIt Agent до версии 0.6.0 для передачи файлов до 10 ГБ.");
-    if (!path) return setError("Сначала откройте папку назначения на удалённом компьютере.");
+		if (!destinationPath) return setError("Сначала откройте папку назначения на удалённом компьютере.");
     const selected = files.filter((file) => file.size <= 10 * 1024 * 1024 * 1024);
     if (selected.length !== files.length) return setError("Размер каждого загружаемого файла не должен превышать 10 ГБ.");
     if (selected.length === 0) return;
@@ -3441,7 +3467,7 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
     try {
       for (const file of selected) {
         const startedAt = Date.now();
-        const created = await api<{ id: string }>(`/api/devices/${device.id}/file-transfers`, { method: "POST", body: JSON.stringify({ direction: "to_device", name: file.name, remotePath: path, size: file.size }) }, csrf);
+				const created = await api<{ id: string }>(`/api/devices/${device.id}/file-transfers`, { method: "POST", body: JSON.stringify({ direction: "to_device", name: file.name, remotePath: destinationPath, size: file.size }) }, csrf);
         transferId = created.id;
         setActiveTransfer({ id: created.id, direction: "to_device", label: file.name, stage: "Отправка на сервер RemoteIt", received: 0, size: file.size, startedAt });
         // Commit 8 MiB first so the agent starts immediately, then use 64 MiB
@@ -3489,8 +3515,9 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
         await waitForLargeTransfer(created.id, () => undefined, "completed", controller.signal);
         transferId = "";
       }
-      setMessage(`Загружено файлов: ${selected.length}`);
-      const output = await runFileJob("files_list", path);
+			setMessage(`Загружено файлов: ${selected.length}${destinationPath !== path ? ` · в папку ${destinationPath}` : ""}`);
+		setLocalFiles((current) => current.filter((item) => !selected.some((sent) => sent.name === item.name && sent.size === item.size && sent.lastModified === item.lastModified)));
+			const output = await runFileJob("files_list", path);
       const result = JSON.parse(output) as RemoteFileList;
       setParent(result.parent || ""); setEntries(result.entries || []);
     } catch (reason) {
@@ -3507,26 +3534,85 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
 		setActiveTransfer(null); setLoading(false); setMessage("Передача отменена");
 	}
 
-  function dropFiles(event: ReactDragEvent<HTMLButtonElement>) {
-    event.preventDefault(); setDragging(false);
-    void uploadFiles(Array.from(event.dataTransfer.files));
-  }
+	function addLocalFiles(files: File[]) {
+		setLocalFiles((current) => {
+			const next = [...current];
+			for (const file of files) {
+				if (!next.some((item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified)) next.push(file);
+			}
+			return next;
+		});
+	}
+
+	function filesFromDrag(event: ReactDragEvent<HTMLElement>) {
+		const droppedFiles = Array.from(event.dataTransfer.files);
+		if (droppedFiles.length > 0) return droppedFiles;
+		const localKey = event.dataTransfer.getData("application/x-remoteit-local-file");
+		const selected = localFiles.find((file) => `${file.name}\u0000${file.size}\u0000${file.lastModified}` === localKey);
+		return selected ? [selected] : [];
+	}
+
+	function dragCanUpload(event: ReactDragEvent<HTMLElement>) {
+		return Array.from(event.dataTransfer.types).some((type) => type === "Files" || type === "application/x-remoteit-local-file");
+	}
+
+	function dropOnRemote(event: ReactDragEvent<HTMLDivElement>) {
+		event.preventDefault(); setDragging(false);
+		const droppedFiles = filesFromDrag(event);
+		if (droppedFiles.length > 0) {
+			addLocalFiles(droppedFiles);
+			void uploadFiles(droppedFiles);
+		}
+	}
+
+	function dropOnRemoteFolder(event: ReactDragEvent<HTMLDivElement>, destinationPath: string) {
+		event.preventDefault(); event.stopPropagation(); setDragging(false); setRemoteDropTarget("");
+		const droppedFiles = filesFromDrag(event);
+		if (droppedFiles.length === 0) return;
+		addLocalFiles(droppedFiles);
+		void uploadFiles(droppedFiles, destinationPath);
+	}
+
+	function dropOnLocal(event: ReactDragEvent<HTMLDivElement>) {
+		event.preventDefault(); setLocalDragging(false);
+		const remotePath = event.dataTransfer.getData("application/x-remoteit-remote-file");
+		if (remotePath) {
+			const entry = entries.find((item) => !item.directory && item.path === remotePath);
+			if (entry) void downloadRemoteFile(entry);
+			return;
+		}
+		addLocalFiles(Array.from(event.dataTransfer.files));
+	}
 
   const progress = activeTransfer ? fileTransferProgress(activeTransfer.received, activeTransfer.size, activeTransfer.startedAt) : null;
 
-  return <section className="remote-files-card" aria-busy={loading}>
-		<div className="remote-files-head"><div><strong><FolderOpen size={19} /> Проводник удалённого компьютера</strong><small>Скачивайте файлы с компьютера и отправляйте на него файлы с этого устройства</small></div><span className="remote-files-cap"><ShieldCheck size={14} /> до 10 ГБ</span></div>
-    {!started ? <button className="secondary-button remote-files-open" disabled={!device.online || loading} onClick={() => void openPath("")}><FolderOpen size={17} /> {device.online ? "Открыть файлы" : "Агент не в сети"}</button> : <>
-			<div className="remote-files-toolbar">
-				<button type="button" className="secondary-button remote-parent" disabled={loading || !parent} onClick={() => void openPath(parent)}><ChevronUp size={16} /> Выше</button>
-				<form className="remote-path" onSubmit={(event) => { event.preventDefault(); void openPath(path); }}><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="C:\\ или /home" aria-label="Путь на удалённом компьютере" /><button className="secondary-button" disabled={loading}>Перейти</button></form>
-				<button type="button" className="secondary-button remote-refresh-folder" disabled={loading} onClick={() => void openPath(path)}><RefreshCw size={16} className={loading ? "spin" : ""} /><span>Обновить</span></button>
-			</div>
-      {path && <><input ref={uploadInput} className="remote-upload-input" type="file" multiple onChange={(event) => { void uploadFiles(Array.from(event.target.files || [])); event.target.value = ""; }} /><button type="button" className={`remote-upload-zone ${dragging ? "dragging" : ""}`} disabled={loading || !supportsLargeTransfers} onClick={() => uploadInput.current?.click()} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={dropFiles}><span className="remote-upload-icon"><Upload size={19} /></span><span><strong>{supportsLargeTransfers ? "Выбрать файлы на этом устройстве" : "Обновите Agent до 0.6.0"}</strong><small>Телефон, планшет или компьютер → текущая папка на удалённом ПК</small><em>На компьютере файлы можно также перетащить в эту область · до 10 ГБ каждый</em></span><span className="remote-upload-action">Выбрать</span></button></>}
-			<div className="remote-file-list-head"><span>Содержимое папки</span><small>{entries.length} объектов</small></div>
-			<div className="remote-file-list">{entries.map((entry) => <div className="remote-file-row" key={entry.path}><span className="remote-file-icon">{entry.directory ? <Folder size={18} /> : <FileIcon size={18} />}</span><button className="remote-file-name" disabled={loading} onClick={() => entry.directory ? void openPath(entry.path) : void downloadRemoteFile(entry)}><strong>{entry.name}</strong><small>{entry.directory ? "Папка" : formatBytes(entry.size)} · {new Date(entry.modifiedAt).toLocaleString("ru-RU")}</small></button>{entry.directory ? <button className="remote-download" disabled={loading} title="Открыть папку" onClick={() => void openPath(entry.path)}><ChevronDown size={16} className="remote-open-folder-icon" /></button> : <button className="remote-download" disabled={loading || !supportsLargeTransfers || entry.size > 10 * 1024 * 1024 * 1024} title={!supportsLargeTransfers ? "Обновите Agent до 0.6.0" : entry.size > 10 * 1024 * 1024 * 1024 ? "Файл превышает 10 ГБ" : "Скачать"} onClick={() => void downloadRemoteFile(entry)}><Download size={16} /><span>Скачать</span></button>}</div>)}</div>
-      {!loading && entries.length === 0 && !error && <div className="remote-files-empty">Папка пуста</div>}
-    </>}
+	return <section className="remote-files-card" aria-busy={loading}>
+		<div className="remote-files-head"><div><strong><FolderOpen size={19} /> Передача файлов</strong><small>Два устройства рядом: выберите или перетащите файл между панелями</small></div><span className="remote-files-cap"><ShieldCheck size={14} /> до 10 ГБ</span></div>
+		<input ref={uploadInput} className="remote-upload-input" type="file" multiple onChange={(event) => { addLocalFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
+		{!started ? <button className="secondary-button remote-files-open" disabled={!device.online || loading} onClick={() => void openPath("")}><FolderOpen size={17} /> {device.online ? "Открыть проводник" : "Агент не в сети"}</button> : <div className="remote-explorer">
+			<section className={`remote-explorer-pane remote-local-pane ${localDragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setLocalDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setLocalDragging(false); }} onDrop={dropOnLocal}>
+				<header><span className="remote-pane-icon"><HardDrive size={17} /></span><span><strong>Моё устройство</strong><small>Файлы, выбранные в браузере</small></span><button type="button" className="remote-pane-action" disabled={loading} onClick={() => uploadInput.current?.click()}><Plus size={15} /> Добавить</button></header>
+				<div className="remote-local-list">
+					{localFiles.map((file) => { const key = `${file.name}\u0000${file.size}\u0000${file.lastModified}`; return <div className="remote-local-row" key={key} draggable={!loading} onDragStart={(event) => { event.dataTransfer.effectAllowed = "copy"; event.dataTransfer.setData("application/x-remoteit-local-file", key); }}><span className="remote-file-icon"><FileIcon size={17} /></span><span className="remote-file-name"><strong>{file.name}</strong><small>{formatBytes(file.size)} · готов к отправке</small></span><button type="button" className="remote-row-remove" disabled={loading} title="Убрать из списка" onClick={() => setLocalFiles((current) => current.filter((item) => item !== file))}><X size={15} /></button></div>; })}
+					{localFiles.length === 0 && <button type="button" className="remote-local-empty" disabled={loading} onClick={() => uploadInput.current?.click()}><Upload size={24} /><strong>Перетащите файлы сюда</strong><small>или выберите их на телефоне/компьютере</small></button>}
+				</div>
+				<footer><span>{localFiles.length ? `${localFiles.length} выбрано · ${formatBytes(localFiles.reduce((sum, file) => sum + file.size, 0))}` : "Локальные файлы не загружаются без вашего выбора"}</span><button type="button" className="primary-button" disabled={loading || !path || localFiles.length === 0} onClick={() => void uploadFiles(localFiles)}>Отправить на {device.name} <Upload size={15} /></button></footer>
+			</section>
+
+			<div className="remote-explorer-divider" aria-hidden="true"><span>⇄</span></div>
+
+			<section className={`remote-explorer-pane remote-device-pane ${dragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={dropOnRemote}>
+				<header><span className="remote-pane-icon"><Monitor size={17} /></span><span><strong>{device.name}</strong><small>Удалённый компьютер</small></span><button type="button" className="remote-pane-action" disabled={loading} onClick={() => void openPath(path)}><RefreshCw size={15} className={loading ? "spin" : ""} /> Обновить</button></header>
+				<div className="remote-files-toolbar">
+					<button type="button" className="secondary-button remote-parent" disabled={loading || !parent} onClick={() => void openPath(parent)} title="На уровень выше"><ChevronUp size={16} /><span>Выше</span></button>
+					<form className="remote-path" onSubmit={(event) => { event.preventDefault(); void openPath(path); }}><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="C:\\ или /home" aria-label="Путь на удалённом компьютере" /><button className="secondary-button" disabled={loading}>Перейти</button></form>
+				</div>
+				<div className="remote-file-list-head"><span>Имя</span><small>{entries.length} объектов</small></div>
+				<div className="remote-file-list">{entries.map((entry) => <div className={`remote-file-row ${entry.directory && remoteDropTarget === entry.path ? "drop-target" : ""}`} key={entry.path} draggable={!loading && !entry.directory && supportsLargeTransfers && entry.size <= 10 * 1024 * 1024 * 1024} onDragStart={(event) => { if (entry.directory) return; event.dataTransfer.effectAllowed = "copy"; event.dataTransfer.setData("application/x-remoteit-remote-file", entry.path); }} onDragEnter={entry.directory ? (event) => { if (dragCanUpload(event)) { event.preventDefault(); event.stopPropagation(); setRemoteDropTarget(entry.path); } } : undefined} onDragOver={entry.directory ? (event) => { if (dragCanUpload(event)) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "copy"; setRemoteDropTarget(entry.path); } } : undefined} onDragLeave={entry.directory ? (event) => { event.stopPropagation(); if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setRemoteDropTarget((current) => current === entry.path ? "" : current); } : undefined} onDrop={entry.directory ? (event) => dropOnRemoteFolder(event, entry.path) : undefined}><span className="remote-file-icon">{entry.directory ? <Folder size={18} /> : <FileIcon size={18} />}</span><button className="remote-file-name" disabled={loading} onClick={() => entry.directory ? void openPath(entry.path) : void downloadRemoteFile(entry)}><strong>{entry.name}</strong><small>{entry.directory ? remoteDropTarget === entry.path ? "Отпустите, чтобы загрузить в эту папку" : "Папка · можно перетащить файл внутрь" : formatBytes(entry.size)} · {new Date(entry.modifiedAt).toLocaleString("ru-RU")}</small></button>{entry.directory ? <button className="remote-download" disabled={loading} title="Открыть папку" onClick={() => void openPath(entry.path)}><ChevronDown size={16} className="remote-open-folder-icon" /></button> : <button className="remote-download" disabled={loading || !supportsLargeTransfers || entry.size > 10 * 1024 * 1024 * 1024} title={!supportsLargeTransfers ? "Обновите Agent" : entry.size > 10 * 1024 * 1024 * 1024 ? "Файл превышает 10 ГБ" : "Скачать на моё устройство"} onClick={() => void downloadRemoteFile(entry)}><Download size={16} /><span>Скачать</span></button>}</div>)}</div>
+				{!loading && entries.length === 0 && !error && <div className="remote-files-empty">Папка пуста</div>}
+				<div className="remote-device-drop-hint"><Upload size={15} /> Перетащите сюда, чтобы отправить в текущую папку</div>
+			</section>
+		</div>}
     {activeTransfer && progress ? <div className="remote-transfer-progress" role="status">
 		<div className="remote-transfer-summary"><span className="remote-transfer-direction">{activeTransfer.direction === "to_device" ? <Upload size={16} /> : <Download size={16} />}</span><span><strong>{activeTransfer.stage}</strong><small>{activeTransfer.label} · {formatBytes(progress.received)} из {formatBytes(progress.total)}</small></span><b>{Math.round(progress.percent)}%</b></div>
 		<div className="remote-transfer-bar" aria-label={`Передано ${Math.round(progress.percent)}%`}><span style={{ width: `${progress.percent}%` }} /></div>
@@ -3534,7 +3620,7 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
 	</div> : loading && <div className="remote-files-loading"><RefreshCw className="spin" size={16} /> Ожидание ответа Agent…</div>}
     {message && <div className="form-success">{message}</div>}
     {error && <div className="form-error">{error}</div>}
-		<small className="remote-files-limit"><ShieldCheck size={14} /> Передача идёт параллельным потоковым конвейером, поддерживает отмену и автоматически продолжается после краткого обрыва. Файл до 10 ГБ не хранится целиком в памяти.</small>
+		<small className="remote-files-limit"><ShieldCheck size={14} /> Передача идёт потоковыми частями, поддерживает отмену и автоматически продолжается после краткого обрыва. Файл до 10 ГБ не хранится целиком в памяти.</small>
   </section>;
 }
 
@@ -3832,6 +3918,14 @@ function CodexIntegrationPanel({ currentUser, csrf }: { currentUser: User; csrf:
   </section>;
 }
 
+function downloadAndroidAgent(token?: string) {
+	if (token) void navigator.clipboard?.writeText(token).catch(() => undefined);
+	const anchor = document.createElement("a");
+	anchor.href = "/downloads/RemoteIt-Agent-Android.apk";
+	anchor.download = "RemoteIt-Agent-Android.apk";
+	anchor.click();
+}
+
 function formatTransferDuration(value: number) {
 	const seconds = Math.max(0, Math.round(value));
 	if (seconds < 60) return `${seconds} сек.`;
@@ -3907,7 +4001,7 @@ function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User
     <section id={`settings-panel-${settingsTab}`} className="settings-grid" role="tabpanel" aria-labelledby={`settings-tab-${settingsTab}`}>
 		{settingsTab === "profile" && <>
 			<article className="settings-card account-card"><div className="settings-card-head"><span className="stat-icon blue"><CircleUserRound size={20} /></span><div><h2>Профиль аккаунта</h2><p>Ваши текущие права в RemoteIt</p></div></div><div className="account-summary"><span className="avatar">{currentUser.username.slice(0, 1).toUpperCase()}</span><div><strong>{currentUser.username}</strong><small>{roleLabel}</small></div></div><div className="account-facts"><span><small>Права доступа</small><strong>{roleLabel}</strong></span><span><small>Имя входа</small><strong>@{currentUser.username}</strong></span><span><small>Защита</small><strong><ShieldCheck size={13} /> Включена</strong></span></div></article>
-			<article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android APK</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a>{(currentUser.role === "owner" || currentUser.role === "admin") && <a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a>}</div></article>
+			<article className="settings-card downloads-card"><div className="settings-card-head"><span className="stat-icon amber"><Download size={20} /></span><div><h2>Приложения</h2><p>Проверенные сборки с сервера RemoteIt</p></div></div><div className="settings-downloads"><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={16} /> RemoteIt Console</a><a href="/downloads/RemoteIt.apk" download><Download size={16} /> Android администратора</a><a href="/downloads/RemoteIt-Agent-Android.apk" download><DeviceOSIcon os="Android" size={16} /> Android Agent пользователя</a><a href="/downloads/RemoteIt-Agent-Setup.exe" download><Download size={16} /> Windows Agent</a><a href="/downloads/install-remoteit.sh" download><Download size={16} /> Ubuntu / macOS</a>{(currentUser.role === "owner" || currentUser.role === "admin") && <a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={16} /> SHA-256 суммы</a>}</div></article>
 			<article className="settings-card creator-card"><div className="settings-card-head"><span className="stat-icon green"><Send size={20} /></span><div><h2>О RemoteIt</h2><p>Частная платформа удалённого администрирования</p></div></div><a className="creator-link" href="https://t.me/Sanchcz" target="_blank" rel="noreferrer"><span><small>Создатель</small><strong>@Sanchcz</strong></span><span>Telegram</span></a></article>
 			<div className="settings-codex-slot"><CodexIntegrationPanel currentUser={currentUser} csrf={csrf} /></div>
 		</>}
@@ -4180,12 +4274,13 @@ function TokenDetailsModal({ item, onClose, onDelete }: { item: EnrollmentTokenI
 							<article className="ready-platform-card platform-windows"><span className="ready-platform-logo"><DeviceOSIcon os="Windows" size={38} /></span><h4>Windows</h4><p>Готовый Agent</p><small>Токен уже внутри · тихая установка</small><button type="button" disabled={!active} onClick={() => downloadBoundWindowsInstaller(item.id)}><Download size={17} /><span>Скачать Agent<strong>{active ? "Windows 10 / 11 / Server" : "токен недоступен"}</strong></span></button><details><summary><FileCode2 size={13} /> Инструкция</summary><p>Запустите файл двойным кликом, укажите имя компьютера и подтвердите UAC. Устройство привяжется автоматически.</p></details></article>
 							<article className="ready-platform-card platform-macos"><span className="ready-platform-logo"><DeviceOSIcon os="macOS" size={38} /></span><h4>macOS</h4><p>Готовый Agent</p><small>Apple Silicon и Intel · токен внутри</small><button type="button" disabled={!active} onClick={() => downloadBoundUnixInstaller(item.id)}><Download size={17} /><span>Скачать Agent<strong>{active ? "macOS shell-установщик" : "токен недоступен"}</strong></span></button><details><summary><FileCode2 size={13} /> Инструкция</summary><p>Скачайте файл, откройте Terminal и запустите его. Токен уже встроен; установщик запросит только имя компьютера.</p></details></article>
 							<article className="ready-platform-card platform-linux"><span className="ready-platform-logo"><DeviceOSIcon os="Linux" size={38} /></span><h4>Linux</h4><p>Готовый Agent</p><small>Ubuntu / Debian / x64 · токен внутри</small><button type="button" disabled={!active} onClick={() => downloadBoundUnixInstaller(item.id)}><Download size={17} /><span>Скачать Agent<strong>{active ? "Linux shell-установщик" : "токен недоступен"}</strong></span></button><details><summary><FileCode2 size={13} /> Инструкция</summary><p>Запустите файл через Terminal. Установщик при необходимости поставит curl и запросит только имя компьютера. Команда одной строкой доступна ниже.</p></details></article>
+							<article className="ready-platform-card platform-android"><span className="ready-platform-logo"><DeviceOSIcon os="Android" size={38} /></span><h4>Android</h4><p>Agent для телефона</p><small>Экран и управление · токен копируется</small><button type="button" disabled={!active} onClick={() => downloadAndroidAgent(item.token)}><Download size={17} /><span>Скачать Agent<strong>{active ? "Android 8 или новее" : "токен недоступен"}</strong></span></button><details><summary><FileCode2 size={13} /> Инструкция</summary><p>Установите APK, вставьте скопированный токен, включите службу специальных возможностей и подтвердите системное разрешение на трансляцию экрана.</p></details></article>
 						</div>
 					</section>
 
 					<details className="ready-other-platforms"><summary><span />ДРУГИЕ ПЛАТФОРМЫ<ChevronDown size={16} /><span /></summary><div><a href="/downloads/remoteit-agent-macos-arm64" download><Apple size={17} /> macOS Apple Silicon</a><a href="/downloads/remoteit-agent-macos-amd64" download><Apple size={17} /> macOS Intel</a><a href="/downloads/remoteit-agent-linux-amd64" download><TerminalSquare size={17} /> Linux amd64</a><button type="button" disabled={!active} onClick={() => void copyUnixCommand()}><Copy size={17} /> {commandCopied ? "Команда скопирована" : "Команда установки"}</button></div><code>{unixInstallCommand(item.token)}</code></details>
 
-					<section className="ready-section ready-extra-section"><div className="ready-section-title"><div><h3>Дополнительные файлы</h3><p>Проверка сборок и приложения RemoteIt.</p></div></div><div className="ready-extra-grid"><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={19} /><span>Контрольные суммы<strong>SHA-256</strong></span><ChevronDown size={15} /></a><a href="/downloads/APK-SIGNER.txt" download><ShieldCheck size={19} /><span>Подпись APK<strong>release certificate</strong></span><ChevronDown size={15} /></a><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={19} /><span>RemoteIt Console<strong>настольная админка</strong></span><ChevronDown size={15} /></a><a href="/downloads/RemoteIt.apk" download><Download size={19} /><span>Android APK<strong>мобильное приложение</strong></span><ChevronDown size={15} /></a></div></section>
+					<section className="ready-section ready-extra-section"><div className="ready-section-title"><div><h3>Дополнительные файлы</h3><p>Проверка сборок и приложения RemoteIt.</p></div></div><div className="ready-extra-grid"><a href="/downloads/SHA256SUMS.txt" download><ShieldCheck size={19} /><span>Контрольные суммы<strong>SHA-256</strong></span><ChevronDown size={15} /></a><a href="/downloads/APK-SIGNER.txt" download><ShieldCheck size={19} /><span>Подпись APK<strong>release certificate</strong></span><ChevronDown size={15} /></a><a href="/downloads/RemoteIt-Console.exe" download><Monitor size={19} /><span>RemoteIt Console<strong>настольная админка</strong></span><ChevronDown size={15} /></a><a href="/downloads/RemoteIt.apk" download><Download size={19} /><span>Android администратора<strong>мобильная панель</strong></span><ChevronDown size={15} /></a></div></section>
 				</> : <div className="notice"><AlertTriangle size={18} /><span>Этот токен был создан до включения хранения полного значения. Его хеш остался рабочим, но показать код или собрать из него готовый Agent невозможно. Создайте новый токен.</span></div>}
 				<details className="token-devices token-details-devices" open={Boolean(item.devices?.length)}>
 					<summary className="token-devices-head"><span><strong>Подключённые компьютеры ({item.devices?.length || 0})</strong><small>Устройства, зарегистрированные с помощью этого токена.</small></span><ChevronDown size={17} /></summary>
@@ -4275,6 +4370,7 @@ function EnrollmentModal({ csrf, onClose }: { csrf: string; onClose: () => void 
             <article className="ready-platform-card platform-windows"><span className="ready-platform-logo"><DeviceOSIcon os="Windows" size={38} /></span><h4>Windows</h4><p>Готовый Agent</p><small>Токен уже внутри · тихая установка</small><button type="button" onClick={() => downloadBoundWindowsInstaller(tokenId)}><Download size={17} /><span>Скачать Agent<strong>Windows 10 / 11 / Server</strong></span></button><details><summary><FileCode2 size={13} /> Инструкция</summary><p>Запустите файл двойным кликом, укажите имя компьютера и подтвердите UAC. Устройство появится в панели автоматически.</p></details></article>
             <article className="ready-platform-card platform-macos"><span className="ready-platform-logo"><DeviceOSIcon os="macOS" size={38} /></span><h4>macOS</h4><p>Готовый Agent</p><small>Apple Silicon и Intel · токен внутри</small><button type="button" onClick={() => downloadBoundUnixInstaller(tokenId)}><Download size={17} /><span>Скачать Agent<strong>macOS shell-установщик</strong></span></button><details><summary><FileCode2 size={13} /> Инструкция</summary><p>Скачайте файл, откройте Terminal и запустите его. Токен уже встроен; потребуется только имя компьютера.</p></details></article>
 			<article className="ready-platform-card platform-linux"><span className="ready-platform-logo"><DeviceOSIcon os="Linux" size={38} /></span><h4>Linux</h4><p>Готовый Agent</p><small>Ubuntu / Debian / x64 · токен внутри</small><button type="button" onClick={() => downloadBoundUnixInstaller(tokenId)}><Download size={17} /><span>Скачать Agent<strong>Linux shell-установщик</strong></span></button><details><summary><FileCode2 size={13} /> Инструкция</summary><p>Запустите файл через Terminal. Он автоматически использует токен и запросит только имя компьютера; команда одной строкой доступна ниже.</p></details></article>
+			<article className="ready-platform-card platform-android"><span className="ready-platform-logo"><DeviceOSIcon os="Android" size={38} /></span><h4>Android</h4><p>Agent для телефона</p><small>Экран и управление · токен копируется</small><button type="button" onClick={() => downloadAndroidAgent(token)}><Download size={17} /><span>Скачать Agent<strong>Android 8 или новее</strong></span></button><details><summary><FileCode2 size={13} /> Инструкция</summary><p>Установите APK, вставьте скопированный токен, включите службу специальных возможностей и подтвердите системное разрешение на трансляцию экрана.</p></details></article>
           </div>
         </section>
 

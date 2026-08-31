@@ -244,3 +244,19 @@ func TestDesktopAutoCadenceDemotesSixtyAfterClusteredTransportDrops(t *testing.T
 		t.Fatalf("failed 60 FPS cadence did not establish a promotion cooldown: %#v", cadence)
 	}
 }
+
+func TestDesktopNextFrameDeadlineDropsMissedSlotWithoutCatchUp(t *testing.T) {
+	started := time.Unix(500, 0)
+	interval := time.Second / 60
+	deadline := desktopNextFrameDeadline(started, interval)
+	if want := started.Add(interval); !deadline.Equal(want) {
+		t.Fatalf("deadline = %v, want %v", deadline, want)
+	}
+	// A slow frame that started much later establishes a fresh full interval;
+	// it must not inherit a nearly-expired deadline from an earlier slot.
+	lateStarted := started.Add(187 * time.Millisecond)
+	lateDeadline := desktopNextFrameDeadline(lateStarted, interval)
+	if !lateDeadline.Equal(lateStarted.Add(interval)) {
+		t.Fatalf("late deadline = %v", lateDeadline)
+	}
+}

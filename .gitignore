@@ -14,6 +14,7 @@ outputs/
 mobile/android/.gradle/
 mobile/android/build/
 mobile/android/app/build/
+mobile/android/agentapp/build/
 *.jks
 *.keystore
 *.p12

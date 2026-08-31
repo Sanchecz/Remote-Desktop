@@ -49,6 +49,19 @@ func TestValidDesktopInput(t *testing.T) {
 	}
 }
 
+func TestDesktopOSSupportsWindowsAndAndroidAgents(t *testing.T) {
+	for _, osName := range []string{"Windows 11", "windows server", "Android", "Android 16"} {
+		if !desktopOSSupportsRemoteScreen(osName) {
+			t.Fatalf("remote-capable OS %q was rejected", osName)
+		}
+	}
+	for _, osName := range []string{"Linux", "macOS", "iOS", ""} {
+		if desktopOSSupportsRemoteScreen(osName) {
+			t.Fatalf("unsupported OS %q was accepted", osName)
+		}
+	}
+}
+
 func TestValidDesktopTargetFPS(t *testing.T) {
 	for _, value := range []int{0, 15, 30, 60} {
 		if !validDesktopTargetFPS(value) {

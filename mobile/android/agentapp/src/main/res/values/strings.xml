@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RemoteIt Agent</string>
+    <string name="accessibility_description">Разрешает выполнять подтверждённые администратором касания, прокрутку и ввод во время активной трансляции RemoteIt. Служба не включает трансляцию экрана самостоятельно.</string>
+</resources>

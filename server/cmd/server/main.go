@@ -58,6 +58,7 @@ type server struct {
 	desktopDeviceSessions   sync.Map
 	desktopInputQueues      sync.Map
 	transferProgressSignals sync.Map
+	transferOfferSignals    sync.Map
 	transferChunkLocks      sync.Map
 }
 

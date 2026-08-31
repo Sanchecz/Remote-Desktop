@@ -232,3 +232,16 @@ func (cadence *desktopAutoCadence) ObserveDropped(processingDuration time.Durati
 		cadence.constraintUntil = observedAt.Add(desktopAutoConstraintHold)
 	}
 }
+
+// desktopNextFrameDeadline establishes the next real presentation slot from
+// the frame that actually started. A stalled VDI/GDI capture must count as a
+// dropped slot, not create a catch-up burst with a near-zero following gap.
+func desktopNextFrameDeadline(frameStartedAt time.Time, interval time.Duration) time.Time {
+	if frameStartedAt.IsZero() {
+		frameStartedAt = time.Now()
+	}
+	if interval <= 0 {
+		interval = time.Second / 30
+	}
+	return frameStartedAt.Add(interval)
+}

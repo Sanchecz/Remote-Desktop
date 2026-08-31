@@ -108,7 +108,10 @@ func runFileTransferLoop(ctx context.Context, cfg *config) {
 			}
 			continue
 		}
-		if !waitContext(ctx, 3*time.Second) {
+		// The server keeps this request open and wakes it when work arrives. The
+		// short fallback only covers deployments that still run an older server;
+		// it is not the normal idle polling cadence.
+		if !waitContext(ctx, 500*time.Millisecond) {
 			return
 		}
 	}
