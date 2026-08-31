@@ -345,6 +345,19 @@ export function fitRemoteFrame(frame: Point, viewport: Point): Point {
 	};
 }
 
+// Fill every canvas pixel while preserving the remote desktop aspect ratio.
+// The mismatched axis deliberately extends past the viewport and is handled by
+// the same bounded camera used for pinch/pan. This is the useful phone portrait
+// alternative to letterboxing: no black bands, with a predictable edge crop.
+export function fillRemoteFrame(frame: Point, viewport: Point): Point {
+	if (frame.x <= 0 || frame.y <= 0 || viewport.x <= 0 || viewport.y <= 0) return { x: 1, y: 1 };
+	const ratio = Math.max(viewport.x / frame.x, viewport.y / frame.y);
+	return {
+		x: Math.max(viewport.x, Math.ceil(frame.x * ratio)),
+		y: Math.max(viewport.y, Math.ceil(frame.y * ratio)),
+	};
+}
+
 // The transformed image rectangle is authoritative for pointer mapping. This
 // remains exact after fit, fixed scale, pinch zoom and panning. Coordinates in
 // the black letterbox are intentionally clamped to the nearest desktop edge so

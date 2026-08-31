@@ -5,6 +5,7 @@ import {
 	Apple,
   Ban,
   Boxes,
+	Camera,
   CheckCircle2,
   ChevronDown,
 	ChevronUp,
@@ -61,7 +62,7 @@ import {
   X
 } from "lucide-react";
 import { chunkRemoteText, planRemoteBoundaryDeletion, planRemoteKeyboardInput, planRemoteMobileBeforeInput, planRemoteTextReconciliation } from "./remoteKeyboard";
-import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, canReleaseRemoteTouchSuppression, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, remoteCursorVisualPointForLayer, remotePointerTapActions, remotePointFromClient, reprojectRemotePoint, shouldPresentDecodedRemoteFrame, stabilizeRemoteTrackpadMotion, stableRemoteTrackpadSamples } from "./remoteCamera";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, canReleaseRemoteTouchSuppression, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fillRemoteFrame, fitRemoteFrame, isRemoteTwoFingerTap, remoteCursorVisualPointForLayer, remotePointerTapActions, remotePointFromClient, reprojectRemotePoint, shouldPresentDecodedRemoteFrame, stabilizeRemoteTrackpadMotion, stableRemoteTrackpadSamples } from "./remoteCamera";
 import { LatestPointerCadence, remotePointerCadenceMillis } from "./remotePointerCadence";
 import { bindRemoteInputCoordinates, remoteInputAckID, remoteInputBatchID, remoteInputClientID, restoreRemoteInputBatch, shouldRetryRemoteInputDelivery, takePendingRemoteInputBatches, type PendingRemoteInputBatch } from "./remoteInputDelivery";
 import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codexSetup";
@@ -85,6 +86,7 @@ type ManagedUser = User & {
 };
 
 type Theme = "dark" | "light" | "blue";
+type RemoteScaleMode = "fit" | "fill" | "actual";
 
 type Device = {
   id: string;
@@ -226,7 +228,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.24";
+const LATEST_AGENT_VERSION = "1.0.25";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1102,6 +1104,13 @@ type DesktopSession = {
 		error: string;
 		at: string;
 	} | null;
+	clipboardAck?: {
+		id: number;
+		type: string;
+		error: string;
+		value?: string;
+		at: string;
+	} | null;
   captureDiagnostics?: {
     captureMillis: number;
     copyMillis: number;
@@ -1255,12 +1264,13 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		return androidBridge || mobileRuntime || (window.matchMedia("(pointer: coarse)").matches && !window.matchMedia("(any-pointer: fine)").matches);
 	});
 	const [keyboardOpen, setKeyboardOpen] = useState(false);
+	const [clipboardSyncEnabled, setClipboardSyncEnabled] = useState(false);
 	const [mobileText, setMobileText] = useState("");
 	const [sasFeedback, setSASFeedback] = useState("");
 	const [sasFeedbackError, setSASFeedbackError] = useState(false);
 	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
 	const [filesOpen, setFilesOpen] = useState(false);
-	const [screenScale, setScreenScale] = useState<"fit" | "50" | "75" | "100" | "125" | "150">("fit");
+	const [screenScale, setScreenScale] = useState<RemoteScaleMode>("fit");
 	// Auto is the default on every client. The Agent starts Auto at 30 FPS,
 	// raises it to 60 on a consistently fast channel and falls back to 15 when
 	// capture or upload cost cannot sustain the target without queueing frames.
@@ -1282,6 +1292,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [controlsCollapsed, setControlsCollapsed] = useState(() => compactRemoteClient);
 	const [mobileDockHidden, setMobileDockHidden] = useState(false);
 	const [fullscreenActive, setFullscreenActive] = useState(false);
+	const scaleBeforeFullscreenRef = useRef<RemoteScaleMode | null>(null);
 	const [camera, setCamera] = useState({ zoom: 1, panX: 0, panY: 0 });
 	const cameraRef = useRef(camera);
 	const pendingCameraRef = useRef(camera);
@@ -1297,6 +1308,11 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const wheelRepeat = useRef({ delay: 0, interval: 0, pointerId: -1 });
 	const sasFeedbackTimer = useRef(0);
 	const sasPendingInputID = useRef(0);
+	const clipboardSyncEnabledRef = useRef(false);
+	const clipboardLastLocalRef = useRef("");
+	const clipboardLastRemoteAckRef = useRef(0);
+	const clipboardPollBusyRef = useRef(false);
+	const clipboardPermissionErrorRef = useRef(false);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
 	const pointerMoveCadence = useRef(new LatestPointerCadence<{ event: Record<string, unknown>; activatesControl: boolean }>(8));
 	const pointerMoveTimer = useRef(0);
@@ -1491,7 +1507,14 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	useEffect(() => {
 		const doc = document as Document & { webkitFullscreenElement?: Element | null };
-		const update = () => setFullscreenActive(Boolean(document.fullscreenElement || doc.webkitFullscreenElement));
+		const update = () => {
+			const active = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
+			setFullscreenActive(active);
+			if (!active && scaleBeforeFullscreenRef.current) {
+				setScreenScale(scaleBeforeFullscreenRef.current);
+				scaleBeforeFullscreenRef.current = null;
+			}
+		};
 		document.addEventListener("fullscreenchange", update);
 		document.addEventListener("webkitfullscreenchange", update as EventListener);
 		return () => {
@@ -1639,6 +1662,25 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 					setSASFeedbackError(false);
 					setSASFeedback("Ctrl+Alt+Delete выполнен системной службой Windows");
 					sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
+				}
+			}
+			const clipboardAcknowledgement = nextStatus.clipboardAck;
+			if (clipboardSyncEnabledRef.current && clipboardAcknowledgement?.type === "clipboard_read" && clipboardAcknowledgement.id > clipboardLastRemoteAckRef.current) {
+				clipboardLastRemoteAckRef.current = clipboardAcknowledgement.id;
+				if (clipboardAcknowledgement.error) {
+					setSASFeedbackError(true);
+					setSASFeedback(`Буфер удалённого компьютера недоступен: ${clipboardAcknowledgement.error}`);
+				} else if ((clipboardAcknowledgement.value || "") !== clipboardLastLocalRef.current) {
+					const remoteText = clipboardAcknowledgement.value || "";
+					void navigator.clipboard.writeText(remoteText).then(() => {
+						clipboardLastLocalRef.current = remoteText;
+						clipboardPermissionErrorRef.current = false;
+					}).catch(() => {
+						if (clipboardPermissionErrorRef.current) return;
+						clipboardPermissionErrorRef.current = true;
+						setSASFeedbackError(true);
+						setSASFeedback("Браузер запретил фоновое обновление локального буфера — нажмите «Буфер» ещё раз");
+					});
 				}
 			}
       } catch (reason) {
@@ -2114,6 +2156,46 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		return;
 	}, [sessionId, activateRemoteControl, status?.frameWidth, status?.frameHeight]);
 
+	useEffect(() => {
+		clipboardSyncEnabledRef.current = clipboardSyncEnabled;
+		if (!clipboardSyncEnabled || !sessionId) return;
+		let disposed = false;
+		const poll = async () => {
+			if (disposed || document.visibilityState === "hidden" || clipboardPollBusyRef.current) return;
+			clipboardPollBusyRef.current = true;
+			try {
+				const localText = await navigator.clipboard.readText();
+				if (new TextEncoder().encode(localText).byteLength > 32<<10) {
+					if (!clipboardPermissionErrorRef.current) {
+						clipboardPermissionErrorRef.current = true;
+						setSASFeedbackError(true);
+						setSASFeedback("Текст в буфере больше 32 КБ — передайте его как файл");
+					}
+				} else if (localText !== clipboardLastLocalRef.current) {
+					clipboardLastLocalRef.current = localText;
+					clipboardPermissionErrorRef.current = false;
+					sendInput({ type: "clipboard_write", text: localText });
+				}
+			} catch {
+				if (!clipboardPermissionErrorRef.current) {
+					clipboardPermissionErrorRef.current = true;
+					setSASFeedbackError(true);
+					setSASFeedback("Браузер приостановил чтение буфера — нажмите «Буфер» для возобновления");
+				}
+			} finally {
+				if (!disposed) sendInput({ type: "clipboard_read" });
+				clipboardPollBusyRef.current = false;
+			}
+		};
+		void poll();
+		const timer = window.setInterval(() => void poll(), 1_200);
+		return () => {
+			disposed = true;
+			window.clearInterval(timer);
+			clipboardPollBusyRef.current = false;
+		};
+	}, [clipboardSyncEnabled, sessionId, sendInput]);
+
 	function armPointerMoveTimer(delayMs: number) {
 		if (pointerMoveTimer.current) return;
 		pointerMoveTimer.current = window.setTimeout(() => {
@@ -2377,7 +2459,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			current.pendingX = 0;
 			current.pendingY = 0;
 			commitTrackpadDeltas([pending]);
-		}, 34);
+		// One 60 Hz paint is enough to distinguish a browser viewport rebase from
+		// a real swipe. The previous 34 ms look-ahead was safe but made the first
+		// movement on a phone feel one extra frame behind.
+		}, 18);
 	}
 
 	function pointerPosition(event: ReactPointerEvent<HTMLDivElement>) {
@@ -2396,6 +2481,16 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		);
 		trackpadCursor.current = { ...position, frameWidth, frameHeight, ready: true };
 		positionLocalCursor(position, { width: frameWidth, height: frameHeight });
+		if (!compactRemoteClient && (screenScale === "fill" || screenScale === "actual" || pendingCameraRef.current.zoom > 1)) {
+			const followedCamera = cameraFollowingRemotePoint(
+				pendingCameraRef.current,
+				position,
+				{ x: frameWidth, y: frameHeight },
+				{ x: fittedFrame.width, y: fittedFrame.height },
+				{ x: viewportSize.width, y: viewportSize.height },
+			);
+			if (followedCamera.panX !== pendingCameraRef.current.panX || followedCamera.panY !== pendingCameraRef.current.panY) scheduleCamera(followedCamera);
+		}
 		return { ...position, coordinateWidth: frameWidth, coordinateHeight: frameHeight };
   }
 
@@ -2995,27 +3090,99 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		setControlsCollapsed(next);
 	}
 
-	async function pasteClipboard() {
+	async function toggleClipboardSync() {
+		window.clearTimeout(sasFeedbackTimer.current);
+		if (clipboardSyncEnabled) {
+			clipboardSyncEnabledRef.current = false;
+			setClipboardSyncEnabled(false);
+			setSASFeedbackError(false);
+			setSASFeedback("Общий буфер приостановлен");
+			sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 3_000);
+			return;
+		}
 		try {
+			if (!navigator.clipboard?.readText || !navigator.clipboard?.writeText) throw new Error("Этот браузер не поддерживает общий буфер");
+			// Read while the button click still owns transient browser activation.
+			// Awaiting the control API first makes Safari/Firefox discard that grant
+			// and show a permission prompt again for the very same user action.
 			const text = await navigator.clipboard.readText();
-			if (!text) { setError("Буфер обмена пуст"); return; }
-			sendRemoteText(text);
-		} catch {
-			setError("Браузер не разрешил прочитать буфер обмена");
+			if (new TextEncoder().encode(text).byteLength > 32<<10) throw new Error("Текст в буфере больше 32 КБ — передайте его как файл");
+			await activateRemoteControl();
+			clipboardLastLocalRef.current = text;
+			clipboardLastRemoteAckRef.current = 0;
+			clipboardPermissionErrorRef.current = false;
+			clipboardSyncEnabledRef.current = true;
+			setClipboardSyncEnabled(true);
+			sendInput({ type: "clipboard_write", text });
+			sendInput({ type: "clipboard_read" });
+			setSASFeedbackError(false);
+			setSASFeedback("Общий буфер включён: текст синхронизируется в обе стороны");
+			sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
+		} catch (reason) {
+			clipboardSyncEnabledRef.current = false;
+			setClipboardSyncEnabled(false);
+			const message = reason instanceof Error ? reason.message : "Браузер не разрешил общий буфер";
+			setSASFeedbackError(true);
+			setSASFeedback(message);
+			setError(message);
 		}
 	}
 
-	const scalePercent = screenScale === "fit" ? 0 : Number(screenScale);
+	async function copyRemoteScreenshot() {
+		const image = frameImageRef.current;
+		if (!image || !image.complete || image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+			setError("Кадр удалённого экрана ещё не готов");
+			return;
+		}
+		try {
+			const canvas = document.createElement("canvas");
+			canvas.width = image.naturalWidth;
+			canvas.height = image.naturalHeight;
+			const context = canvas.getContext("2d", { alpha: false });
+			if (!context) throw new Error("Браузер не создал снимок экрана");
+			context.imageSmoothingEnabled = false;
+			context.drawImage(image, 0, 0, canvas.width, canvas.height);
+			const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error("Не удалось сформировать PNG")), "image/png"));
+			const clipboardWrite = navigator.clipboard?.write?.bind(navigator.clipboard);
+			if (clipboardWrite && typeof ClipboardItem !== "undefined") {
+				await clipboardWrite([new ClipboardItem({ "image/png": blob })]);
+				const textSyncWasEnabled = clipboardSyncEnabledRef.current;
+				if (textSyncWasEnabled) {
+					clipboardSyncEnabledRef.current = false;
+					setClipboardSyncEnabled(false);
+				}
+				window.clearTimeout(sasFeedbackTimer.current);
+				setSASFeedbackError(false);
+				setSASFeedback(`Снимок ${canvas.width}×${canvas.height} скопирован в буфер этого компьютера${textSyncWasEnabled ? "; общий текстовый буфер приостановлен, чтобы сохранить PNG" : ""}`);
+				sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
+				return;
+			}
+			const safeDevice = device.name.replace(/[^\p{L}\p{N}_.-]+/gu, "-").replace(/^-+|-+$/g, "") || "device";
+			const link = document.createElement("a");
+			const url = URL.createObjectURL(blob);
+			link.href = url;
+			link.download = `RemoteIt-${safeDevice}-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+			link.click();
+			window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+			setSASFeedbackError(false);
+			setSASFeedback("Браузер не поддерживает изображения в буфере — снимок скачан как PNG");
+		} catch (reason) {
+			const message = reason instanceof Error ? reason.message : "Не удалось скопировать снимок";
+			setSASFeedbackError(true);
+			setSASFeedback(message);
+			setError(message);
+		}
+	}
+
 	// The decoded image wins over the asynchronously refreshed status. This is
 	// essential when a VDI session changes monitor/resolution or a phone rotates:
 	// stale status dimensions previously produced a visibly cropped frame.
 	const sourceWidth = renderedFrameSize.width || status?.frameWidth || 0;
 	const sourceHeight = renderedFrameSize.height || status?.frameHeight || 0;
 	const autoFit = fitRemoteFrame({ x: sourceWidth, y: sourceHeight }, { x: viewportSize.width, y: viewportSize.height });
-	const fittedFrame = scalePercent > 0 ? {
-		width: Math.max(1, Math.round(sourceWidth * scalePercent / 100)),
-		height: Math.max(1, Math.round(sourceHeight * scalePercent / 100)),
-	} : { width: autoFit.x, height: autoFit.y };
+	const autoFill = fillRemoteFrame({ x: sourceWidth, y: sourceHeight }, { x: viewportSize.width, y: viewportSize.height });
+	const viewFrame = screenScale === "fill" ? autoFill : screenScale === "actual" ? { x: Math.max(1, sourceWidth), y: Math.max(1, sourceHeight) } : autoFit;
+	const fittedFrame = { width: viewFrame.x, height: viewFrame.y };
 	const baseFrameScale = sourceWidth > 0 ? fittedFrame.width / sourceWidth : 1;
 	const totalFrameScale = Math.max(0.0001, baseFrameScale * camera.zoom);
 	const remoteImageLayerStyle = sourceWidth > 0 && sourceHeight > 0 ? {
@@ -3049,6 +3216,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				return;
 			}
 			if (!target) return;
+			scaleBeforeFullscreenRef.current = screenScale;
+			setScreenScale("fill");
+			scheduleCamera({ zoom: 1, panX: 0, panY: 0 });
 			if (target.requestFullscreen) await target.requestFullscreen({ navigationUI: "hide" });
 			else if (target.webkitRequestFullscreen) await target.webkitRequestFullscreen();
 			else {
@@ -3057,6 +3227,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				setError("Браузер не поддерживает полноэкранный режим страницы — экран заполнен до границ браузера");
 			}
 		} catch {
+			if (scaleBeforeFullscreenRef.current) setScreenScale(scaleBeforeFullscreenRef.current);
+			scaleBeforeFullscreenRef.current = null;
 			setError("Полноэкранный режим заблокирован браузером — нажмите кнопку ещё раз");
 		}
 	}
@@ -3068,22 +3240,23 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		"--remote-vv-height": `${remoteViewport.height}px`,
 	} as CSSProperties : undefined;
 
-	const workspace = <section ref={workspaceRef} style={remoteViewportStyle} className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""} ${mobileDockHidden ? "remote-mobile-dock-hidden" : ""} ${keyboardOpen ? "remote-keyboard-open" : ""} ${remoteViewport.landscape ? "remote-runtime-landscape" : "remote-runtime-portrait"} ${fullscreenActive ? "remote-is-fullscreen" : ""}`}>
+	const workspace = <section ref={workspaceRef} style={remoteViewportStyle} className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${compactRemoteClient ? "remote-compact-client" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""} ${mobileDockHidden ? "remote-mobile-dock-hidden" : ""} ${keyboardOpen ? "remote-keyboard-open" : ""} ${remoteViewport.landscape ? "remote-runtime-landscape" : "remote-runtime-portrait"} ${fullscreenActive ? "remote-is-fullscreen" : ""}`}>
 		<header>
 			<div><span className="eyebrow">ЗАЩИЩЁННЫЙ СЕАНС</span><h2>{device.name}</h2><small><span className={`desktop-live-dot ${status?.agentConnected ? "active" : ""}`} />{status?.agentConnected ? `Экран ${status.frameWidth || "—"}×${status.frameHeight || "—"} · ${status.controlEnabled ? "управление активно" : "предпросмотр — нажмите на экран для управления"}` : "Ожидание настольного Agent…"}</small></div>
 			<div className="desktop-actions">
 				<span className="remote-mode-badge">{pointerMode === "direct" ? "Касание" : "Курсор"}</span>
 				<label className="remote-scale-control" title="Частота кадров"><span>FPS</span><select value={targetFPS} onChange={(event) => updateTargetFPS(event.target.value as typeof targetFPS)}><option value="auto">Авто · 30</option><option value="15">15</option><option value="30">30</option><option value="60">60 · Плавность</option></select></label>
-				<label className="remote-scale-control" title="Масштаб изображения удалённого экрана"><span>Масштаб</span><select value={screenScale} onChange={(event) => setScreenScale(event.target.value as typeof screenScale)}><option value="fit">По размеру</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option><option value="125">125%</option><option value="150">150%</option></select></label>
+				<label className="remote-scale-control" title="Как разместить удалённый рабочий стол"><span>Вид</span><select value={screenScale} onChange={(event) => setScreenScale(event.target.value as RemoteScaleMode)}><option value="fit">Весь экран</option><option value="fill">Заполнить</option><option value="actual">1:1</option></select></label>
 				<button className="remote-header-tool" onClick={() => void toggleRemoteFullscreen()} title={fullscreenActive ? "Выйти из полноэкранного режима" : "На весь экран"}><Maximize2 size={17} /><span>{fullscreenActive ? "Свернуть" : "Полный экран"}</span></button>
+				<button className="remote-header-tool" onClick={() => void copyRemoteScreenshot()} title="Скопировать текущий кадр как PNG"><Camera size={17} /><span>Снимок</span></button>
 				<button className="remote-header-tool" onClick={() => void sendCtrlAltDelete()} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>
-				<button className="remote-header-tool" onClick={() => void pasteClipboard()} title="Вставить текст из локального буфера"><Clipboard size={17} /><span>Буфер</span></button>
+				<button className={`remote-header-tool ${clipboardSyncEnabled ? "active" : ""}`} onClick={() => void toggleClipboardSync()} title={clipboardSyncEnabled ? "Остановить двусторонний буфер" : "Включить двусторонний буфер"}><Clipboard size={17} /><span>{clipboardSyncEnabled ? "Буфер · вкл" : "Общий буфер"}</span></button>
 				<button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>
 				<button className="remote-header-tool" onClick={openRemoteFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>
 				<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button>
 			</div>
 		</header>
-		<div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale === "fit" ? "fit" : "fixed"}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onLostPointerCapture={lostPointerCapture} onWheel={wheel} onContextMenu={(event) => event.preventDefault()}>
+		<div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onLostPointerCapture={lostPointerCapture} onWheel={wheel} onContextMenu={(event) => event.preventDefault()}>
 			{frameURL ? <>
 				<div className="remote-screen-canvas">
 					<div ref={frameImageLayerRef} className="remote-screen-image-layer" style={remoteImageLayerStyle}>
@@ -3091,9 +3264,15 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 						{localCursorVisible && <span ref={localCursorRef} className="remote-local-cursor" aria-hidden="true"><MousePointer2 size={22} strokeWidth={2.4} /></span>}
 					</div>
 				</div>
-				<span className="remote-stream-stats" title={status?.captureDiagnostics ? `${status.captureDiagnostics.captureBackend}: захват ${status.captureDiagnostics.captureMillis} мс, копирование ${status.captureDiagnostics.copyMillis} мс, масштаб ${status.captureDiagnostics.scaleMillis} мс, JPEG ${status.captureDiagnostics.encodeMillis} мс` : ""}><b>HD</b><span>{latencyMs || "—"} мс</span><em>{frameFPS || "—"} FPS</em><em>{camera.zoom > 1 ? `${Math.round(camera.zoom * 100)}%` : screenScale === "fit" ? "ПО РАЗМЕРУ" : `${screenScale}%`}</em></span>
+				<span className="remote-stream-stats" title={status?.captureDiagnostics ? `${status.captureDiagnostics.captureBackend}: захват ${status.captureDiagnostics.captureMillis} мс, копирование ${status.captureDiagnostics.copyMillis} мс, масштаб ${status.captureDiagnostics.scaleMillis} мс, JPEG ${status.captureDiagnostics.encodeMillis} мс` : ""}><b>HD</b><span>{latencyMs || "—"} мс</span><em>{frameFPS || "—"} FPS</em><em>{camera.zoom > 1 ? `${Math.round(camera.zoom * 100)}%` : screenScale === "fit" ? "ВЕСЬ ЭКРАН" : screenScale === "fill" ? "ЗАПОЛНЕНО" : "1:1"}</em></span>
 			</> : <div className="remote-screen-wait"><ScreenShare size={42} /><strong>{starting ? "Создаём сеанс…" : "Ожидаем первый кадр"}</strong><span>На удалённом компьютере должен быть запущен RemoteIt Agent 0.9.26 или новее.</span></div>}
 		</div>
+		{!compactRemoteClient && fullscreenActive && <nav className="remote-desktop-fullscreen-tools" aria-label="Управление полноэкранным сеансом">
+			<button type="button" onClick={() => void copyRemoteScreenshot()} title="Скопировать снимок"><Camera size={18} /></button>
+			<button type="button" className={clipboardSyncEnabled ? "active" : ""} onClick={() => void toggleClipboardSync()} title={clipboardSyncEnabled ? "Остановить общий буфер" : "Включить общий буфер"}><Clipboard size={18} /></button>
+			<button type="button" onClick={() => void toggleRemoteFullscreen()} title="Выйти из полноэкранного режима"><Maximize2 size={18} /></button>
+			<button type="button" className="danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /></button>
+		</nav>}
 		{compactRemoteClient && controlsCollapsed && !mobileDockHidden && <nav className="remote-mobile-dock" aria-label="Быстрое управление удалённым компьютером">
 			<button type="button" className={pointerMode === "trackpad" ? "active" : ""} aria-pressed={pointerMode === "trackpad"} onClick={() => selectPointerMode("trackpad")}><MousePointer2 size={18} /><span>Курсор</span></button>
 			<button type="button" className={pointerMode === "direct" ? "active" : ""} aria-pressed={pointerMode === "direct"} onClick={() => selectPointerMode("direct")}><Hand size={18} /><span>Касание</span></button>
@@ -3120,8 +3299,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button type="button" className="remote-tool-button" onClick={() => void sendCtrlAltDelete()}><Keyboard size={15} /> Ctrl+Alt+Del</button>
 				<button type="button" className="remote-tool-button" onClick={() => void toggleRemoteFullscreen()}><Maximize2 size={15} /> {fullscreenActive ? "Свернуть" : "Полный экран"}</button>
 				<button type="button" className="remote-tool-button" onClick={resetCamera}><Maximize2 size={15} /> По размеру</button>
+				<button type="button" className="remote-tool-button" onClick={() => void copyRemoteScreenshot()}><Camera size={15} /> Снимок</button>
 				<button type="button" className="remote-tool-button" onClick={openRemoteFiles}><Folder size={15} /> Файлы</button>
-				<button type="button" className="remote-tool-button" onClick={() => void pasteClipboard()}><Clipboard size={15} /> Буфер</button>
+				<button type="button" className={`remote-tool-button ${clipboardSyncEnabled ? "active" : ""}`} onClick={() => void toggleClipboardSync()}><Clipboard size={15} /> {clipboardSyncEnabled ? "Буфер включён" : "Общий буфер"}</button>
 				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
 			</div>
 			<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button>

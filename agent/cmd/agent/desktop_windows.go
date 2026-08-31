@@ -26,6 +26,7 @@ import (
 	"unsafe"
 
 	"github.com/coder/websocket"
+	"github.com/lxn/walk"
 	"golang.org/x/sys/windows"
 )
 
@@ -206,13 +207,15 @@ type desktopInputTask struct {
 }
 
 type desktopInputTaskResult struct {
-	err        error
-	sasResults []desktopSASResult
+	err                   error
+	acknowledgedResults []desktopAcknowledgedInputResult
 }
 
-type desktopSASResult struct {
-	inputID int64
-	err     error
+type desktopAcknowledgedInputResult struct {
+	inputID   int64
+	inputType string
+	value     string
+	err       error
 }
 
 func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, results chan<- desktopInputTaskResult, activeSession *atomic.Value) {
@@ -265,7 +268,7 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 				// Windows is already showing Winlogon — exactly where SAS is needed.
 				if event.Type == "sas" {
 					sasErr := executeDesktopInput(event, task.capture)
-					result.sasResults = append(result.sasResults, desktopSASResult{inputID: event.ID, err: sasErr})
+					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: "sas", err: sasErr})
 					if result.err == nil && sasErr != nil {
 						result.err = sasErr
 					}
@@ -278,6 +281,22 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 				if surfaceErr != nil {
 					if result.err == nil {
 						result.err = surfaceErr
+					}
+					continue
+				}
+				if event.Type == "clipboard_read" {
+					value, clipboardErr := walk.Clipboard().Text()
+					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, value: value, err: clipboardErr})
+					if result.err == nil && clipboardErr != nil {
+						result.err = clipboardErr
+					}
+					continue
+				}
+				if event.Type == "clipboard_write" {
+					clipboardErr := walk.Clipboard().SetText(event.Text)
+					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, err: clipboardErr})
+					if result.err == nil && clipboardErr != nil {
+						result.err = clipboardErr
 					}
 					continue
 				}
@@ -673,11 +692,11 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 		// desktop once. Button/key/wheel actions remain ordered and are never lost.
 		select {
 		case completed := <-inputResults:
-			for _, sasResult := range completed.sasResults {
-				if sasResult.inputID <= 0 {
+			for _, acknowledged := range completed.acknowledgedResults {
+				if acknowledged.inputID <= 0 {
 					continue
 				}
-				if err := reportDesktopInputResult(ctx, controlClient, access, offer.ID, sasResult); err != nil {
+				if err := reportDesktopInputResult(ctx, controlClient, access, offer.ID, acknowledged); err != nil {
 					select {
 					case inputErrors <- err:
 					default:
@@ -998,12 +1017,12 @@ func reportDesktopStatus(ctx context.Context, client *http.Client, access deskto
 	return nil
 }
 
-func reportDesktopInputResult(ctx context.Context, client *http.Client, access desktopAgentAccess, sessionID string, result desktopSASResult) error {
+func reportDesktopInputResult(ctx context.Context, client *http.Client, access desktopAgentAccess, sessionID string, result desktopAcknowledgedInputResult) error {
 	inputError := ""
 	if result.err != nil {
 		inputError = result.err.Error()
 	}
-	payload, err := json.Marshal(map[string]any{"inputId": result.inputID, "inputType": "sas", "inputError": inputError})
+	payload, err := json.Marshal(map[string]any{"inputId": result.inputID, "inputType": result.inputType, "inputError": inputError, "inputValue": result.value})
 	if err != nil {
 		return err
 	}
@@ -2002,6 +2021,23 @@ func (capturer *desktopCapturer) ensure(targetFPS int) error {
 	return nil
 }
 
+func (capturer *desktopCapturer) copyGDISurface() (string, bool) {
+	if capturer.screenDC == 0 || capturer.memoryDC == 0 || capturer.width <= 0 || capturer.height <= 0 {
+		return "-unavailable", false
+	}
+	const sourceCopy = 0x00CC0020 // SRCCOPY
+	if capturer.screenWidth == capturer.width && capturer.screenHeight == capturer.height {
+		copied, _, _ := procBitBlt.Call(capturer.memoryDC, 0, 0, uintptr(capturer.width), uintptr(capturer.height), capturer.screenDC, uintptr(capturer.screenX), uintptr(capturer.screenY), sourceCopy)
+		return "-bitblt", copied != 0
+	}
+	// COLORONCOLOR is intentionally used only on the secure/compatibility GDI
+	// path. HALFTONE makes VMware recompose the native surface and can add
+	// hundreds of milliseconds before JPEG encoding starts.
+	procSetStretchBltMode.Call(capturer.memoryDC, 3) // COLORONCOLOR
+	copied, _, _ := procStretchBlt.Call(capturer.memoryDC, 0, 0, uintptr(capturer.width), uintptr(capturer.height), capturer.screenDC, uintptr(capturer.screenX), uintptr(capturer.screenY), uintptr(capturer.screenWidth), uintptr(capturer.screenHeight), sourceCopy)
+	return "-stretch-color", copied != 0
+}
+
 func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constrained bool, cursorVisible bool, secureDesktop bool) (desktopCapture, error) {
 	if err := capturer.ensure(targetFPS); err != nil {
 		return desktopCapture{}, err
@@ -2078,22 +2114,29 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constra
 		}
 		framePixels = capturer.pixels
 		frameWidth, frameHeight = capturer.width, capturer.height
-		const sourceCopy = 0x00CC0020 // SRCCOPY
-		copied := uintptr(0)
-		if capturer.screenWidth == capturer.width && capturer.screenHeight == capturer.height {
-			copied, _, _ = procBitBlt.Call(capturer.memoryDC, 0, 0, uintptr(frameWidth), uintptr(frameHeight), capturer.screenDC, uintptr(capturer.screenX), uintptr(capturer.screenY), sourceCopy)
-			captureBackend += "-bitblt"
-		} else {
-			// COLORONCOLOR is intentionally used only on the secure GDI fallback.
-			// HALFTONE forced VMware to recompose the native surface and had the
-			// same ~300 ms cost as a full BitBlt. At the normal 75% downscale this
-			// mode remains readable, while TurboJPEG keeps chroma 4:4:4.
-			procSetStretchBltMode.Call(capturer.memoryDC, 3) // COLORONCOLOR
-			copied, _, _ = procStretchBlt.Call(capturer.memoryDC, 0, 0, uintptr(frameWidth), uintptr(frameHeight), capturer.screenDC, uintptr(capturer.screenX), uintptr(capturer.screenY), uintptr(capturer.screenWidth), uintptr(capturer.screenHeight), sourceCopy)
-			captureBackend += "-stretch-color"
-		}
-		if copied == 0 {
-			return desktopCapture{}, errors.New("не удалось скопировать экран")
+		copyBackend, copied := capturer.copyGDISurface()
+		captureBackend += copyBackend
+		if !copied {
+			// VDI display drivers invalidate screen DCs when an RDP user reconnects,
+			// the active session changes, or CredUI switches desktops. A persistent
+			// GDI surface which was valid one frame ago then fails forever unless all
+			// dependent objects are released. Recreate the exact target surface and
+			// retry once in the same capture request, instead of showing a permanent
+			// "не удалось скопировать экран" state for an otherwise healthy Agent.
+			capturer.Close()
+			if err := capturer.ensure(targetFPS); err != nil {
+				return desktopCapture{}, fmt.Errorf("не удалось переподключить захват VDI: %w", err)
+			}
+			desiredWidth, desiredHeight = desktopOutputGeometry(capturer.width, capturer.height, targetFPS, interactive, constrained)
+			profile = desktopProfileForInteraction(targetFPS, interactive, constrained, desiredWidth)
+			framePixels = capturer.pixels
+			frameWidth, frameHeight = capturer.width, capturer.height
+			copyBackend, copied = capturer.copyGDISurface()
+			captureBackend += "-reinit" + copyBackend
+			if !copied {
+				capturer.Close()
+				return desktopCapture{}, errors.New("не удалось скопировать экран после переподключения к VDI-сеансу")
+			}
 		}
 		copyMillis = int(time.Since(copyStartedAt).Milliseconds())
 	}

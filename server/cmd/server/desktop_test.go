@@ -19,6 +19,8 @@ func TestValidDesktopInput(t *testing.T) {
 		{Type: "key", Action: "down", KeyCode: 65},
 		{Type: "text", Text: "RemoteIt: Привет, Shift: ? : \" + _ ( ) ! 👋"},
 		{Type: "sas"},
+		{Type: "clipboard_write", Text: "двусторонний буфер"},
+		{Type: "clipboard_read"},
 	}
 	for _, event := range valid {
 		if !validDesktopInput(event) {
@@ -35,6 +37,9 @@ func TestValidDesktopInput(t *testing.T) {
 		{Type: "text"},
 		{Type: "text", Text: string(make([]rune, 129))},
 		{Type: "sas", Action: "down"},
+		{Type: "clipboard_write", Text: "bad\x00value"},
+		{Type: "clipboard_write", Text: string(make([]byte, (32<<10)+1))},
+		{Type: "clipboard_read", Action: "down"},
 		{Type: "shell"},
 	}
 	for _, event := range invalid {
@@ -431,6 +436,7 @@ func TestDesktopRuntimeCleanupRemovesEverySessionObject(t *testing.T) {
 	s.desktopFrameLanes.Store(sessionID+"\x000", desktopFrameState{Frame: []byte{1, 2, 3}, DeviceID: deviceID, At: time.Now().UTC()})
 	s.desktopAgentSeen.Store(sessionID, time.Now().UTC())
 	s.desktopInputAcks.Store(sessionID, desktopInputAck{ID: 7, Type: "sas", At: time.Now().UTC()})
+	s.desktopClipboardAcks.Store(sessionID, desktopInputAck{ID: 8, Type: "clipboard_read", Value: "test", At: time.Now().UTC()})
 	s.desktopViewerTouches.Store(sessionID, time.Now().UTC())
 	s.desktopSessionAccess.Store(sessionID+"\x00browser-session", cachedDesktopSessionAccess{DeviceID: deviceID, CheckedAt: time.Now().UTC()})
 	s.desktopInputQueues.Store(sessionID, newDesktopInputQueue())
@@ -438,7 +444,7 @@ func TestDesktopRuntimeCleanupRemovesEverySessionObject(t *testing.T) {
 	s.deleteDesktopFrame(sessionID)
 
 	for name, state := range map[string]*sync.Map{
-		"frames": &s.desktopFrames, "frame lanes": &s.desktopFrameLanes, "agent seen": &s.desktopAgentSeen, "input acks": &s.desktopInputAcks, "viewer touches": &s.desktopViewerTouches,
+		"frames": &s.desktopFrames, "frame lanes": &s.desktopFrameLanes, "agent seen": &s.desktopAgentSeen, "input acks": &s.desktopInputAcks, "clipboard acks": &s.desktopClipboardAcks, "viewer touches": &s.desktopViewerTouches,
 		"runtime": &s.desktopSessionRuntime, "access": &s.desktopSessionAccess, "queues": &s.desktopInputQueues,
 	} {
 		found := false

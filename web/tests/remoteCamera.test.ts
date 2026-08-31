@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, canReleaseRemoteTouchSuppression, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remoteCursorVisualPoint, remoteCursorVisualPointForLayer, remotePointerTapActions, remotePointFromClient, reprojectRemotePoint, shouldPresentDecodedRemoteFrame, stabilizeRemoteTrackpadMotion, stableRemoteTrackpadDelta, stableRemoteTrackpadSamples } from "../src/remoteCamera.ts";
+import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, cameraKeepingPointUnderFingers, canReleaseRemoteTouchSuppression, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fillRemoteFrame, fitRemoteFrame, isRemoteTwoFingerTap, pointUnderScreenCoordinate, remoteCursorVisualPoint, remoteCursorVisualPointForLayer, remotePointerTapActions, remotePointFromClient, reprojectRemotePoint, shouldPresentDecodedRemoteFrame, stabilizeRemoteTrackpadMotion, stableRemoteTrackpadDelta, stableRemoteTrackpadSamples } from "../src/remoteCamera.ts";
 
 test("a remote pointer tap contains exactly one press and one release", () => {
 	assert.deepEqual(remotePointerTapActions("left"), [
@@ -419,6 +419,28 @@ test("fit mode keeps the entire desktop visible in phone portrait and landscape"
 			assert.ok(Math.abs(fitted.x / fitted.y - frame.x / frame.y) < 0.02, "fit must preserve the desktop aspect ratio");
 		}
 	}
+});
+
+test("fill mode covers the complete phone and desktop canvas without distorting the frame", () => {
+	for (const frame of [{ x: 1366, y: 768 }, { x: 1920, y: 1080 }, { x: 2256, y: 1504 }, { x: 3440, y: 1440 }, { x: 1080, y: 1920 }]) {
+		for (const viewport of [{ x: 390, y: 786 }, { x: 844, y: 342 }, { x: 1440, y: 900 }, { x: 2560, y: 1080 }]) {
+			const filled = fillRemoteFrame(frame, viewport);
+			assert.ok(filled.x >= viewport.x, `${frame.x}x${frame.y} leaves horizontal bands in ${viewport.x}x${viewport.y}`);
+			assert.ok(filled.y >= viewport.y, `${frame.x}x${frame.y} leaves vertical bands in ${viewport.x}x${viewport.y}`);
+			assert.ok(Math.abs(filled.x / filled.y - frame.x / frame.y) < 0.02, "fill must preserve the desktop aspect ratio");
+		}
+	}
+});
+
+test("fill mode camera can expose every cropped edge without uncovering the canvas", () => {
+	const viewport = { x: 390, y: 786 };
+	const filled = fillRemoteFrame({ x: 1920, y: 1080 }, viewport);
+	const rightEdge = clampRemoteCamera({ zoom: 1, panX: -10000, panY: 10000 }, filled, viewport);
+	assert.equal(rightEdge.panX, -(filled.x - viewport.x) / 2);
+	assert.equal(rightEdge.panY, 0);
+	const zoomed = clampRemoteCamera({ zoom: 2, panX: 10000, panY: -10000 }, filled, viewport);
+	assert.equal(zoomed.panX, (filled.x * 2 - viewport.x) / 2);
+	assert.equal(zoomed.panY, -(filled.y * 2 - viewport.y) / 2);
 });
 
 test("direct touch remains pixel-accurate across desktop and phone aspect-ratio matrices", () => {
