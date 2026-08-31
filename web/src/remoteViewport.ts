@@ -135,3 +135,12 @@ export function shouldUseCompactRemoteControls(coarsePointer: boolean, viewport:
 export function shouldUseRemoteTrackpad(compactRemoteClient: boolean, pointerMode: "direct" | "trackpad"): boolean {
 	return compactRemoteClient && pointerMode === "trackpad";
 }
+
+// A wide Windows monitor cannot fill a phone portrait viewport without losing
+// its left and right edges. Fullscreen must therefore preserve the regular
+// fit-to-screen view in portrait. Landscape keeps the established edge-to-edge
+// presentation because its aspect ratio is close enough to a desktop monitor
+// and the bounded camera can expose the small cropped remainder.
+export function remoteFullscreenScaleMode(compactRemoteClient: boolean, landscape: boolean): "fit" | "fill" {
+	return compactRemoteClient && landscape ? "fill" : "fit";
+}

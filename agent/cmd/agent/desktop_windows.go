@@ -88,6 +88,7 @@ var (
 	procIsClipboardFormat       = user32Desktop.NewProc("IsClipboardFormatAvailable")
 	procGetClipboardData        = user32Desktop.NewProc("GetClipboardData")
 	procSetClipboardData        = user32Desktop.NewProc("SetClipboardData")
+	procGetClipboardSequence    = user32Desktop.NewProc("GetClipboardSequenceNumber")
 	procCreateDCW               = gdi32Desktop.NewProc("CreateDCW")
 	procCreateCompatibleDC      = gdi32Desktop.NewProc("CreateCompatibleDC")
 	procDeleteDC                = gdi32Desktop.NewProc("DeleteDC")
@@ -265,6 +266,7 @@ type desktopAcknowledgedInputResult struct {
 	inputType string
 	value     string
 	mime      string
+	sequence  uint32
 	imagePNG  []byte
 	err       error
 }
@@ -336,26 +338,27 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 					continue
 				}
 				if event.Type == "clipboard_read" {
+					sequence, _, _ := procGetClipboardSequence.Call()
 					imagePNG, imageAvailable, imageErr := readWindowsClipboardPNG()
 					if imageAvailable || imageErr != nil {
 						if imageErr == nil && !windowsClipboardPNGChanged(imagePNG) {
 							imagePNG = nil
 						}
-						result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, mime: "image/png", imagePNG: imagePNG, err: imageErr})
+						result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, mime: "image/png", sequence: uint32(sequence), imagePNG: imagePNG, err: imageErr})
 						if result.err == nil && imageErr != nil {
 							result.err = imageErr
 						}
 						continue
 					}
-					value, clipboardErr := walk.Clipboard().Text()
-					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, value: value, err: clipboardErr})
+					value, clipboardErr := readWindowsClipboardText()
+					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, value: value, sequence: uint32(sequence), err: clipboardErr})
 					if result.err == nil && clipboardErr != nil {
 						result.err = clipboardErr
 					}
 					continue
 				}
 				if event.Type == "clipboard_write" {
-					clipboardErr := walk.Clipboard().SetText(event.Text)
+					clipboardErr := writeWindowsClipboardText(event.Text)
 					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: event.Type, err: clipboardErr})
 					if result.err == nil && clipboardErr != nil {
 						result.err = clipboardErr
@@ -384,6 +387,32 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 			}
 		}
 	}
+}
+
+func readWindowsClipboardText() (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		value, err := walk.Clipboard().Text()
+		if err == nil {
+			return value, nil
+		}
+		lastErr = err
+		time.Sleep(time.Duration(8+attempt*4) * time.Millisecond)
+	}
+	return "", lastErr
+}
+
+func writeWindowsClipboardText(value string) error {
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		if err := walk.Clipboard().SetText(value); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Duration(8+attempt*4) * time.Millisecond)
+	}
+	return lastErr
 }
 
 // desktopInputSurface keeps the capture thread attached to the desktop that is
@@ -1206,7 +1235,7 @@ func reportDesktopInputResult(ctx context.Context, client *http.Client, access d
 	if result.err != nil {
 		inputError = result.err.Error()
 	}
-	payload, err := json.Marshal(map[string]any{"inputId": result.inputID, "inputType": result.inputType, "inputError": inputError, "inputValue": result.value, "inputMime": result.mime})
+	payload, err := json.Marshal(map[string]any{"inputId": result.inputID, "inputType": result.inputType, "inputError": inputError, "inputValue": result.value, "inputMime": result.mime, "inputSequence": result.sequence})
 	if err != nil {
 		return err
 	}

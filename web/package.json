@@ -1,12 +1,12 @@
 {
   "name": "remoteit-web",
   "private": true,
-  "version": "1.0.32",
+  "version": "1.0.33",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
-		"test": "pnpm run test:keyboard && pnpm run test:camera && pnpm run test:frames && pnpm run test:pointer && pnpm run test:input && pnpm run test:viewport && pnpm run test:reconnect && pnpm run test:files && pnpm run test:codex",
+		"test": "pnpm run test:keyboard && pnpm run test:camera && pnpm run test:frames && pnpm run test:pointer && pnpm run test:input && pnpm run test:viewport && pnpm run test:reconnect && pnpm run test:files && pnpm run test:clipboard && pnpm run test:codex",
     "test:keyboard": "node --experimental-strip-types --test tests/remoteKeyboard.test.ts",
     "test:camera": "node --experimental-strip-types --test tests/remoteCamera.test.ts",
 		"test:frames": "node --experimental-strip-types --test tests/remoteFramePresentation.test.ts",
@@ -14,7 +14,8 @@
 		"test:input": "node --experimental-strip-types --test tests/remoteInputDelivery.test.ts",
     "test:viewport": "node --experimental-strip-types --test tests/remoteViewport.test.ts",
     "test:reconnect": "node --experimental-strip-types --test tests/remoteReconnect.test.ts",
-    "test:files": "node --experimental-strip-types --test tests/fileTransfers.test.ts",
+		"test:files": "node --experimental-strip-types --test tests/fileTransfers.test.ts",
+		"test:clipboard": "node --experimental-strip-types --test tests/remoteClipboard.test.ts",
     "test:codex": "node --experimental-strip-types --test tests/codexSetup.test.ts",
     "check": "pnpm run test && pnpm run build"
   },

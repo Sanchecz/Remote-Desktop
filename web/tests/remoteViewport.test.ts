@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, remoteViewportWithStableOrientation, resolveRemoteLayoutLandscape, resolveRemoteViewport, shouldApplyRemoteOrientationTransition, shouldRebaseRemotePointerViewport, shouldUseCompactRemoteControls, shouldUseRemoteTrackpad } from "../src/remoteViewport.ts";
+import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteFullscreenScaleMode, remoteViewportChanged, remoteViewportWithStableOrientation, resolveRemoteLayoutLandscape, resolveRemoteViewport, shouldApplyRemoteOrientationTransition, shouldRebaseRemotePointerViewport, shouldUseCompactRemoteControls, shouldUseRemoteTrackpad } from "../src/remoteViewport.ts";
 
 test("Chromium and Android use the visible viewport instead of the stale layout viewport", () => {
 	assert.deepEqual(resolveRemoteViewport({
@@ -106,6 +106,13 @@ test("compact touch viewers keep relative cursor mode when their browser reports
 	assert.equal(shouldUseRemoteTrackpad(true, "trackpad"), true);
 	assert.equal(shouldUseRemoteTrackpad(true, "direct"), false);
 	assert.equal(shouldUseRemoteTrackpad(false, "trackpad"), false);
+});
+
+test("phone portrait fullscreen keeps every Windows edge visible", () => {
+	assert.equal(remoteFullscreenScaleMode(true, false), "fit");
+	assert.equal(remoteFullscreenScaleMode(true, true), "fill");
+	assert.equal(remoteFullscreenScaleMode(false, false), "fit");
+	assert.equal(remoteFullscreenScaleMode(false, true), "fit");
 });
 
 test("active touch coordinates are rebased when mobile browser chrome changes the visual viewport", () => {

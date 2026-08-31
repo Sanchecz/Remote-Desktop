@@ -22,8 +22,8 @@ android {
         applicationId = "ru.supportgenesis.remoteit.agent"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "1.0.32"
+        versionCode = 8
+        versionName = "1.0.33"
     }
 
     signingConfigs {

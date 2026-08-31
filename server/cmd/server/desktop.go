@@ -183,12 +183,13 @@ type queuedDesktopInput struct {
 }
 
 type desktopInputAck struct {
-	ID    int64     `json:"id"`
-	Type  string    `json:"type"`
-	Error string    `json:"error"`
-	Value string    `json:"value,omitempty"`
-	Mime  string    `json:"mime,omitempty"`
-	At    time.Time `json:"at"`
+	ID       int64     `json:"id"`
+	Type     string    `json:"type"`
+	Error    string    `json:"error"`
+	Value    string    `json:"value,omitempty"`
+	Mime     string    `json:"mime,omitempty"`
+	Sequence uint64    `json:"sequence,omitempty"`
+	At       time.Time `json:"at"`
 }
 
 type desktopInputQueue struct {
@@ -1587,12 +1588,13 @@ func (s *server) desktopAgentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Error      string `json:"error"`
-		InputID    int64  `json:"inputId"`
-		InputType  string `json:"inputType"`
-		InputError string `json:"inputError"`
-		InputValue string `json:"inputValue"`
-		InputMime  string `json:"inputMime"`
+		Error         string `json:"error"`
+		InputID       int64  `json:"inputId"`
+		InputType     string `json:"inputType"`
+		InputError    string `json:"inputError"`
+		InputValue    string `json:"inputValue"`
+		InputMime     string `json:"inputMime"`
+		InputSequence uint64 `json:"inputSequence"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		return
@@ -1613,7 +1615,8 @@ func (s *server) desktopAgentStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	validAcknowledgementType := input.InputType == "sas" || input.InputType == "clipboard_read" || input.InputType == "clipboard_write" || input.InputType == "clipboard_image_write"
 	validMime := input.InputMime == "" || (input.InputType == "clipboard_read" && input.InputMime == "image/png")
-	if input.InputID < 0 || (input.InputID > 0 && (!validAcknowledgementType || !validMime)) || (input.InputID == 0 && (input.InputType != "" || input.InputError != "" || input.InputValue != "" || input.InputMime != "")) {
+	validSequence := input.InputSequence == 0 || input.InputType == "clipboard_read"
+	if input.InputID < 0 || (input.InputID > 0 && (!validAcknowledgementType || !validMime || !validSequence)) || (input.InputID == 0 && (input.InputType != "" || input.InputError != "" || input.InputValue != "" || input.InputMime != "" || input.InputSequence != 0)) {
 		writeError(w, http.StatusBadRequest, "Некорректное подтверждение команды удалённого управления")
 		return
 	}
@@ -1629,7 +1632,7 @@ func (s *server) desktopAgentStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.desktopAgentSeen.Store(sessionID, time.Now().UTC())
 	if input.InputID > 0 {
-		ack := desktopInputAck{ID: input.InputID, Type: input.InputType, Error: input.InputError, Value: input.InputValue, Mime: input.InputMime, At: time.Now().UTC()}
+		ack := desktopInputAck{ID: input.InputID, Type: input.InputType, Error: input.InputError, Value: input.InputValue, Mime: input.InputMime, Sequence: input.InputSequence, At: time.Now().UTC()}
 		if strings.HasPrefix(input.InputType, "clipboard_") {
 			s.desktopClipboardAcks.Store(sessionID, ack)
 		} else {
