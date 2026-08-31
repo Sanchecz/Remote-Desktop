@@ -1000,19 +1000,22 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 				}
 				nextFrameAt = now.Add(desktopVDIRecoveryDelay(vdiRecoveryFailures))
 				if desktopVDIRecoveryShouldRestart(vdiRecoveryStarted, now) {
-					// The service broker restarts this per-user companion in at most eight
+					// The service broker restarts this per-user companion in at most two
 					// seconds. A process-level restart is the only reliable way to discard
 					// every DXGI/VDI driver object after a hard RDP reconnect, while the
 					// server-side remote session and viewer remain active.
-					_ = reportDesktopStatus(ctx, controlClient, access, offer.ID, "Перезапускаем захват VDI без завершения удалённого сеанса")
+					// Clear an old diagnostic instead of publishing recovery as a terminal
+					// red error. The same browser lease remains valid for the replacement.
+					_ = reportDesktopStatus(ctx, controlClient, access, offer.ID, "")
 					return
 				}
-			}
-			message := captureErr.Error()
-			if message != lastReportedError || time.Since(lastReportedAt) >= 10*time.Second {
-				if reportDesktopStatus(ctx, controlClient, access, offer.ID, message) == nil {
-					lastReportedError = message
-					lastReportedAt = time.Now()
+			} else {
+				message := captureErr.Error()
+				if message != lastReportedError || time.Since(lastReportedAt) >= 10*time.Second {
+					if reportDesktopStatus(ctx, controlClient, access, offer.ID, message) == nil {
+						lastReportedError = message
+						lastReportedAt = time.Now()
+					}
 				}
 			}
 		}

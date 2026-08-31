@@ -17,7 +17,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const interactiveCompanionInterval = 8 * time.Second
+// Session switches on an RDS/VDI host replace the usable display generation
+// immediately. Reconcile the bound user's companion quickly enough that a
+// browser session can recover in-place instead of spending up to eight seconds
+// attached to the worker from the previous WinStation.
+const interactiveCompanionInterval = 2 * time.Second
 
 var windowsSessionBindingMu sync.Mutex
 
@@ -378,8 +382,8 @@ func ensureInteractiveDesktopCompanions(target string) ([]uint32, error) {
 		return nil, workerErr
 	}
 	if refreshWorker {
-		// The desktop worker must run as LocalSystem in the interactive user
-		// session. Stop every old companion before replacing it so an automatic
+		// The desktop worker must run with the bound user's real token in the
+		// interactive session. Stop every old companion before replacing it so an automatic
 		// Agent update cannot leave capture and input on the previous release.
 		if err := terminateInteractiveCompanions(target); err != nil {
 			return nil, fmt.Errorf("stop the previous RemoteIt desktop worker: %w", err)
@@ -426,28 +430,21 @@ func ensureInteractiveDesktopCompanions(target string) ([]uint32, error) {
 }
 
 func launchInteractiveDesktopCompanion(target string, sessionID uint32) error {
-	var serviceToken windows.Token
-	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE|windows.TOKEN_ADJUST_PRIVILEGES, &serviceToken); err != nil {
-		return fmt.Errorf("токен службы: %w", err)
-	}
-	defer serviceToken.Close()
-	// Changing a primary token to another Terminal Services session requires
-	// SeTcbPrivilege. LocalSystem owns it, but Windows keeps it disabled until
-	// the service explicitly enables it for this operation.
-	if err := enableWindowsTokenPrivilege(serviceToken, "SeTcbPrivilege"); err != nil {
-		return fmt.Errorf("привилегия системного модуля: %w", err)
-	}
 	var token windows.Token
-	if err := windows.DuplicateTokenEx(serviceToken, windows.TOKEN_ALL_ACCESS, nil, windows.SecurityImpersonation, windows.TokenPrimary, &token); err != nil {
-		return fmt.Errorf("интерактивный токен службы: %w", err)
+	// A LocalSystem token with TokenSessionId rewritten to an RDS session can
+	// enumerate that WinStation, but after an RDP reconnect its GetDC/BitBlt and
+	// Desktop Duplication objects may still resolve against session 0. Launching
+	// the capture worker with the *bound user's real WTS token* gives Windows the
+	// correct per-session display namespace, including disconnected VDI desktops.
+	// Ctrl+Alt+Delete stays privileged because it is executed by the separate SCM
+	// service broker, not by this user-mode capture process.
+	if err := windows.WTSQueryUserToken(sessionID, &token); err != nil {
+		return fmt.Errorf("токен пользователя системного модуля: %w", err)
 	}
 	defer token.Close()
-	if err := windows.SetTokenInformation(token, windows.TokenSessionId, (*byte)(unsafe.Pointer(&sessionID)), uint32(unsafe.Sizeof(sessionID))); err != nil {
-		return fmt.Errorf("сеанс интерактивного токена: %w", err)
-	}
 	var environment *uint16
 	if err := windows.CreateEnvironmentBlock(&environment, token, false); err != nil {
-		return fmt.Errorf("окружение системного модуля: %w", err)
+		return fmt.Errorf("окружение пользовательского модуля: %w", err)
 	}
 	defer windows.DestroyEnvironmentBlock(environment)
 	application, err := windows.UTF16PtrFromString(target)
@@ -464,7 +461,7 @@ func launchInteractiveDesktopCompanion(target string, sessionID uint32) error {
 	var process windows.ProcessInformation
 	flags := uint32(windows.CREATE_UNICODE_ENVIRONMENT | windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP)
 	if err := windows.CreateProcessAsUser(token, application, commandLine, nil, nil, false, flags, environment, workingDirectory, &startup, &process); err != nil {
-		return fmt.Errorf("запуск системного модуля в интерактивном сеансе: %w", err)
+		return fmt.Errorf("запуск модуля экрана в пользовательском сеансе: %w", err)
 	}
 	windows.CloseHandle(process.Thread)
 	windows.CloseHandle(process.Process)

@@ -7,7 +7,7 @@ import (
 
 const (
 	desktopStaticFrameHeartbeat    = 5 * time.Second
-	desktopVDIRecoveryRestartAfter = 12 * time.Second
+	desktopVDIRecoveryRestartAfter = 4 * time.Second
 )
 
 func desktopRequiresSecureCapture(name string) bool {

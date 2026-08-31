@@ -1,4 +1,4 @@
-import { CSSProperties, DragEvent as ReactDragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ClipboardEvent as ReactClipboardEvent, CSSProperties, DragEvent as ReactDragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -62,7 +62,7 @@ import {
 	Power,
   X
 } from "lucide-react";
-import { chunkRemoteText, planRemoteBoundaryDeletion, planRemoteKeyboardInput, planRemoteMobileBeforeInput, planRemoteTextReconciliation } from "./remoteKeyboard";
+import { browserCodeToVirtualKey, chunkRemoteText, planRemoteBoundaryDeletion, planRemoteKeyboardInput, planRemoteMobileBeforeInput, planRemoteTextReconciliation } from "./remoteKeyboard";
 import { advanceRemotePinch, advanceRemoteTrackpadCursor, authoritativeRemoteFrameSize, cameraFollowingRemotePoint, canReleaseRemoteTouchSuppression, clampRemoteCamera, clampRemotePoint, classifyRemoteTouchGesture, fillRemoteFrame, fitRemoteFrame, isRemoteTwoFingerTap, remoteCursorVisualPointForLayer, remotePointerTapActions, remotePointFromClient, reprojectRemotePoint, shouldPresentDecodedRemoteFrame, stabilizeRemoteTrackpadMotion, stableRemoteTrackpadSamples } from "./remoteCamera";
 import { LatestPointerCadence, remotePointerCadenceMillis } from "./remotePointerCadence";
 import { bindRemoteInputCoordinates, remoteInputAckID, remoteInputBatchID, remoteInputClientID, restoreRemoteInputBatch, shouldRetryRemoteInputDelivery, takePendingRemoteInputBatches, type PendingRemoteInputBatch } from "./remoteInputDelivery";
@@ -229,7 +229,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.27";
+const LATEST_AGENT_VERSION = "1.0.28";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1244,7 +1244,7 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
   }, [device.id, csrf, supported]);
 
   const unavailableReason = !device.online ? "Агент не в сети" : !remoteScreenSupportedOS(device.os) ? "Доступно для Windows и Android" : !desktopCompatible ? `Обновите Agent ${device.agentVersion || "старой версии"} до 0.6.0` : "Предпросмотр недоступен";
-  return <section className="remote-preview-card"><header><div><span className="eyebrow">УДАЛЁННЫЙ ДОСТУП</span><strong><ScreenShare size={18} /> Живой экран</strong><small>{supported ? frameURL ? "Предпросмотр онлайн · управление выключено" : connected ? "Agent подключён · ожидаем первый кадр" : "Подключаем защищённый предпросмотр…" : unavailableReason}</small></div><span className={`preview-live ${connected && !!frameURL ? "active" : ""}`}><span />{connected && frameURL ? "LIVE" : "WAIT"}</span></header><button type="button" className="remote-preview-screen" disabled={!supported || !sessionId || !frameURL} onClick={() => { handedOff.current = true; onConnect(sessionId); }}>{frameURL ? <img ref={previewImageRef} src={frameURL} draggable={false} onError={() => { setFrameURL(""); setError("Получен повреждённый кадр — ожидаем следующий"); }} /> : <span><Monitor size={38} /><strong>{error || (supported ? "Ожидаем изображение от Agent" : unavailableReason)}</strong><small>{desktopCompatible ? "Диагностика обновляется автоматически" : "Скачайте новый агент из раздела токенов"}</small></span>}<b><MousePointer2 size={17} /> Открыть подключение</b></button><footer><ShieldCheck size={14} /> Пассивный предпросмотр журналируется, но не показывает всплывающее уведомление. Оно появится при первом управляющем действии.</footer></section>;
+  return <section className="remote-preview-card"><header><div><span className="eyebrow">УДАЛЁННЫЙ ДОСТУП</span><strong><ScreenShare size={18} /> Живой экран</strong><small>{supported ? frameURL ? "Предпросмотр онлайн · управление выключено" : connected ? "Agent подключён · ожидаем первый кадр" : "Подключаем защищённый предпросмотр…" : unavailableReason}</small></div><span className={`preview-live ${connected && !!frameURL ? "active" : ""}`}><span />{connected && frameURL ? "LIVE" : "WAIT"}</span></header><button type="button" className="remote-preview-screen" disabled={!supported || !sessionId || !frameURL} onClick={() => { if (device.os.toLowerCase().includes("windows")) primeRemoteClipboardFromConnectionGesture(); handedOff.current = true; onConnect(sessionId); }}>{frameURL ? <img ref={previewImageRef} src={frameURL} draggable={false} onError={() => { setFrameURL(""); setError("Получен повреждённый кадр — ожидаем следующий"); }} /> : <span><Monitor size={38} /><strong>{error || (supported ? "Ожидаем изображение от Agent" : unavailableReason)}</strong><small>{desktopCompatible ? "Диагностика обновляется автоматически" : "Скачайте новый агент из раздела токенов"}</small></span>}<b><MousePointer2 size={17} /> Открыть подключение</b></button><footer><ShieldCheck size={14} /> Пассивный предпросмотр журналируется, но не показывает всплывающее уведомление. Оно появится при первом управляющем действии.</footer></section>;
 }
 
 function capturePointerSafely(target: Element, pointerId: number) {
@@ -1280,6 +1280,55 @@ async function writeClipboardPNG(blob: Blob): Promise<void> {
 	await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
 }
 
+type LocalClipboardSnapshot = {
+	text: string;
+	image: Blob | null;
+};
+
+type PendingRemoteClipboardWrite = {
+	resolve: (blob: Blob) => void;
+	reject: (reason?: unknown) => void;
+	timer: number;
+};
+
+let primedRemoteClipboardSnapshot: Promise<LocalClipboardSnapshot> | null = null;
+
+async function readLocalClipboardSnapshot(): Promise<LocalClipboardSnapshot> {
+	if (!navigator.clipboard?.readText) throw new Error("Этот браузер не поддерживает системный буфер");
+	let image: Blob | null = null;
+	let text = "";
+	if (navigator.clipboard.read) {
+		const items = await navigator.clipboard.read();
+		for (const item of items) {
+			if (item.types.includes("image/png")) {
+				image = await item.getType("image/png");
+				break;
+			}
+		}
+		if (!image) {
+			const textItem = items.find((item) => item.types.includes("text/plain"));
+			if (textItem) text = await (await textItem.getType("text/plain")).text();
+		}
+	} else {
+		text = await navigator.clipboard.readText();
+	}
+	return { text, image };
+}
+
+// Start the protected clipboard read inside the same click that opens the
+// remote connection. Safari/WebKit discards that grant as soon as the event
+// handler returns, so waiting for the modal and session API would lose the
+// administrator's already copied command or link.
+function primeRemoteClipboardFromConnectionGesture() {
+	primedRemoteClipboardSnapshot = readLocalClipboardSnapshot();
+}
+
+function takePrimedRemoteClipboardSnapshot() {
+	const snapshot = primedRemoteClipboardSnapshot;
+	primedRemoteClipboardSnapshot = null;
+	return snapshot;
+}
+
 function releasePointerSafely(target: Element, pointerId: number) {
 	try {
 		if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
@@ -1309,12 +1358,17 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		return androidBridge || mobileRuntime || (window.matchMedia("(pointer: coarse)").matches && !window.matchMedia("(any-pointer: fine)").matches);
 	});
 	const [keyboardOpen, setKeyboardOpen] = useState(false);
-	const [clipboardSyncEnabled, setClipboardSyncEnabled] = useState(false);
+	// Windows sessions use one clipboard from the moment they are opened. Browsers
+	// that permit background reads keep it fully automatic; Safari/WebKit still
+	// receives a trusted Cmd+C/Cmd+V path below without an extra enable switch.
+	const [clipboardSyncEnabled] = useState(targetWindows);
 	const [mobileText, setMobileText] = useState("");
 	const [sasFeedback, setSASFeedback] = useState("");
 	const [sasFeedbackError, setSASFeedbackError] = useState(false);
 	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
 	const [filesOpen, setFilesOpen] = useState(false);
+	const [desktopDropActive, setDesktopDropActive] = useState(false);
+	const [desktopDropProgress, setDesktopDropProgress] = useState<ActiveFileTransfer | null>(null);
 	const [screenScale, setScreenScale] = useState<RemoteScaleMode>("fit");
 	const [streamStatsCollapsed, setStreamStatsCollapsed] = useState(false);
 	// Auto is the default on every client. The Agent starts Auto at 30 FPS,
@@ -1353,16 +1407,24 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const mobileEnterAt = useRef(0);
 	const keyboardOpenRef = useRef(false);
 	const wheelRepeat = useRef({ delay: 0, interval: 0, pointerId: -1 });
+	const desktopDropDepthRef = useRef(0);
+	const desktopDropControllerRef = useRef<AbortController | null>(null);
 	const sasFeedbackTimer = useRef(0);
 	const sasPendingInputID = useRef(0);
-	const clipboardSyncEnabledRef = useRef(false);
+	const clipboardSyncEnabledRef = useRef(targetWindows);
+	const clipboardInitialSnapshotRef = useRef<Promise<LocalClipboardSnapshot> | null>(targetWindows ? takePrimedRemoteClipboardSnapshot() : null);
 	const clipboardLastLocalRef = useRef("");
 	const clipboardLastRemoteAckRef = useRef(0);
 	const clipboardLastLocalImageRef = useRef("");
 	const clipboardLastRemoteImageSequenceRef = useRef(0);
 	const clipboardPendingRemoteImageRef = useRef<Blob | null>(null);
+	const clipboardPendingRemoteTextRef = useRef<string | null>(null);
+	const clipboardPendingWriteRef = useRef<PendingRemoteClipboardWrite | null>(null);
+	const clipboardBackgroundReadBlockedRef = useRef(false);
 	const clipboardPollBusyRef = useRef(false);
 	const clipboardPermissionErrorRef = useRef(false);
+	const macCommandKeysRef = useRef(new Set<string>());
+	const macCommandClient = useMemo(() => typeof navigator !== "undefined" && /Macintosh|Mac OS X|MacIntel/i.test(`${navigator.userAgent} ${navigator.platform}`), []);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
 	const pointerMoveCadence = useRef(new LatestPointerCadence<{ event: Record<string, unknown>; activatesControl: boolean }>(8));
 	const pointerMoveTimer = useRef(0);
@@ -1426,6 +1488,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	useEffect(() => () => {
 		window.clearTimeout(wheelRepeat.current.delay);
 		window.clearInterval(wheelRepeat.current.interval);
+		desktopDropControllerRef.current?.abort();
 	}, []);
 
 	function scheduleCamera(next: { zoom: number; panX: number; panY: number }) {
@@ -1718,19 +1781,29 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (clipboardSyncEnabledRef.current && clipboardAcknowledgement?.type === "clipboard_read" && clipboardAcknowledgement.id > clipboardLastRemoteAckRef.current) {
 				clipboardLastRemoteAckRef.current = clipboardAcknowledgement.id;
 				if (clipboardAcknowledgement.error) {
-					setSASFeedbackError(true);
-					setSASFeedback(`Буфер удалённого компьютера недоступен: ${clipboardAcknowledgement.error}`);
-				} else if (clipboardAcknowledgement.mime !== "image/png" && (clipboardAcknowledgement.value || "") !== clipboardLastLocalRef.current) {
+					const pending = clipboardPendingWriteRef.current;
+					if (pending) {
+						window.clearTimeout(pending.timer);
+						pending.reject(new Error(clipboardAcknowledgement.error));
+						clipboardPendingWriteRef.current = null;
+					}
+				} else if (clipboardAcknowledgement.mime !== "image/png") {
 					const remoteText = clipboardAcknowledgement.value || "";
-					void navigator.clipboard.writeText(remoteText).then(() => {
+					const pending = clipboardPendingWriteRef.current;
+					if (pending) {
+						window.clearTimeout(pending.timer);
+						pending.resolve(new Blob([remoteText], { type: "text/plain" }));
+						clipboardPendingWriteRef.current = null;
+					}
+					if (remoteText === clipboardLastLocalRef.current) return;
+					clipboardPendingRemoteTextRef.current = remoteText;
+					const writeText = navigator.clipboard?.writeText?.bind(navigator.clipboard);
+					if (!writeText) return;
+					void writeText(remoteText).then(() => {
 						clipboardLastLocalRef.current = remoteText;
+						clipboardPendingRemoteTextRef.current = null;
 						clipboardPermissionErrorRef.current = false;
-					}).catch(() => {
-						if (clipboardPermissionErrorRef.current) return;
-						clipboardPermissionErrorRef.current = true;
-						setSASFeedbackError(true);
-						setSASFeedback("Браузер запретил фоновое обновление локального буфера — нажмите «Буфер» ещё раз");
-					});
+					}).catch(() => undefined);
 				}
 			}
       } catch (reason) {
@@ -2210,6 +2283,24 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}, [sessionId, activateRemoteControl, status?.frameWidth, status?.frameHeight]);
 
 	useEffect(() => {
+		if (!targetWindows || !sessionId) return;
+		const primed = clipboardInitialSnapshotRef.current;
+		clipboardInitialSnapshotRef.current = null;
+		if (!primed) return;
+		let disposed = false;
+		void primed.then(async (snapshot) => {
+			if (disposed) return;
+			await activateRemoteControl();
+			if (!disposed) await pushLocalClipboardSnapshot(snapshot);
+		}).catch(() => {
+			// Safari may decline the initial read. Cmd+V and the common-buffer button
+			// retain trusted user-gesture paths, so this is not a session error.
+			clipboardBackgroundReadBlockedRef.current = true;
+		});
+		return () => { disposed = true; };
+	}, [targetWindows, sessionId, activateRemoteControl]);
+
+	useEffect(() => {
 		clipboardSyncEnabledRef.current = clipboardSyncEnabled;
 		if (!clipboardSyncEnabled || !sessionId) return;
 		let disposed = false;
@@ -2217,40 +2308,15 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (disposed || document.visibilityState === "hidden" || clipboardPollBusyRef.current) return;
 			clipboardPollBusyRef.current = true;
 			try {
-				let localImage: Blob | null = null;
-				let localText: string | null = null;
-				if (navigator.clipboard.read) {
-					const clipboardItems = await navigator.clipboard.read();
-					for (const item of clipboardItems) {
-						if (item.types.includes("image/png")) {
-							localImage = await item.getType("image/png");
-							break;
-						}
+				// Chromium can read a previously granted clipboard in the background.
+				// WebKit deliberately cannot: remember that result and keep polling only
+				// the remote side instead of showing a permission prompt every 700 ms.
+				if (!clipboardBackgroundReadBlockedRef.current) {
+					try {
+						await pushLocalClipboardSnapshot(await readLocalClipboardSnapshot());
+					} catch {
+						clipboardBackgroundReadBlockedRef.current = true;
 					}
-					if (!localImage) {
-						const textItem = clipboardItems.find((item) => item.types.includes("text/plain"));
-						if (textItem) localText = await (await textItem.getType("text/plain")).text();
-					}
-				} else {
-					localText = await navigator.clipboard.readText();
-				}
-				if (localImage) {
-					const hash = await clipboardBlobFingerprint(localImage);
-					if (hash !== clipboardLastLocalImageRef.current) {
-						await uploadLocalClipboardImage(localImage);
-						clipboardLastLocalImageRef.current = hash;
-						clipboardPermissionErrorRef.current = false;
-					}
-				} else if (localText !== null && new TextEncoder().encode(localText).byteLength > 32<<10) {
-					if (!clipboardPermissionErrorRef.current) {
-						clipboardPermissionErrorRef.current = true;
-						setSASFeedbackError(true);
-						setSASFeedback("Текст в буфере больше 32 КБ — передайте его как файл");
-					}
-				} else if (localText !== null && localText !== clipboardLastLocalRef.current) {
-					clipboardLastLocalRef.current = localText;
-					clipboardPermissionErrorRef.current = false;
-					sendInput({ type: "clipboard_write", text: localText });
 				}
 				const remoteResponse = await fetch(`/api/desktop-sessions/${sessionId}/clipboard-image?after=${clipboardLastRemoteImageSequenceRef.current}`, { credentials: "same-origin", cache: "no-store" });
 				if (remoteResponse.status === 200) {
@@ -2264,35 +2330,35 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 							clipboardPendingRemoteImageRef.current = null;
 						} catch {
 							clipboardPendingRemoteImageRef.current = remoteImage;
-							if (!clipboardPermissionErrorRef.current) {
-								clipboardPermissionErrorRef.current = true;
-								setSASFeedbackError(true);
-								setSASFeedback("Получен скриншот из удалённого буфера — нажмите «Буфер», чтобы разрешить запись изображения");
-							}
 						}
 					}
 				} else if (remoteResponse.status !== 204 && !remoteResponse.ok) {
 					throw new Error(`Буфер изображений: HTTP ${remoteResponse.status}`);
 				}
 			} catch {
-				if (!clipboardPermissionErrorRef.current) {
-					clipboardPermissionErrorRef.current = true;
-					setSASFeedbackError(true);
-					setSASFeedback("Браузер приостановил чтение буфера — нажмите «Буфер» для возобновления");
-				}
+				// A brief clipboard/API failure must not interrupt video or control.
 			} finally {
 				if (!disposed) sendInput({ type: "clipboard_read" });
 				clipboardPollBusyRef.current = false;
 			}
 		};
 		void poll();
-		const timer = window.setInterval(() => void poll(), 1_200);
+		const timer = window.setInterval(() => void poll(), 700);
 		return () => {
 			disposed = true;
 			window.clearInterval(timer);
 			clipboardPollBusyRef.current = false;
 		};
 	}, [clipboardSyncEnabled, sessionId, sendInput, csrf]);
+
+	useEffect(() => () => {
+		const pending = clipboardPendingWriteRef.current;
+		if (pending) {
+			window.clearTimeout(pending.timer);
+			pending.reject(new Error("Удалённый сеанс закрыт"));
+			clipboardPendingWriteRef.current = null;
+		}
+	}, []);
 
 	function armPointerMoveTimer(delayMs: number) {
 		if (pointerMoveTimer.current) return;
@@ -2834,6 +2900,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	function pointerButton(event: ReactPointerEvent<HTMLDivElement>, action: "down" | "up") {
     event.preventDefault();
+		if (action === "down") void flushPendingRemoteClipboardFromGesture();
 		// Stateful input must never overtake the newest throttled move. Flushing here
 		// keeps drag boundaries ordered: move -> down/up, including on slow proxies.
 		flushPendingPointerMove();
@@ -2989,7 +3056,110 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		}
   }
 
-  function keyboard(event: ReactKeyboardEvent<HTMLDivElement>, action: "down" | "up") {
+	function sendWindowsShortcut(keyCode: number) {
+		sendInput({ type: "key", action: "down", keyCode: 17 });
+		sendInput({ type: "key", action: "down", keyCode });
+		sendInput({ type: "key", action: "up", keyCode });
+		sendInput({ type: "key", action: "up", keyCode: 17 });
+	}
+
+	function beginDeferredRemoteClipboardWrite(): boolean {
+		if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") return false;
+		const previous = clipboardPendingWriteRef.current;
+		if (previous) {
+			window.clearTimeout(previous.timer);
+			previous.reject(new Error("Запрошено новое копирование"));
+		}
+		let resolveBlob: (blob: Blob) => void = () => undefined;
+		let rejectBlob: (reason?: unknown) => void = () => undefined;
+		const value = new Promise<Blob>((resolve, reject) => { resolveBlob = resolve; rejectBlob = reject; });
+		const pending: PendingRemoteClipboardWrite = {
+			resolve: resolveBlob,
+			reject: rejectBlob,
+			timer: window.setTimeout(() => {
+				if (clipboardPendingWriteRef.current !== pending) return;
+				clipboardPendingWriteRef.current = null;
+				rejectBlob(new Error("Удалённый буфер не ответил"));
+			}, 3_000),
+		};
+		clipboardPendingWriteRef.current = pending;
+		// WebKit preserves the trusted Cmd+C activation while this promised payload
+		// is resolved asynchronously by the Agent acknowledgement.
+		void navigator.clipboard.write([new ClipboardItem({ "text/plain": value })]).catch(() => {
+			if (clipboardPendingWriteRef.current === pending) {
+				window.clearTimeout(pending.timer);
+				clipboardPendingWriteRef.current = null;
+			}
+		});
+		return true;
+	}
+
+	function copyRemoteClipboardFromMac(cut: boolean) {
+		beginDeferredRemoteClipboardWrite();
+		sendWindowsShortcut(cut ? 88 : 67);
+		window.setTimeout(() => sendInput({ type: "clipboard_read" }), 100);
+	}
+
+	async function pasteLocalClipboardToRemote(snapshot: LocalClipboardSnapshot) {
+		await activateRemoteControl();
+		await pushLocalClipboardSnapshot(snapshot);
+		sendWindowsShortcut(86);
+	}
+
+	function flushPendingRemoteClipboardFromGesture() {
+		const pendingImage = clipboardPendingRemoteImageRef.current;
+		if (pendingImage) {
+			void writeClipboardPNG(pendingImage).then(async () => {
+				clipboardLastLocalImageRef.current = await clipboardBlobFingerprint(pendingImage);
+				if (clipboardPendingRemoteImageRef.current === pendingImage) clipboardPendingRemoteImageRef.current = null;
+			}).catch(() => undefined);
+		}
+		const pendingText = clipboardPendingRemoteTextRef.current;
+		if (pendingText !== null && navigator.clipboard?.writeText) {
+			void navigator.clipboard.writeText(pendingText).then(() => {
+				clipboardLastLocalRef.current = pendingText;
+				if (clipboardPendingRemoteTextRef.current === pendingText) clipboardPendingRemoteTextRef.current = null;
+			}).catch(() => undefined);
+		}
+	}
+
+	function pasteFromBrowser(event: ReactClipboardEvent<HTMLDivElement>) {
+		if (!targetWindows) return;
+		const text = event.clipboardData.getData("text/plain");
+		const imageItem = Array.from(event.clipboardData.items).find((item) => item.type === "image/png");
+		const image = imageItem?.getAsFile() || null;
+		if (!image && text === "") return;
+		event.preventDefault();
+		void pasteLocalClipboardToRemote({ text, image }).catch((reason) => setError(reason instanceof Error ? reason.message : "Не удалось вставить буфер"));
+	}
+
+	function keyboard(event: ReactKeyboardEvent<HTMLDivElement>, action: "down" | "up") {
+		if (action === "down") void flushPendingRemoteClipboardFromGesture();
+		const physicalKey = event.code || event.key;
+		if (targetWindows && macCommandClient) {
+			if (physicalKey === "MetaLeft" || physicalKey === "MetaRight") {
+				event.preventDefault();
+				event.stopPropagation();
+				return;
+			}
+			if (action === "up" && macCommandKeysRef.current.delete(physicalKey)) {
+				event.preventDefault();
+				event.stopPropagation();
+				return;
+			}
+			if (action === "down" && event.metaKey) {
+				const keyCode = browserCodeToVirtualKey(physicalKey);
+				if (keyCode) {
+					macCommandKeysRef.current.add(physicalKey);
+					event.preventDefault();
+					event.stopPropagation();
+					if (keyCode === 67 || keyCode === 88) copyRemoteClipboardFromMac(keyCode === 88);
+					else if (keyCode === 86) void readLocalClipboardSnapshot().then(pasteLocalClipboardToRemote).catch((reason) => setError(reason instanceof Error ? reason.message : "Браузер не разрешил вставку"));
+					else sendWindowsShortcut(keyCode);
+					return;
+				}
+			}
+		}
 		const plan = planRemoteKeyboardInput({
 			code: event.code,
 			key: event.key,
@@ -3087,6 +3257,58 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		if (keyboardOpen) setMobileKeyboardVisibility(false);
 		setControlsCollapsed(true);
 		setFilesOpen(true);
+	}
+
+	function remoteDesktopDragHasFiles(event: ReactDragEvent<HTMLDivElement>) {
+		return Array.from(event.dataTransfer.types).includes("Files");
+	}
+
+	function enterRemoteDesktopDrop(event: ReactDragEvent<HTMLDivElement>) {
+		if (!targetWindows || !remoteDesktopDragHasFiles(event)) return;
+		event.preventDefault();
+		desktopDropDepthRef.current += 1;
+		setDesktopDropActive(true);
+	}
+
+	function leaveRemoteDesktopDrop(event: ReactDragEvent<HTMLDivElement>) {
+		if (!targetWindows || !remoteDesktopDragHasFiles(event)) return;
+		event.preventDefault();
+		desktopDropDepthRef.current = Math.max(0, desktopDropDepthRef.current - 1);
+		if (desktopDropDepthRef.current === 0) setDesktopDropActive(false);
+	}
+
+	async function dropFilesOnRemoteDesktop(event: ReactDragEvent<HTMLDivElement>) {
+		if (!targetWindows || !remoteDesktopDragHasFiles(event)) return;
+		event.preventDefault();
+		event.stopPropagation();
+		desktopDropDepthRef.current = 0;
+		setDesktopDropActive(false);
+		const files = Array.from(event.dataTransfer.files);
+		if (!files.length) return;
+		if (files.some((file) => file.size > 10 * 1024 * 1024 * 1024)) {
+			setError("Размер каждого файла не должен превышать 10 ГБ");
+			return;
+		}
+		const controller = new AbortController();
+		desktopDropControllerRef.current?.abort();
+		desktopDropControllerRef.current = controller;
+		setError("");
+		try {
+			await uploadLocalFilesToDevice(device, csrf, files, REMOTE_USER_DESKTOP_TRANSFER_PATH, setDesktopDropProgress, controller.signal);
+			setSASFeedbackError(false);
+			setSASFeedback(`${files.length === 1 ? `Файл «${files[0].name}»` : `Файлов: ${files.length}`} загружено на рабочий стол ${device.name}`);
+			sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 5_000);
+		} catch (reason) {
+			if (!isAbortError(reason)) {
+				const message = reason instanceof Error ? reason.message : "Не удалось загрузить файл на удалённый рабочий стол";
+				setError(message);
+				setSASFeedbackError(true);
+				setSASFeedback(message);
+			}
+		} finally {
+			if (desktopDropControllerRef.current === controller) desktopDropControllerRef.current = null;
+			setDesktopDropProgress(null);
+		}
 	}
 
 	function setMobileKeyboardVisibility(open: boolean) {
@@ -3194,61 +3416,43 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 
 	async function toggleClipboardSync() {
 		window.clearTimeout(sasFeedbackTimer.current);
-		if (clipboardSyncEnabled) {
-			clipboardSyncEnabledRef.current = false;
-			setClipboardSyncEnabled(false);
-			setSASFeedbackError(false);
-			setSASFeedback("Общий буфер приостановлен");
-			sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 3_000);
-			return;
-		}
 		try {
 			if (!navigator.clipboard?.readText || !navigator.clipboard?.writeText) throw new Error("Этот браузер не поддерживает общий буфер");
-			if (clipboardPendingRemoteImageRef.current) {
-				await writeClipboardPNG(clipboardPendingRemoteImageRef.current);
-				clipboardLastLocalImageRef.current = await clipboardBlobFingerprint(clipboardPendingRemoteImageRef.current);
-				clipboardPendingRemoteImageRef.current = null;
-			}
+			flushPendingRemoteClipboardFromGesture();
 			// Read while the button click still owns transient browser activation.
-			// Awaiting the control API first makes Safari/Firefox discard that grant
-			// and show a permission prompt again for the very same user action.
-			let image: Blob | null = null;
-			let text = "";
-			if (navigator.clipboard.read) {
-				const items = await navigator.clipboard.read();
-				for (const item of items) {
-					if (item.types.includes("image/png")) {
-						image = await item.getType("image/png");
-						break;
-					}
-				}
-			}
-			if (!image) text = await navigator.clipboard.readText();
-			if (!image && new TextEncoder().encode(text).byteLength > 32<<10) throw new Error("Текст в буфере больше 32 КБ — передайте его как файл");
+			// Awaiting the control API first makes Safari discard that grant.
+			const snapshot = await readLocalClipboardSnapshot();
 			await activateRemoteControl();
-			clipboardLastLocalRef.current = text;
 			clipboardLastRemoteAckRef.current = 0;
 			clipboardPermissionErrorRef.current = false;
-			clipboardSyncEnabledRef.current = true;
-			setClipboardSyncEnabled(true);
-			if (image) {
-				await uploadLocalClipboardImage(image);
-				clipboardLastLocalImageRef.current = await clipboardBlobFingerprint(image);
-			} else {
-				sendInput({ type: "clipboard_write", text });
-			}
+			clipboardBackgroundReadBlockedRef.current = false;
+			await pushLocalClipboardSnapshot(snapshot);
 			sendInput({ type: "clipboard_read" });
 			setSASFeedbackError(false);
-			setSASFeedback("Общий буфер включён: текст и PNG-изображения синхронизируются в обе стороны");
+			setSASFeedback("Общий буфер синхронизирован в обе стороны");
 			sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
 		} catch (reason) {
-			clipboardSyncEnabledRef.current = false;
-			setClipboardSyncEnabled(false);
 			const message = reason instanceof Error ? reason.message : "Браузер не разрешил общий буфер";
 			setSASFeedbackError(true);
-			setSASFeedback(message);
-			setError(message);
+			setSASFeedback(`${message}. На Mac используйте Cmd+C / Cmd+V прямо в удалённом экране.`);
 		}
+	}
+
+	async function pushLocalClipboardSnapshot(snapshot: LocalClipboardSnapshot) {
+		if (snapshot.image) {
+			if (snapshot.image.size < 1 || snapshot.image.size > 12<<20) throw new Error("PNG в буфере больше 12 МБ — передайте его как файл");
+			const hash = await clipboardBlobFingerprint(snapshot.image);
+			if (hash === clipboardLastLocalImageRef.current) return;
+			await uploadLocalClipboardImage(snapshot.image);
+			clipboardLastLocalImageRef.current = hash;
+			clipboardPermissionErrorRef.current = false;
+			return;
+		}
+		if (new TextEncoder().encode(snapshot.text).byteLength > 32<<10) throw new Error("Текст в буфере больше 32 КБ — передайте его как файл");
+		if (snapshot.text === clipboardLastLocalRef.current) return;
+		clipboardLastLocalRef.current = snapshot.text;
+		clipboardPermissionErrorRef.current = false;
+		sendInput({ type: "clipboard_write", text: snapshot.text });
 	}
 
 	async function uploadLocalClipboardImage(image: Blob) {
@@ -3290,14 +3494,10 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (clipboardWrite && typeof ClipboardItem !== "undefined") {
 				try {
 					await clipboardWrite([new ClipboardItem({ "image/png": blob })]);
-					const textSyncWasEnabled = clipboardSyncEnabledRef.current;
-					if (textSyncWasEnabled) {
-						clipboardSyncEnabledRef.current = false;
-						setClipboardSyncEnabled(false);
-					}
+					clipboardLastLocalImageRef.current = await clipboardBlobFingerprint(blob);
 					window.clearTimeout(sasFeedbackTimer.current);
 					setSASFeedbackError(false);
-					setSASFeedback(`Снимок ${canvas.width}×${canvas.height} скопирован в буфер этого компьютера${textSyncWasEnabled ? "; общий текстовый буфер приостановлен, чтобы сохранить PNG" : ""}`);
+					setSASFeedback(`Снимок ${canvas.width}×${canvas.height} скопирован; общий буфер продолжает работать`);
 					sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
 					return;
 				} catch {
@@ -3394,6 +3594,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		"--remote-vv-width": `${remoteViewport.width}px`,
 		"--remote-vv-height": `${remoteViewport.height}px`,
 	} as CSSProperties : undefined;
+	const desktopDropFileProgress = desktopDropProgress ? fileTransferProgress(desktopDropProgress.received, desktopDropProgress.size, desktopDropProgress.startedAt) : null;
 
 	const workspace = <section ref={workspaceRef} style={remoteViewportStyle} className={`remote-desktop-modal ${embedded ? "remote-desktop-embedded" : ""} ${compactRemoteClient ? "remote-compact-client" : ""} ${controlsCollapsed ? "remote-controls-collapsed" : ""} ${mobileDockHidden ? "remote-mobile-dock-hidden" : ""} ${keyboardOpen ? "remote-keyboard-open" : ""} ${remoteViewport.landscape ? "remote-runtime-landscape" : "remote-runtime-portrait"} ${fullscreenActive ? "remote-is-fullscreen" : ""}`}>
 		<header>
@@ -3405,13 +3606,15 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button className="remote-header-tool" onClick={() => void toggleRemoteFullscreen()} title={fullscreenActive ? "Выйти из полноэкранного режима" : "На весь экран"}><Maximize2 size={17} /><span>{fullscreenActive ? "Свернуть" : "Полный экран"}</span></button>
 				<button className="remote-header-tool" onClick={() => void copyRemoteScreenshot()} title="Скопировать текущий кадр как PNG"><Camera size={17} /><span>Снимок</span></button>
 				{targetWindows && <button className="remote-header-tool" onClick={() => void sendCtrlAltDelete()} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>}
-				{targetWindows && <button className={`remote-header-tool ${clipboardSyncEnabled ? "active" : ""}`} onClick={() => void toggleClipboardSync()} title={clipboardSyncEnabled ? "Остановить двусторонний буфер" : "Включить двусторонний буфер"}><Clipboard size={17} /><span>{clipboardSyncEnabled ? "Буфер · вкл" : "Общий буфер"}</span></button>}
+				{targetWindows && <button className="remote-header-tool active" onClick={() => void toggleClipboardSync()} title="Общий буфер включён; нажмите для немедленной синхронизации"><Clipboard size={17} /><span>Буфер · общий</span></button>}
 				<button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>
 				{targetWindows && <button className="remote-header-tool" onClick={openRemoteFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>}
 				<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button>
 			</div>
 		</header>
-		<div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onLostPointerCapture={lostPointerCapture} onWheel={wheel} onContextMenu={(event) => event.preventDefault()}>
+		<div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale} ${desktopDropActive ? "remote-desktop-drop-active" : ""}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")} onPaste={pasteFromBrowser} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onLostPointerCapture={lostPointerCapture} onWheel={wheel} onContextMenu={(event) => event.preventDefault()} onDragEnter={enterRemoteDesktopDrop} onDragOver={(event) => { if (targetWindows && remoteDesktopDragHasFiles(event)) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }} onDragLeave={leaveRemoteDesktopDrop} onDrop={(event) => void dropFilesOnRemoteDesktop(event)}>
+			{desktopDropActive && <div className="remote-desktop-drop-overlay"><span><Upload size={34} /><strong>Отпустите файл</strong><small>Он появится на рабочем столе {device.name}</small></span></div>}
+			{desktopDropProgress && desktopDropFileProgress && <div className="remote-desktop-drop-progress" role="status"><Upload size={18} /><span><strong>{desktopDropProgress.stage}</strong><small>{desktopDropProgress.label} · {formatBytes(desktopDropFileProgress.received)} из {formatBytes(desktopDropFileProgress.total)}</small><i><b style={{ width: `${desktopDropFileProgress.percent}%` }} /></i></span><em>{Math.round(desktopDropFileProgress.percent)}%</em></div>}
 			{frameURL ? <>
 				<div className="remote-screen-canvas">
 					<div ref={frameImageLayerRef} className="remote-screen-image-layer" style={remoteImageLayerStyle}>
@@ -3428,7 +3631,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		</div>
 		{!compactRemoteClient && fullscreenActive && <nav className="remote-desktop-fullscreen-tools" aria-label="Управление полноэкранным сеансом">
 			<button type="button" onClick={() => void copyRemoteScreenshot()} title="Скопировать снимок"><Camera size={18} /></button>
-			{targetWindows && <button type="button" className={clipboardSyncEnabled ? "active" : ""} onClick={() => void toggleClipboardSync()} title={clipboardSyncEnabled ? "Остановить общий буфер" : "Включить общий буфер"}><Clipboard size={18} /></button>}
+			{targetWindows && <button type="button" className="active" onClick={() => void toggleClipboardSync()} title="Синхронизировать общий буфер"><Clipboard size={18} /></button>}
 			<button type="button" onClick={() => void toggleRemoteFullscreen()} title="Выйти из полноэкранного режима"><Maximize2 size={18} /></button>
 			<button type="button" className="danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /></button>
 		</nav>}
@@ -3460,7 +3663,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button type="button" className="remote-tool-button" onClick={resetCamera}><Maximize2 size={15} /> По размеру</button>
 				<button type="button" className="remote-tool-button" onClick={() => void copyRemoteScreenshot()}><Camera size={15} /> Снимок</button>
 				{targetWindows && <button type="button" className="remote-tool-button" onClick={openRemoteFiles}><Folder size={15} /> Файлы</button>}
-				{targetWindows && <button type="button" className={`remote-tool-button ${clipboardSyncEnabled ? "active" : ""}`} onClick={() => void toggleClipboardSync()}><Clipboard size={15} /> {clipboardSyncEnabled ? "Буфер включён" : "Общий буфер"}</button>}
+				{targetWindows && <button type="button" className="remote-tool-button active" onClick={() => void toggleClipboardSync()}><Clipboard size={15} /> Буфер общий</button>}
 				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
 			</div>
 			<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button>
@@ -3498,6 +3701,8 @@ type LargeFileTransfer = { id: string; status: "uploading" | "queued" | "transfe
 
 type ActiveFileTransfer = { id: string; direction: "to_device" | "from_device"; label: string; stage: string; received: number; size: number; startedAt: number };
 
+const REMOTE_USER_DESKTOP_TRANSFER_PATH = "::remoteit-user-desktop::";
+
 async function waitForLargeTransfer(id: string, onProgress: (transfer: LargeFileTransfer) => void, readyStatus: "ready" | "completed", signal?: AbortSignal) {
   for (;;) {
     const transfer = await api<LargeFileTransfer>(`/api/file-transfers/${id}`, { signal }); onProgress(transfer);
@@ -3505,6 +3710,72 @@ async function waitForLargeTransfer(id: string, onProgress: (transfer: LargeFile
     if (["failed", "cancelled", "expired"].includes(transfer.status)) throw new Error(transfer.error || "Передача файла прервана");
 		await abortableDelay(300, signal);
   }
+}
+
+async function uploadLocalFilesToDevice(
+	device: Device,
+	csrf: string,
+	files: File[],
+	destinationPath: string,
+	onProgress: (progress: ActiveFileTransfer | null) => void,
+	signal: AbortSignal,
+) {
+	for (const file of files) {
+		const startedAt = Date.now();
+		let transferId = "";
+		try {
+			const created = await api<{ id: string }>(`/api/devices/${device.id}/file-transfers`, {
+				method: "POST",
+				body: JSON.stringify({ direction: "to_device", name: file.name, remotePath: destinationPath, size: file.size }),
+			}, csrf);
+			transferId = created.id;
+			onProgress({ id: created.id, direction: "to_device", label: file.name, stage: "Отправка на сервер RemoteIt", received: 0, size: file.size, startedAt });
+			let offset = 0;
+			while (offset < file.size) {
+				const chunkOffset = offset;
+				const chunkSize = browserTransferChunkLength(chunkOffset, file.size);
+				let uploaded = false;
+				let lastError = "";
+				for (let attempt = 0; attempt < 5 && !uploaded; attempt += 1) {
+					try {
+						const chunk = file.slice(chunkOffset, Math.min(file.size, chunkOffset + chunkSize));
+						const checkpoint = await uploadTransferChunk(
+							`/api/file-transfers/${created.id}/data?offset=${chunkOffset}`,
+							chunk,
+							csrf,
+							signal,
+							(sent) => onProgress({ id: created.id, direction: "to_device", label: file.name, stage: "Отправка на сервер RemoteIt", received: chunkOffset + sent, size: file.size, startedAt }),
+						);
+						offset = validateTransferCheckpoint(checkpoint, chunkOffset, chunk.size, file.size).received;
+						uploaded = true;
+					} catch (reason) {
+						if (isAbortError(reason)) throw reason;
+						lastError = reason instanceof Error ? reason.message : "ошибка сети";
+						const checkpoint = await api<LargeFileTransfer>(`/api/file-transfers/${created.id}`, { signal }).catch(() => null);
+						if (checkpoint) {
+							try {
+								offset = validateTransferCheckpoint(checkpoint, chunkOffset, Math.min(chunkSize, file.size - chunkOffset), file.size).received;
+								uploaded = true;
+								break;
+							} catch {
+								// Retry from the last committed checkpoint.
+							}
+						}
+						await abortableDelay(750 * (attempt + 1), signal);
+					}
+				}
+				if (!uploaded) throw new Error(`Не удалось передать часть файла: ${lastError}`);
+			}
+			await api(`/api/file-transfers/${created.id}/ready`, { method: "POST", body: "{}", signal }, csrf);
+			onProgress({ id: created.id, direction: "to_device", label: file.name, stage: "Сохранение на удалённом компьютере", received: file.size, size: file.size, startedAt });
+			await waitForLargeTransfer(created.id, () => undefined, "completed", signal);
+			transferId = "";
+		} catch (reason) {
+			if (transferId) await api(`/api/file-transfers/${transferId}`, { method: "DELETE" }, csrf).catch(() => undefined);
+			throw reason;
+		}
+	}
+	onProgress(null);
 }
 
 async function waitForDeviceJob(deviceId: string, jobId: string): Promise<AgentJob> {

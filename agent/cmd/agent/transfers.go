@@ -18,12 +18,13 @@ import (
 )
 
 const (
-	maxLargeTransfer          int64 = 10 * 1024 * 1024 * 1024
-	largeTransferChunk        int64 = 64 * 1024 * 1024
-	transferSourceWaitTimeout       = 5 * time.Minute
-	transferIdleTimeout             = 45 * time.Second
-	transferDownloadAttempts        = 5
-	transferCompleteAttempts        = 6
+	maxLargeTransfer              int64 = 10 * 1024 * 1024 * 1024
+	largeTransferChunk            int64 = 64 * 1024 * 1024
+	transferSourceWaitTimeout           = 5 * time.Minute
+	transferIdleTimeout                 = 45 * time.Second
+	transferDownloadAttempts            = 5
+	transferCompleteAttempts            = 6
+	remoteUserDesktopTransferPath       = "::remoteit-user-desktop::"
 )
 
 type largeFileTransfer struct {
@@ -186,7 +187,10 @@ func validLargeTransferID(id string) bool {
 }
 
 func receiveLargeFile(ctx context.Context, client *http.Client, cfg *config, transfer largeFileTransfer) error {
-	directory := filepath.Clean(strings.TrimSpace(transfer.RemotePath))
+	directory, destinationErr := resolveLargeTransferDestination(cfg, transfer.RemotePath)
+	if destinationErr != nil {
+		return destinationErr
+	}
 	name := strings.TrimSpace(transfer.Name)
 	if !filepath.IsAbs(directory) || name == "" || name == "." || name == ".." || filepath.Base(name) != name || strings.ContainsAny(name, `/\`) {
 		return errors.New("некорректный путь назначения")
@@ -297,6 +301,14 @@ func receiveLargeFile(ctx context.Context, client *http.Client, cfg *config, tra
 	}
 	finished = true
 	return completeFileTransfer(ctx, client, cfg, transfer.ID)
+}
+
+func resolveLargeTransferDestination(cfg *config, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == remoteUserDesktopTransferPath {
+		return remoteUserDesktopDirectory(cfg)
+	}
+	return filepath.Clean(raw), nil
 }
 
 func sendLargeFile(ctx context.Context, client *http.Client, cfg *config, transfer largeFileTransfer) error {
