@@ -126,7 +126,7 @@ static void remoteit_dxgi_destroy(remoteit_dxgi_capture *capture) {
     free(capture);
 }
 
-static remoteit_dxgi_capture *remoteit_dxgi_create(int *width, int *height, int *failure_stage, long long *failure_code) {
+static remoteit_dxgi_capture *remoteit_dxgi_create(int expected_width, int expected_height, int expected_x, int expected_y, int *width, int *height, int *failure_stage, long long *failure_code) {
     remoteit_dxgi_capture *capture = (remoteit_dxgi_capture *)calloc(1, sizeof(remoteit_dxgi_capture));
     if (failure_stage) *failure_stage = 0;
     if (failure_code) *failure_code = 0;
@@ -137,49 +137,85 @@ static remoteit_dxgi_capture *remoteit_dxgi_create(int *width, int *height, int 
     }
 
     IDXGIFactory1 *factory = NULL;
-    IDXGIAdapter1 *adapter = NULL;
-    IDXGIOutput *output = NULL;
-    IDXGIOutput1 *output1 = NULL;
     HRESULT result = CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory);
     int stage = 2;
-    if (SUCCEEDED(result)) {
-        stage = 3;
-        result = IDXGIFactory1_EnumAdapters1(factory, 0, &adapter);
-    }
-
-    // DuplicateOutput requires the D3D device to be created from the adapter
-    // that owns the selected output. Creating a default device first can pick a
-    // different GPU on hybrid and virtual Windows systems.
-    D3D_FEATURE_LEVEL feature_level;
-    if (SUCCEEDED(result)) {
-        stage = 4;
-        result = D3D11CreateDevice(
-            (IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0, D3D11_SDK_VERSION,
-            &capture->device, &feature_level, &capture->context);
-    }
-    if (SUCCEEDED(result)) {
-        stage = 5;
-        result = IDXGIAdapter1_EnumOutputs(adapter, 0, &output);
-    }
     DXGI_OUTPUT_DESC output_desc;
     memset(&output_desc, 0, sizeof(output_desc));
     if (SUCCEEDED(result)) {
-        stage = 6;
-        result = IDXGIOutput_GetDesc(output, &output_desc);
-    }
-    if (SUCCEEDED(result)) {
-        stage = 7;
-        result = IDXGIOutput_QueryInterface(output, &IID_IDXGIOutput1, (void **)&output1);
-    }
-    if (SUCCEEDED(result)) {
-        stage = 8;
-        result = IDXGIOutput1_DuplicateOutput(output1, (IUnknown *)capture->device, &capture->duplication);
-    }
+        result = DXGI_ERROR_NOT_FOUND;
+        for (UINT adapter_index = 0; ; ++adapter_index) {
+            IDXGIAdapter1 *adapter = NULL;
+            stage = 3;
+            HRESULT adapter_result = IDXGIFactory1_EnumAdapters1(factory, adapter_index, &adapter);
+            if (adapter_result == DXGI_ERROR_NOT_FOUND) break;
+            if (FAILED(adapter_result) || !adapter) {
+                result = adapter_result;
+                continue;
+            }
 
-    if (output1) IDXGIOutput1_Release(output1);
-    if (output) IDXGIOutput_Release(output);
-    if (adapter) IDXGIAdapter1_Release(adapter);
+            ID3D11Device *device = NULL;
+            ID3D11DeviceContext *context = NULL;
+            D3D_FEATURE_LEVEL feature_level;
+            stage = 4;
+            HRESULT device_result = D3D11CreateDevice(
+                (IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0, D3D11_SDK_VERSION,
+                &device, &feature_level, &context);
+            if (FAILED(device_result)) {
+                result = device_result;
+                IDXGIAdapter1_Release(adapter);
+                continue;
+            }
+
+            for (UINT output_index = 0; ; ++output_index) {
+                IDXGIOutput *output = NULL;
+                stage = 5;
+                HRESULT output_result = IDXGIAdapter1_EnumOutputs(adapter, output_index, &output);
+                if (output_result == DXGI_ERROR_NOT_FOUND) break;
+                if (FAILED(output_result) || !output) {
+                    result = output_result;
+                    continue;
+                }
+                DXGI_OUTPUT_DESC candidate_desc;
+                memset(&candidate_desc, 0, sizeof(candidate_desc));
+                stage = 6;
+                output_result = IDXGIOutput_GetDesc(output, &candidate_desc);
+                int candidate_width = candidate_desc.DesktopCoordinates.right - candidate_desc.DesktopCoordinates.left;
+                int candidate_height = candidate_desc.DesktopCoordinates.bottom - candidate_desc.DesktopCoordinates.top;
+                if (FAILED(output_result) || !candidate_desc.AttachedToDesktop ||
+                    candidate_width != expected_width || candidate_height != expected_height ||
+                    candidate_desc.DesktopCoordinates.left != expected_x || candidate_desc.DesktopCoordinates.top != expected_y) {
+                    if (FAILED(output_result)) result = output_result;
+                    IDXGIOutput_Release(output);
+                    continue;
+                }
+
+                IDXGIOutput1 *output1 = NULL;
+                stage = 7;
+                output_result = IDXGIOutput_QueryInterface(output, &IID_IDXGIOutput1, (void **)&output1);
+                if (SUCCEEDED(output_result)) {
+                    stage = 8;
+                    output_result = IDXGIOutput1_DuplicateOutput(output1, (IUnknown *)device, &capture->duplication);
+                }
+                if (output1) IDXGIOutput1_Release(output1);
+                IDXGIOutput_Release(output);
+                result = output_result;
+                if (SUCCEEDED(output_result) && capture->duplication) {
+                    capture->device = device;
+                    capture->context = context;
+                    output_desc = candidate_desc;
+                    device = NULL;
+                    context = NULL;
+                    break;
+                }
+            }
+
+            if (context) ID3D11DeviceContext_Release(context);
+            if (device) ID3D11Device_Release(device);
+            IDXGIAdapter1_Release(adapter);
+            if (capture->duplication) break;
+        }
+    }
     if (factory) IDXGIFactory1_Release(factory);
 
     if (FAILED(result) || !capture->duplication) {
@@ -305,7 +341,7 @@ func (capturer *desktopFastCapturer) Close() {
 
 // CaptureBGRA returns 1 for a usable DXGI frame, 0 when DXGI is healthy but
 // the desktop has not changed, and -1 while the fast backend is unavailable.
-func (capturer *desktopFastCapturer) CaptureBGRA(pixels []byte, width, height int) int {
+func (capturer *desktopFastCapturer) CaptureBGRA(pixels []byte, x, y, width, height int) int {
 	required := width * height * 4
 	if width <= 0 || height <= 0 || required <= 0 || len(pixels) < required {
 		capturer.detail = fmt.Sprintf("gdi-dxgi-buffer-%d-%d-%d", width, height, len(pixels))
@@ -320,7 +356,7 @@ func (capturer *desktopFastCapturer) CaptureBGRA(pixels []byte, width, height in
 	if capturer.handle == nil {
 		var outputWidth, outputHeight, failureStage C.int
 		var failureCode C.longlong
-		capturer.handle = C.remoteit_dxgi_create(&outputWidth, &outputHeight, &failureStage, &failureCode)
+		capturer.handle = C.remoteit_dxgi_create(C.int(width), C.int(height), C.int(x), C.int(y), &outputWidth, &outputHeight, &failureStage, &failureCode)
 		capturer.width, capturer.height = int(outputWidth), int(outputHeight)
 		if capturer.handle == nil || capturer.width != width || capturer.height != height {
 			if capturer.handle == nil {

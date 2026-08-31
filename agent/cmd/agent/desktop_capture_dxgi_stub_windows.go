@@ -6,7 +6,7 @@ type desktopFastCapturer struct{}
 
 func (capturer *desktopFastCapturer) Close() {}
 
-func (capturer *desktopFastCapturer) CaptureBGRA(_ []byte, _, _ int) int { return -1 }
+func (capturer *desktopFastCapturer) CaptureBGRA(_ []byte, _, _, _, _ int) int { return -1 }
 
 func (capturer *desktopFastCapturer) BackendDetail() string { return "gdi-dxgi-unavailable" }
 

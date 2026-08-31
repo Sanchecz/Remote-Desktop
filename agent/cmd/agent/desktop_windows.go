@@ -75,6 +75,7 @@ var (
 	procSetProcessDPIContext   = user32Desktop.NewProc("SetProcessDpiAwarenessContext")
 	procSendInput              = user32Desktop.NewProc("SendInput")
 	procOpenInputDesktop       = user32Desktop.NewProc("OpenInputDesktop")
+	procGetThreadDesktop       = user32Desktop.NewProc("GetThreadDesktop")
 	procSetThreadDesktop       = user32Desktop.NewProc("SetThreadDesktop")
 	procCloseDesktop           = user32Desktop.NewProc("CloseDesktop")
 	procGetUserObjectInfo      = user32Desktop.NewProc("GetUserObjectInformationW")
@@ -101,6 +102,7 @@ var (
 	procSetWaitableTimerEx     = kernel32Desktop.NewProc("SetWaitableTimerEx")
 	procWaitForSingleObject    = kernel32Desktop.NewProc("WaitForSingleObject")
 	procCloseHandle            = kernel32Desktop.NewProc("CloseHandle")
+	procGetCurrentThreadID     = kernel32Desktop.NewProc("GetCurrentThreadId")
 	procGlobalAlloc            = kernel32Desktop.NewProc("GlobalAlloc")
 	procGlobalLock             = kernel32Desktop.NewProc("GlobalLock")
 	procGlobalUnlock           = kernel32Desktop.NewProc("GlobalUnlock")
@@ -364,6 +366,7 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 type desktopInputSurface struct {
 	handle      uintptr
 	name        string
+	owned       bool
 	lastChecked time.Time
 }
 
@@ -393,7 +396,32 @@ func (surface *desktopInputSurface) syncBeforeSwitch(beforeSwitch func(), force 
 	const maximumAllowed = 0x02000000
 	handle, _, callErr := procOpenInputDesktop.Call(0, 0, maximumAllowed)
 	if handle == 0 {
-		return false, fmt.Errorf("open the visible Windows desktop: %w", callErr)
+		// A disconnected RDS session has no input desktop, even though the helper's
+		// initial thread is still attached to that user's winsta0\default desktop.
+		// Keep using that session-local desktop until RDP creates a new input desktop.
+		// This avoids rejecting the only surface which can retain the user's DWM
+		// state, and never opens another active user's WinStation.
+		threadID, _, _ := procGetCurrentThreadID.Call()
+		current, _, currentErr := procGetThreadDesktop.Call(threadID)
+		if current == 0 {
+			return false, fmt.Errorf("open the visible Windows desktop: %w (current desktop: %v)", callErr, currentErr)
+		}
+		name, err := windowsDesktopObjectName(current)
+		if err != nil {
+			return false, fmt.Errorf("open the visible Windows desktop: %w (current desktop: %v)", callErr, err)
+		}
+		if !force && surface.handle == current && strings.EqualFold(surface.name, name) {
+			return false, nil
+		}
+		if beforeSwitch != nil {
+			beforeSwitch()
+		}
+		previous, previousOwned := surface.handle, surface.owned
+		surface.handle, surface.name, surface.owned = current, name, false
+		if previous != 0 && previousOwned {
+			procCloseDesktop.Call(previous)
+		}
+		return true, nil
 	}
 	name, err := windowsDesktopObjectName(handle)
 	if err != nil {
@@ -415,9 +443,9 @@ func (surface *desktopInputSurface) syncBeforeSwitch(beforeSwitch func(), force 
 		surface.lastChecked = time.Time{}
 		return false, fmt.Errorf("switch capture to Windows desktop %q: %w", name, switchErr)
 	}
-	previous := surface.handle
-	surface.handle, surface.name = handle, name
-	if previous != 0 {
+	previous, previousOwned := surface.handle, surface.owned
+	surface.handle, surface.name, surface.owned = handle, name, true
+	if previous != 0 && previousOwned {
 		procCloseDesktop.Call(previous)
 	}
 	return true, nil
@@ -2277,7 +2305,7 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constra
 	// <=1920 guard accidentally forced every high-DPI/4K display through GDI,
 	// even when the low-latency DXGI path was available.
 	if !secureDesktop {
-		fastResult = capturer.fast.CaptureBGRA(framePixels, frameWidth, frameHeight)
+		fastResult = capturer.fast.CaptureBGRA(framePixels, capturer.screenX, capturer.screenY, frameWidth, frameHeight)
 	}
 	copyMillis = int(time.Since(copyStartedAt).Milliseconds())
 	if fastResult == 0 && len(capturer.lastJPEG) > 0 &&
