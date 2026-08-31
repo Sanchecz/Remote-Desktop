@@ -1012,10 +1012,20 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 		if captureErr != nil {
 			if errors.Is(captureErr, errDesktopVDISurfaceUnavailable) {
 				now := time.Now()
+				message := captureErr.Error()
 				if vdiRecoveryStarted.IsZero() {
 					vdiRecoveryStarted = now
 				}
 				vdiRecoveryFailures++
+				// Recovery remains non-terminal, but retain the exact DXGI/GDI stage and
+				// HRESULT. Hiding it made a live Agent look healthy while every capture
+				// worker was restarting. A successful upload clears this diagnostic.
+				if message != lastReportedError || time.Since(lastReportedAt) >= 10*time.Second {
+					if reportDesktopStatus(ctx, controlClient, access, offer.ID, message) == nil {
+						lastReportedError = message
+						lastReportedAt = now
+					}
+				}
 				// Refresh the last known-good frame while recovery is in progress so
 				// the server does not replace the VDI screen with an empty/error tile.
 				if len(lastCapture.JPEG) > 0 && desktopShouldPublishHeartbeat(lastFrameEnqueuedAt, now) {
@@ -1032,9 +1042,8 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 					// seconds. A process-level restart is the only reliable way to discard
 					// every DXGI/VDI driver object after a hard RDP reconnect, while the
 					// server-side remote session and viewer remain active.
-					// Clear an old diagnostic instead of publishing recovery as a terminal
-					// red error. The same browser lease remains valid for the replacement.
-					_ = reportDesktopStatus(ctx, controlClient, access, offer.ID, "")
+					// Preserve the diagnostic across the helper restart. The same browser
+					// lease remains valid, and the first successful frame clears it.
 					return
 				}
 			} else {
@@ -2369,7 +2378,7 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constra
 			captureBackend += "-reinit" + copyBackend
 			if !copied {
 				capturer.Close()
-				return desktopCapture{}, errDesktopVDISurfaceUnavailable
+				return desktopCapture{}, fmt.Errorf("%s: %w", captureBackend, errDesktopVDISurfaceUnavailable)
 			}
 		}
 		copyMillis = int(time.Since(copyStartedAt).Milliseconds())
