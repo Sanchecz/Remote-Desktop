@@ -3361,7 +3361,13 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			}
 			if (!target) return;
 			scaleBeforeFullscreenRef.current = screenScale;
-			setScreenScale("fill");
+			// A desktop browser must keep the whole remote monitor visible in
+			// fullscreen. "fill" crops the long axis whenever the local and remote
+			// aspect ratios differ, which made the edges and Windows taskbar appear
+			// to be missing. Compact phone clients intentionally retain their
+			// edge-to-edge fill presentation; desktop returns to Remote Desktop-style
+			// fit-to-screen geometry.
+			setScreenScale(compactRemoteClient ? "fill" : "fit");
 			scheduleCamera({ zoom: 1, panX: 0, panY: 0 });
 			if (target.requestFullscreen) await target.requestFullscreen({ navigationUI: "hide" });
 			else if (target.webkitRequestFullscreen) await target.webkitRequestFullscreen();
