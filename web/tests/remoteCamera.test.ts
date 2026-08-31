@@ -88,11 +88,11 @@ test("off-centre pinch does not jump its anchor to the viewport centre", () => {
 	assert.deepEqual(pointUnderScreenCoordinate(fingers, center, next), anchor);
 });
 
-test("camera boundaries permit useful panning but prevent losing the whole desktop", () => {
+test("camera boundaries permit useful panning without exposing the black canvas", () => {
 	const clamped = clampRemoteCamera({ zoom: 8, panX: 99_000, panY: -99_000 }, { x: 960, y: 540 }, { x: 960, y: 540 });
 	assert.equal(clamped.zoom, 4);
-	assert.equal(clamped.panX, 2336);
-	assert.equal(clamped.panY, -1286);
+	assert.equal(clamped.panX, 1440);
+	assert.equal(clamped.panY, -810);
 });
 
 test("successive pinch samples preserve their moving midpoint without recentering", () => {
@@ -112,34 +112,29 @@ test("successive pinch samples preserve their moving midpoint without recenterin
 	assert.notEqual(second.panY, 0);
 });
 
-test("portrait letterboxing does not force an off-centre pinch back to the middle", () => {
-	// 390x219 is a 16:9 desktop fitted into a 390x760 portrait viewport.
+test("portrait letterboxing remains centred instead of becoming a moving black rectangle", () => {
 	const content = { x: 390, y: 219 };
 	const viewport = { x: 390, y: 760 };
-	const center = { x: viewport.x / 2, y: viewport.y / 2 };
-	const firstMidpoint = { x: 116, y: 315 };
-	const anchor = pointUnderScreenCoordinate(firstMidpoint, center, { zoom: 1, panX: 0, panY: 0 });
-	const zoomed = advanceRemotePinch({ zoom: 1, panX: 0, panY: 0 }, firstMidpoint, firstMidpoint, center, 100, 180);
-	const clamped = clampRemoteCamera(zoomed, content, viewport);
-	const pointAfterClamp = pointUnderScreenCoordinate(firstMidpoint, center, clamped);
-
-	assert.ok(Math.abs(pointAfterClamp.x - anchor.x) < 1e-9);
-	assert.ok(Math.abs(pointAfterClamp.y - anchor.y) < 1e-9);
+	const clamped = clampRemoteCamera({ zoom: 1.8, panX: 999, panY: -999 }, content, viewport);
+	assert.equal(clamped.panX, 156);
+	assert.equal(clamped.panY, 0, "a frame shorter than the phone viewport must not slide through the letterbox");
 });
 
-test("portrait pinch can keep the lower desktop edge under the fingers", () => {
-	const content = { x: 390, y: 219 };
-	const viewport = { x: 390, y: 760 };
-	const center = { x: viewport.x / 2, y: viewport.y / 2 };
-	const fingers = { x: 250, y: 675 };
-	const anchor = pointUnderScreenCoordinate(fingers, center, { zoom: 1, panX: 0, panY: 0 });
-	const zoomed = advanceRemotePinch({ zoom: 1, panX: 0, panY: 0 }, fingers, fingers, center, 100, 230);
-	const clamped = clampRemoteCamera(zoomed, content, viewport);
-	const pointAfterClamp = pointUnderScreenCoordinate(fingers, center, clamped);
-
-	assert.ok(Math.abs(pointAfterClamp.x - anchor.x) < 1e-9);
-	assert.ok(Math.abs(pointAfterClamp.y - anchor.y) < 1e-9);
-	assert.ok(clamped.panY < -100, "bottom-focused pinch must not be recentered");
+test("camera matrix never reveals canvas where the scaled desktop can cover the viewport", () => {
+	for (const content of [{ x: 390, y: 219 }, { x: 591, y: 394 }, { x: 844, y: 475 }, { x: 320, y: 568 }]) {
+		for (const viewport of [{ x: 390, y: 760 }, { x: 844, y: 342 }, { x: 591, y: 394 }]) {
+			for (const zoom of [1, 1.1, 1.5, 2, 3, 4]) {
+				const clamped = clampRemoteCamera({ zoom, panX: 1_000_000, panY: -1_000_000 }, content, viewport);
+				for (const axis of ["x", "y"] as const) {
+					const scaled = content[axis] * zoom;
+					const pan = axis === "x" ? clamped.panX : clamped.panY;
+					const limit = Math.max(0, (scaled - viewport[axis]) / 2);
+					assert.ok(Math.abs(pan) <= limit + 1e-9, `${axis} escaped at ${content.x}x${content.y}, ${viewport.x}x${viewport.y}, ${zoom}x`);
+					if (scaled <= viewport[axis]) assert.equal(pan, 0, `${axis} letterbox must remain centred`);
+				}
+			}
+		}
+	}
 });
 
 test("mobile trackpad distinguishes zoom, scroll and two-finger right click", () => {
@@ -178,7 +173,7 @@ test("zoomed mobile cursor auto-pans only when it reaches a viewport edge", () =
 	const centre = cameraFollowingRemotePoint(camera, { x: 960, y: 540 }, frame, fitted, viewport);
 	assert.deepEqual(centre, camera);
 	const right = cameraFollowingRemotePoint(camera, { x: 1919, y: 540 }, frame, fitted, viewport);
-	assert.ok(right.panX < -200, "right-edge cursor must pan the zoomed desktop left");
+	assert.ok(right.panX <= -190, "right-edge cursor must pan the zoomed desktop left up to the non-exposing boundary");
 	assert.equal(right.panY, 0);
 });
 

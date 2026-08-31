@@ -68,6 +68,7 @@ import { buildCodexOperatorInstruction, buildWindowsMCPInstaller } from "./codex
 import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteViewportChanged, remoteViewportWithStableOrientation, resolveRemoteLayoutLandscape, resolveRemoteViewport, shouldApplyRemoteOrientationTransition, shouldRebaseRemotePointerViewport, shouldUseCompactRemoteControls, shouldUseRemoteTrackpad, type RemoteViewport } from "./remoteViewport";
 import { isCurrentRemoteFallbackGeneration, isRecoverableRemoteStatusFailure, isRemoteFrameStreamStalled, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
 import { abortableDelay, browserTransferChunkLength, fileTransferProgress, isAbortError, uploadTransferChunk, validateTransferCheckpoint } from "./fileTransfers";
+import { createRemoteFrameRetirementScheduler } from "./remoteFramePresentation";
 
 type User = {
   id: string;
@@ -225,7 +226,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.23";
+const LATEST_AGENT_VERSION = "1.0.24";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1332,6 +1333,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const releaseActivePointerRef = useRef<() => void>(() => undefined);
 	const textKeyboardKeys = useRef(new Set<string>());
 	const frameImageRef = useRef<HTMLImageElement>(null);
+	const frameImageLayerRef = useRef<HTMLDivElement>(null);
 	const frameSocketRef = useRef<WebSocket | null>(null);
 	const mobileTrackpadMode = shouldUseRemoteTrackpad(compactRemoteClient, pointerMode);
 	const localCursorVisible = mobileTrackpadMode;
@@ -1607,6 +1609,12 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		let frameArrivalHead = 0;
 		const decoderImage = new Image();
 		decoderImage.decoding = "async";
+		const retiredFrames = createRemoteFrameRetirementScheduler({
+			schedulePaint: (callback) => window.requestAnimationFrame(callback),
+			cancelPaint: (id) => window.cancelAnimationFrame(id),
+			revoke: (url) => URL.revokeObjectURL(url),
+			paintCount: 2,
+		});
 		frameArrivalTimes.current = [];
 		setFrameFPS(0);
     const refreshStatus = async () => {
@@ -1674,9 +1682,15 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 					lastDecodedPresentationOrder = candidate.order;
 					const previousURL = currentURL;
 					currentURL = nextURL;
-					if (frameImageRef.current) frameImageRef.current.src = nextURL;
+					if (frameImageRef.current) {
+						// Paint the already-decoded JPEG as the layer backdrop before swapping
+						// the foreground element. Android Chromium/WebView can otherwise expose
+						// one empty GPU tile while a transformed <img> changes its blob source.
+						if (frameImageLayerRef.current) frameImageLayerRef.current.style.backgroundImage = `url("${nextURL}")`;
+						frameImageRef.current.src = nextURL;
+					}
 					else setFrameURL(nextURL);
-					if (previousURL) URL.revokeObjectURL(previousURL);
+					if (previousURL) retiredFrames.retire(previousURL);
 					const now = performance.now();
 					const arrivals = frameArrivalTimes.current;
 					arrivals.push(now);
@@ -1978,6 +1992,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			inputQueue.current = [];
 			inputPendingBatches.current.clear();
 			inputInFlight.current = false;
+			retiredFrames.dispose();
       if (currentURL) URL.revokeObjectURL(currentURL);
       if (initialSessionId) {
         void fetch(`/api/desktop-sessions/${sessionId}`, { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ controlEnabled: false }) });
@@ -3071,8 +3086,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		<div className={`remote-screen pointer-${pointerMode} screen-scale-${screenScale === "fit" ? "fit" : "fixed"}`} ref={viewportRef} tabIndex={0} onKeyDown={(event) => keyboard(event, "down")} onKeyUp={(event) => keyboard(event, "up")} onPointerMove={movePointer} onPointerDown={(event) => pointerButton(event, "down")} onPointerUp={(event) => pointerButton(event, "up")} onPointerCancel={cancelPointer} onLostPointerCapture={lostPointerCapture} onWheel={wheel} onContextMenu={(event) => event.preventDefault()}>
 			{frameURL ? <>
 				<div className="remote-screen-canvas">
-					<div className="remote-screen-image-layer" style={remoteImageLayerStyle}>
-				<img ref={frameImageRef} className="remote-screen-image" src={frameURL} draggable={false} onLoad={(event) => { const width = event.currentTarget.naturalWidth; const height = event.currentTarget.naturalHeight; setRenderedFrameSize((current) => current.width === width && current.height === height ? current : { width, height }); }} />
+					<div ref={frameImageLayerRef} className="remote-screen-image-layer" style={remoteImageLayerStyle}>
+				<img ref={frameImageRef} className="remote-screen-image" src={frameURL} draggable={false} onLoad={(event) => { const width = event.currentTarget.naturalWidth; const height = event.currentTarget.naturalHeight; if (frameImageLayerRef.current && !frameImageLayerRef.current.style.backgroundImage) frameImageLayerRef.current.style.backgroundImage = `url("${event.currentTarget.src}")`; setRenderedFrameSize((current) => current.width === width && current.height === height ? current : { width, height }); }} />
 						{localCursorVisible && <span ref={localCursorRef} className="remote-local-cursor" aria-hidden="true"><MousePointer2 size={22} strokeWidth={2.4} /></span>}
 					</div>
 				</div>

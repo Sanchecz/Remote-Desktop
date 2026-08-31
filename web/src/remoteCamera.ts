@@ -85,25 +85,24 @@ export function advanceRemotePinch(camera: RemoteCamera, previousMidpoint: Point
 	return cameraKeepingPointUnderFingers(anchor, midpoint, viewportCenter, zoom);
 }
 
-export function clampRemoteCamera(camera: RemoteCamera, content: Point, viewport: Point, overscan = 32): RemoteCamera {
+export function clampRemoteCamera(camera: RemoteCamera, content: Point, viewport: Point): RemoteCamera {
 	const zoom = Math.max(1, Math.min(4, camera.zoom));
-	// At 100% the fitted desktop stays centred. Once the administrator zooms in,
-	// allow any chosen edge (including the bottom of a letterboxed portrait
-	// viewport) to travel beneath the fingers while keeping a small, recoverable
-	// piece of the frame visible. The previous half-difference clamp pulled a
-	// valid bottom-edge pinch back towards the viewport centre.
+	// Keep the fitted desktop centred while it is smaller than the viewport. Once
+	// it becomes larger, permit panning only until its edge reaches the matching
+	// viewport edge. The previous "visible grip" boundary allowed almost the whole
+	// frame to leave the phone display; the uncovered black canvas then appeared
+	// as large rectangular flashes during pinch-in/pinch-out.
 	const axisLimit = (contentLength: number, viewportLength: number) => {
-		if (zoom <= 1.0001) return 0;
 		const scaled = Math.max(1, contentLength) * zoom;
-		const visibleGrip = Math.max(48, Math.min(96, scaled / 3, Math.max(1, viewportLength) / 3));
-		return Math.max(0, (scaled + Math.max(1, viewportLength)) / 2 - visibleGrip) + overscan;
+		return Math.max(0, (scaled - Math.max(1, viewportLength)) / 2);
 	};
 	const maxPanX = axisLimit(content.x, viewport.x);
 	const maxPanY = axisLimit(content.y, viewport.y);
+	const clampAxis = (value: number, limit: number) => limit <= 0 ? 0 : Math.max(-limit, Math.min(limit, value));
 	return {
 		zoom,
-		panX: Math.max(-maxPanX, Math.min(maxPanX, camera.panX)),
-		panY: Math.max(-maxPanY, Math.min(maxPanY, camera.panY)),
+		panX: clampAxis(camera.panX, maxPanX),
+		panY: clampAxis(camera.panY, maxPanY),
 	};
 }
 
