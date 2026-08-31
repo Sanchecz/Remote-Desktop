@@ -229,7 +229,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.26";
+const LATEST_AGENT_VERSION = "1.0.27";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1339,6 +1339,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [mobileDockHidden, setMobileDockHidden] = useState(false);
 	const [fullscreenActive, setFullscreenActive] = useState(false);
 	const scaleBeforeFullscreenRef = useRef<RemoteScaleMode | null>(null);
+	const explicitSessionFinishRef = useRef(false);
 	const [camera, setCamera] = useState({ zoom: 1, panX: 0, panY: 0 });
 	const cameraRef = useRef(camera);
 	const pendingCameraRef = useRef(camera);
@@ -2085,11 +2086,14 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			inputInFlight.current = false;
 			retiredFrames.dispose();
       if (currentURL) URL.revokeObjectURL(currentURL);
-      if (initialSessionId) {
-        void fetch(`/api/desktop-sessions/${sessionId}`, { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ controlEnabled: false }) });
-      } else {
-        void fetch(`/api/desktop-sessions/${sessionId}`, { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": csrf } });
-      }
+			if (explicitSessionFinishRef.current) {
+				void fetch(`/api/desktop-sessions/${sessionId}`, { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": csrf } });
+			} else {
+				// A route change, reload, mobile orientation rebuild or transient
+				// browser disconnect releases control but keeps the short resumable
+				// viewer lease. The server expires it automatically after inactivity.
+				void fetch(`/api/desktop-sessions/${sessionId}`, { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ controlEnabled: false }) });
+			}
 			controlEnabledRef.current = false;
 			controlActivationRef.current = null;
     };
@@ -3075,6 +3079,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	function finishRemoteSession() {
 		discardPendingPointerMove();
 		clearPendingTrackpadMotion(false);
+		explicitSessionFinishRef.current = true;
 		onClose();
 	}
 

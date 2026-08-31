@@ -37,6 +37,28 @@ func TestDesktopStaticFrameHeartbeat(t *testing.T) {
 	}
 }
 
+func TestDesktopVDIRecoveryBackoffAndRestart(t *testing.T) {
+	if got := desktopVDIRecoveryDelay(1); got != 100*time.Millisecond {
+		t.Fatalf("first VDI retry delay = %s", got)
+	}
+	if got := desktopVDIRecoveryDelay(2); got != 250*time.Millisecond {
+		t.Fatalf("second VDI retry delay = %s", got)
+	}
+	if got := desktopVDIRecoveryDelay(3); got != 500*time.Millisecond {
+		t.Fatalf("third VDI retry delay = %s", got)
+	}
+	if got := desktopVDIRecoveryDelay(50); got != time.Second {
+		t.Fatalf("bounded VDI retry delay = %s", got)
+	}
+	started := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	if desktopVDIRecoveryShouldRestart(started, started.Add(desktopVDIRecoveryRestartAfter-time.Millisecond)) {
+		t.Fatal("VDI worker restarted before the recovery window elapsed")
+	}
+	if !desktopVDIRecoveryShouldRestart(started, started.Add(desktopVDIRecoveryRestartAfter)) {
+		t.Fatal("VDI worker did not restart at the recovery deadline")
+	}
+}
+
 func TestRestoreDesktopCursorPatchUsesActualFrameStride(t *testing.T) {
 	const width, height = 7, 5
 	frame := make([]byte, width*height*4)

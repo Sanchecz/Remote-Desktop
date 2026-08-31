@@ -36,6 +36,8 @@ var desktopSessionControl atomic.Bool
 var desktopLastFrameUnix atomic.Int64
 var desktopSessionIdentifier atomic.Value
 
+var errDesktopVDISurfaceUnavailable = errors.New("не удалось скопировать экран после переподключения к VDI-сеансу")
+
 const (
 	// A detailed or high-entropy native 4K desktop can legitimately exceed the
 	// former 8 MiB ceiling at q92 4:4:4. Keep a bounded 16 MiB wire limit and
@@ -375,6 +377,18 @@ func (surface *desktopInputSurface) Sync() (bool, error) {
 // the old desktop; attempting SetThreadDesktop while they are still alive can
 // fail with ERROR_BUSY or leave capture returning the final old frame forever.
 func (surface *desktopInputSurface) SyncBeforeSwitch(beforeSwitch func()) (bool, error) {
+	return surface.syncBeforeSwitch(beforeSwitch, false)
+}
+
+// ForceRebindBeforeSwitch obtains a fresh input-desktop handle even when its
+// object name is still "Default". RDP/VDI reconnects routinely replace the
+// display generation without changing that name, so name-only deduplication
+// can otherwise leave capture permanently attached to an invalid surface.
+func (surface *desktopInputSurface) ForceRebindBeforeSwitch(beforeSwitch func()) (bool, error) {
+	return surface.syncBeforeSwitch(beforeSwitch, true)
+}
+
+func (surface *desktopInputSurface) syncBeforeSwitch(beforeSwitch func(), force bool) (bool, error) {
 	surface.lastChecked = time.Now()
 	const maximumAllowed = 0x02000000
 	handle, _, callErr := procOpenInputDesktop.Call(0, 0, maximumAllowed)
@@ -386,7 +400,7 @@ func (surface *desktopInputSurface) SyncBeforeSwitch(beforeSwitch func()) (bool,
 		procCloseDesktop.Call(handle)
 		return false, err
 	}
-	if surface.handle != 0 && strings.EqualFold(surface.name, name) {
+	if !force && surface.handle != 0 && strings.EqualFold(surface.name, name) {
 		procCloseDesktop.Call(handle)
 		return false, nil
 	}
@@ -584,6 +598,8 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 	lastFrameEnqueuedAt := time.Time{}
 	nextFrameAt := time.Time{}
 	lastCaptureInterval := time.Duration(0)
+	vdiRecoveryStarted := time.Time{}
+	vdiRecoveryFailures := 0
 	currentOffer := desktopSessionOffer{}
 	offerActive := false
 	lastOfferAt := time.Time{}
@@ -722,6 +738,8 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			latestCapture.Store(desktopCapture{})
 			nextFrameAt = time.Time{}
 			lastCaptureInterval = 0
+			vdiRecoveryStarted = time.Time{}
+			vdiRecoveryFailures = 0
 			autoCadence.Reset()
 		}
 		// Execute pushed input on this locked OS thread. Besides removing the old
@@ -891,9 +909,10 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			// cannot trigger the old 15/30/60 resource-rebuild loop.
 			captureProfileFPS := effectiveFPS
 			capture := desktopCapture{}
+			interactive := desktopInteractionIsActive(offer.ControlEnabled, lastInputAt, time.Now())
+			constrained := offer.TargetFPS == 0 && autoCadence.Constrained
+			preserveDetail := offer.TargetFPS == 60
 			if captureErr == nil {
-				interactive := desktopInteractionIsActive(offer.ControlEnabled, lastInputAt, time.Now())
-				constrained := offer.TargetFPS == 0 && autoCadence.Constrained
 				// Auto preserves its 30 FPS control cadence under sustained CPU/link
 				// pressure by reusing the bounded high-quality motion surface. The old
 				// 15 FPS fallback selected an even heavier 4K profile and could trap a
@@ -901,10 +920,26 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 				// An explicit 60 FPS selection is quality-first. Auto-promoted 60 FPS
 				// remains bounded so it can demote cleanly when the host or link cannot
 				// sustain the sharper profile.
-				preserveDetail := offer.TargetFPS == 60
 				capture, captureErr = capturer.CaptureJPEG(captureProfileFPS, interactive, constrained, preserveDetail, offer.CursorVisible, desktopRequiresSecureCapture(inputSurface.name))
 			}
+			if errors.Is(captureErr, errDesktopVDISurfaceUnavailable) {
+				// RDP can create a fresh display generation under the same desktop
+				// object name (normally "Default"). Rebind the capture thread to a
+				// newly opened input-desktop handle and retry immediately. Keeping the
+				// previous JPEG outside desktopCapturer lets the viewer retain a stable
+				// last frame while Windows finishes reconnecting the virtual display.
+				_, rebindErr := inputSurface.ForceRebindBeforeSwitch(func() {
+					capturer.Close()
+				})
+				if rebindErr != nil {
+					captureErr = fmt.Errorf("восстанавливаем экран VDI (%v): %w", rebindErr, errDesktopVDISurfaceUnavailable)
+				} else {
+					capture, captureErr = capturer.CaptureJPEG(captureProfileFPS, interactive, constrained, preserveDetail, offer.CursorVisible, desktopRequiresSecureCapture(inputSurface.name))
+				}
+			}
 			if captureErr == nil {
+				vdiRecoveryStarted = time.Time{}
+				vdiRecoveryFailures = 0
 				// Desktop Duplication reports when the surface did not change. Do not
 				// upload the previous JPEG again: duplicate 30/60 FPS traffic used to
 				// compete with mouse and keyboard requests without changing a pixel.
@@ -947,6 +982,32 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			}
 		}
 		if captureErr != nil {
+			if errors.Is(captureErr, errDesktopVDISurfaceUnavailable) {
+				now := time.Now()
+				if vdiRecoveryStarted.IsZero() {
+					vdiRecoveryStarted = now
+				}
+				vdiRecoveryFailures++
+				// Refresh the last known-good frame while recovery is in progress so
+				// the server does not replace the VDI screen with an empty/error tile.
+				if len(lastCapture.JPEG) > 0 && desktopShouldPublishHeartbeat(lastFrameEnqueuedAt, now) {
+					heartbeat := lastCapture
+					heartbeat.CaptureBackend += "-vdi-recovery"
+					heartbeat.JPEG, _ = cloneDesktopJPEGForUpload(lastCapture.JPEG)
+					frameSequence++
+					enqueueLatestDesktopFrame(frameUploads, desktopFrameUpload{access: access, sessionID: offer.ID, sequence: frameSequence, capture: heartbeat, pooled: true})
+					lastFrameEnqueuedAt = now
+				}
+				nextFrameAt = now.Add(desktopVDIRecoveryDelay(vdiRecoveryFailures))
+				if desktopVDIRecoveryShouldRestart(vdiRecoveryStarted, now) {
+					// The service broker restarts this per-user companion in at most eight
+					// seconds. A process-level restart is the only reliable way to discard
+					// every DXGI/VDI driver object after a hard RDP reconnect, while the
+					// server-side remote session and viewer remain active.
+					_ = reportDesktopStatus(ctx, controlClient, access, offer.ID, "Перезапускаем захват VDI без завершения удалённого сеанса")
+					return
+				}
+			}
 			message := captureErr.Error()
 			if message != lastReportedError || time.Since(lastReportedAt) >= 10*time.Second {
 				if reportDesktopStatus(ctx, controlClient, access, offer.ID, message) == nil {
@@ -956,11 +1017,9 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 			}
 		}
 		delay := 2 * time.Millisecond
-		if len(lastCapture.JPEG) > 0 {
-			untilNextFrame := time.Until(nextFrameAt)
-			if untilNextFrame > 0 {
-				delay = min(untilNextFrame, 20*time.Millisecond)
-			}
+		untilNextFrame := time.Until(nextFrameAt)
+		if untilNextFrame > 0 && (len(lastCapture.JPEG) > 0 || !vdiRecoveryStarted.IsZero()) {
+			delay = min(untilNextFrame, 20*time.Millisecond)
 		}
 		if !desktopWait(ctx, delay, &waitTimer) {
 			return
@@ -2279,7 +2338,7 @@ func (capturer *desktopCapturer) CaptureJPEG(targetFPS int, interactive, constra
 			captureBackend += "-reinit" + copyBackend
 			if !copied {
 				capturer.Close()
-				return desktopCapture{}, errors.New("не удалось скопировать экран после переподключения к VDI-сеансу")
+				return desktopCapture{}, errDesktopVDISurfaceUnavailable
 			}
 		}
 		copyMillis = int(time.Since(copyStartedAt).Milliseconds())

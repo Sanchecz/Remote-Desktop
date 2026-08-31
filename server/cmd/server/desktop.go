@@ -728,6 +728,28 @@ func (s *server) startDesktopSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// A page reload, phone rotation or a brief network handover must resume the
+	// same viewer lease instead of ending it and making the Agent tear down a
+	// healthy VDI capture pipeline. Reuse only this administrator's still-live
+	// session; a different administrator continues to receive a separately
+	// audited one-viewer handoff below.
+	var resumedSessionID string
+	resumeErr := tx.QueryRow(r.Context(), `SELECT id FROM remote_desktop_sessions WHERE device_id=$1 AND created_by=$2 AND status='active' AND expires_at>now() AND viewer_seen_at>now()-interval '45 seconds' ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, deviceID, a.UserID).Scan(&resumedSessionID)
+	if resumeErr == nil {
+		_, err = tx.Exec(r.Context(), `UPDATE remote_desktop_sessions SET control_enabled=$1,target_fps=$2,cursor_visible=$3,viewer_seen_at=now(),expires_at=now()+interval '30 minutes',ended_at=NULL WHERE id=$4`, controlEnabled, targetFPS, cursorVisible, resumedSessionID)
+		if err != nil || tx.Commit(r.Context()) != nil {
+			writeError(w, http.StatusInternalServerError, "Не удалось возобновить удалённый сеанс")
+			return
+		}
+		s.storeDesktopRuntime(resumedSessionID, desktopSessionRuntimeState{DeviceID: deviceID, Control: controlEnabled, TargetFPS: targetFPS, CursorVisible: cursorVisible, ValidatedAt: time.Now().UTC()})
+		s.audit(r.Context(), a, nil, "desktop.resumed", "device", deviceID, clientIP(r), map[string]any{"sessionId": resumedSessionID, "deviceName": name, "control": controlEnabled, "targetFps": targetFPS, "cursorVisible": cursorVisible})
+		writeJSON(w, http.StatusOK, map[string]any{"id": resumedSessionID, "deviceId": deviceID, "status": "active", "controlEnabled": controlEnabled, "targetFps": targetFPS, "cursorVisible": cursorVisible, "resumed": true})
+		return
+	}
+	if !errors.Is(resumeErr, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "Не удалось проверить удалённый сеанс")
+		return
+	}
 	_, _ = tx.Exec(r.Context(), `UPDATE remote_desktop_sessions SET status='ended',frame=NULL,ended_at=now() WHERE device_id=$1 AND status='active'`, deviceID)
 	var sessionID string
 	err = tx.QueryRow(r.Context(), `INSERT INTO remote_desktop_sessions(device_id,created_by,control_enabled,target_fps,cursor_visible) VALUES($1,$2,$3,$4,$5) RETURNING id`, deviceID, a.UserID, controlEnabled, targetFPS, cursorVisible).Scan(&sessionID)
