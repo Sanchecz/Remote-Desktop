@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { imageClipboardFingerprint, newerRemoteClipboardPayload, REMOTE_CLIPBOARD_COPY_READ_DELAYS, remoteClipboardActionLabel, shouldResolveRemoteClipboardCopy, textClipboardFingerprint } from "../src/remoteClipboard.ts";
+import { imageClipboardFingerprint, newerRemoteClipboardPayload, REMOTE_CLIPBOARD_COPY_READ_DELAYS, REMOTE_CLIPBOARD_DIRECTION_TITLE, shouldResolveRemoteClipboardCopy, textClipboardFingerprint } from "../src/remoteClipboard.ts";
+
+test("manual clipboard actions name both directions explicitly", () => {
+	assert.equal(REMOTE_CLIPBOARD_DIRECTION_TITLE.send, "С этого устройства → удалённый ПК");
+	assert.equal(REMOTE_CLIPBOARD_DIRECTION_TITLE.receive, "С удалённого ПК → это устройство");
+	assert.doesNotMatch(`${REMOTE_CLIPBOARD_DIRECTION_TITLE.send} ${REMOTE_CLIPBOARD_DIRECTION_TITLE.receive}`, /синхрониз/i);
+});
 
 test("latest remote clipboard payload wins without text/image races", () => {
 	const image = new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" });
@@ -29,11 +35,4 @@ test("text and image fingerprints cannot collide", () => {
 	assert.equal(textClipboardFingerprint("abc"), "text:abc");
 	assert.equal(imageClipboardFingerprint("abc"), "image:abc");
 	assert.notEqual(textClipboardFingerprint("abc"), imageClipboardFingerprint("abc"));
-});
-
-test("clipboard action explains what the button will do", () => {
-	assert.equal(remoteClipboardActionLabel("ready"), "Синхронизировать буфер");
-	assert.equal(remoteClipboardActionLabel("pending"), "Получить с удалённого ПК");
-	assert.equal(remoteClipboardActionLabel("syncing"), "Синхронизация…");
-	assert.equal(remoteClipboardActionLabel("error", true), "Повторить");
 });

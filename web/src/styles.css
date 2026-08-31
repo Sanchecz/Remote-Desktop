@@ -529,6 +529,31 @@ td code { color: #8becc2; font-size: 11px; padding: 4px 7px; border-radius: 5px;
 .remote-files-overlay-body .remote-files-card { width: min(100%,1320px); min-height: 100%; margin: 0 auto; background: var(--panel); }
 .desktop-command-feedback { position: absolute; z-index: 20; left: 50%; bottom: 72px; min-height: 38px; display: flex; align-items: center; gap: 8px; transform: translateX(-50%); max-width: min(640px,calc(100% - 24px)); padding: 8px 13px; border: 1px solid rgba(57,231,155,.34); border-radius: 10px; color: #bff8dc; background: rgba(5,30,21,.93); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); box-shadow: 0 10px 32px rgba(0,0,0,.3); font-size: 10px; font-weight: 750; pointer-events: none; }
 .desktop-command-feedback.error { border-color: rgba(248,113,113,.48); color: #fecaca; background: rgba(55,12,18,.94); }
+.remote-clipboard-scrim { position: absolute; z-index: 234; inset: 0; padding: 0; border: 0; background: rgba(3,9,14,.48); -webkit-backdrop-filter: blur(5px); backdrop-filter: blur(5px); cursor: default; animation: remoteScrimIn .16s ease-out both; }
+.remote-clipboard-panel { position: absolute; z-index: 235; top: 50%; left: 50%; width: min(520px,calc(100% - 32px)); overflow: hidden; border: 1px solid color-mix(in srgb,var(--green) 24%,var(--line)); border-radius: 18px; color: var(--text); background: color-mix(in srgb,var(--panel) 97%,transparent); -webkit-backdrop-filter: blur(24px) saturate(1.12); backdrop-filter: blur(24px) saturate(1.12); box-shadow: 0 28px 90px rgba(0,0,0,.42); transform: translate(-50%,-50%); animation: remoteClipboardIn .2s cubic-bezier(.2,.8,.2,1) both; }
+.remote-clipboard-panel > header { min-height: 76px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 11px; padding: 13px 14px; border-bottom: 1px solid var(--line); background: color-mix(in srgb,var(--panel-2) 58%,var(--panel)); }
+.remote-clipboard-panel > header > span:nth-child(2) { min-width: 0; display: grid; gap: 3px; }
+.remote-clipboard-panel > header strong { color: var(--text); font-size: 14px; }
+.remote-clipboard-panel > header small { color: var(--muted); font-size: 9px; line-height: 1.4; }
+.remote-clipboard-panel > header > button { width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: var(--panel); cursor: pointer; }
+.remote-clipboard-panel > header > button:hover { color: var(--text); border-color: color-mix(in srgb,var(--green) 28%,var(--line)); }
+.remote-clipboard-icon { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid color-mix(in srgb,var(--green) 28%,var(--line)); border-radius: 12px; color: var(--green); background: color-mix(in srgb,var(--green) 8%,var(--panel)); }
+.remote-clipboard-directions { display: grid; gap: 8px; padding: 12px; }
+.remote-clipboard-directions > button { min-width: 0; min-height: 76px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 11px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 13px; color: var(--text); background: var(--panel-2); text-align: left; cursor: pointer; transition: border-color .15s ease,background .15s ease,transform .15s ease; }
+.remote-clipboard-directions > button:hover,.remote-clipboard-directions > button:focus-visible,.remote-clipboard-directions > button.recommended { border-color: color-mix(in srgb,var(--green) 50%,var(--line)); background: color-mix(in srgb,var(--green) 7%,var(--panel)); outline: 0; }
+.remote-clipboard-directions > button:active { transform: scale(.985); }
+.remote-clipboard-directions > button > span:nth-child(2) { min-width: 0; display: grid; gap: 4px; }
+.remote-clipboard-directions strong { color: var(--text); font-size: 11px; }
+.remote-clipboard-directions strong em { display: inline-flex; margin-left: 6px; padding: 2px 5px; border-radius: 999px; color: var(--green); background: color-mix(in srgb,var(--green) 10%,var(--panel)); font-size: 7px; font-style: normal; vertical-align: 1px; }
+.remote-clipboard-directions small { color: var(--muted); font-size: 8.5px; line-height: 1.45; }
+.remote-clipboard-directions > button > svg { color: var(--muted); }
+.remote-clipboard-direction-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 11px; }
+.remote-clipboard-direction-icon.send { color: #2d75d3; background: rgba(45,117,211,.1); }
+.remote-clipboard-direction-icon.receive { color: var(--green); background: color-mix(in srgb,var(--green) 10%,var(--panel)); }
+.remote-clipboard-panel > footer { min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); color: var(--muted); background: color-mix(in srgb,var(--panel-2) 45%,var(--panel)); font-size: 8px; line-height: 1.45; }
+.remote-clipboard-panel > footer svg { flex: none; color: var(--green); }
+.remote-desktop-modal.remote-compact-client .remote-clipboard-panel { top: auto; right: max(10px,env(safe-area-inset-right)); bottom: max(10px,env(safe-area-inset-bottom)); left: max(10px,env(safe-area-inset-left)); width: auto; max-height: calc(100% - max(20px,env(safe-area-inset-top)) - max(20px,env(safe-area-inset-bottom))); overflow-y: auto; border-radius: 20px; transform: none; animation: remoteSheetIn .22s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes remoteClipboardIn { from { opacity: 0; transform: translate(-50%,-46%) scale(.975); } to { opacity: 1; transform: translate(-50%,-50%) scale(1); } }
 @keyframes remoteSheetIn { from { opacity: 0; transform: translateY(18px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes remoteHandleIn { from { opacity: 0; transform: translateY(8px) scale(.94); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes remoteScrimIn { from { opacity: 0; } to { opacity: 1; } }

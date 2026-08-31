@@ -19,7 +19,7 @@ import (
 
 const (
 	bridgeName            = "remoteit"
-	bridgeVersion         = "1.0.33"
+	bridgeVersion         = "1.0.34"
 	defaultProtocol       = "2025-06-18"
 	defaultRemoteItServer = "https://supportgenesis.ru"
 )

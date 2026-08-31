@@ -11,12 +11,10 @@ export type RemoteClipboardCopyGate = {
 
 export type RemoteClipboardSyncState = "ready" | "pending" | "syncing" | "error";
 
-export function remoteClipboardActionLabel(state: RemoteClipboardSyncState, compact = false): string {
-	if (state === "pending") return compact ? "Получить буфер" : "Получить с удалённого ПК";
-	if (state === "syncing") return "Синхронизация…";
-	if (state === "error") return compact ? "Повторить" : "Повторить синхронизацию";
-	return compact ? "Синхронизировать" : "Синхронизировать буфер";
-}
+export const REMOTE_CLIPBOARD_DIRECTION_TITLE = {
+	send: "С этого устройства → удалённый ПК",
+	receive: "С удалённого ПК → это устройство",
+} as const;
 
 // Copy can reach the Agent after the first read request on a congested VDI
 // session. Sampling a few bounded times avoids resolving WebKit's deferred

@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   ChevronDown,
 	ChevronLeft,
+	ChevronRight,
 	ChevronUp,
 	CircleHelp,
   CircleUserRound,
@@ -71,7 +72,7 @@ import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteFullscreenScaleMode, remoteViewpor
 import { isCurrentRemoteFallbackGeneration, isRecoverableRemoteStatusFailure, isRemoteFrameStreamStalled, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
 import { abortableDelay, browserTransferChunkLength, fileTransferProgress, isAbortError, uploadTransferChunk, validateTransferCheckpoint } from "./fileTransfers";
 import { createRemoteFrameRetirementScheduler } from "./remoteFramePresentation";
-import { imageClipboardFingerprint, newerRemoteClipboardPayload, REMOTE_CLIPBOARD_COPY_READ_DELAYS, REMOTE_CLIPBOARD_COPY_TIMEOUT, remoteClipboardActionLabel, sameRemoteClipboardPayload, shouldResolveRemoteClipboardCopy, textClipboardFingerprint, type RemoteClipboardCopyGate, type RemoteClipboardPayload, type RemoteClipboardSyncState } from "./remoteClipboard";
+import { imageClipboardFingerprint, newerRemoteClipboardPayload, REMOTE_CLIPBOARD_COPY_READ_DELAYS, REMOTE_CLIPBOARD_COPY_TIMEOUT, REMOTE_CLIPBOARD_DIRECTION_TITLE, sameRemoteClipboardPayload, shouldResolveRemoteClipboardCopy, textClipboardFingerprint, type RemoteClipboardCopyGate, type RemoteClipboardPayload, type RemoteClipboardSyncState } from "./remoteClipboard";
 
 type User = {
   id: string;
@@ -230,7 +231,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.33";
+const LATEST_AGENT_VERSION = "1.0.34";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1414,6 +1415,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [sasFeedback, setSASFeedback] = useState("");
 	const [sasFeedbackError, setSASFeedbackError] = useState(false);
 	const [clipboardSyncState, setClipboardSyncState] = useState<RemoteClipboardSyncState>("ready");
+	const [clipboardActionsOpen, setClipboardActionsOpen] = useState(false);
 	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
 	const [filesOpen, setFilesOpen] = useState(false);
 	const [desktopDropActive, setDesktopDropActive] = useState(false);
@@ -1479,6 +1481,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const clipboardBackgroundReadBlockedRef = useRef(false);
 	const clipboardPollBusyRef = useRef(false);
 	const clipboardPermissionErrorRef = useRef(false);
+	const clipboardManualReceiveRef = useRef(false);
 	const macCommandKeysRef = useRef(new Set<string>());
 	const macCommandClient = useMemo(() => typeof navigator !== "undefined" && /Macintosh|Mac OS X|MacIntel/i.test(`${navigator.userAgent} ${navigator.platform}`), []);
 	const localCursorRef = useRef<HTMLSpanElement>(null);
@@ -1847,6 +1850,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 						pending.reject(new Error(clipboardAcknowledgement.error));
 						clipboardPendingWriteRef.current = null;
 					}
+					if (clipboardManualReceiveRef.current) completeManualClipboardReceive(`Не удалось получить буфер: ${clipboardAcknowledgement.error}`, true);
 				} else if (clipboardAcknowledgement.mime !== "image/png") {
 					const remoteText = clipboardAcknowledgement.value || "";
 					clipboardLastRemoteTextRef.current = remoteText;
@@ -1865,8 +1869,13 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 						return;
 					}
 					if (pending) return;
-					if (textClipboardFingerprint(remoteText) === clipboardLastLocalFingerprintRef.current) return;
+					if (textClipboardFingerprint(remoteText) === clipboardLastLocalFingerprintRef.current) {
+						if (clipboardManualReceiveRef.current) completeManualClipboardReceive("На этом устройстве уже находится такой же буфер", false);
+						return;
+					}
 					stageRemoteClipboardPayload({ kind: "text", text: remoteText, order: ++clipboardPendingRemoteOrderRef.current });
+				} else if (clipboardManualReceiveRef.current && clipboardRemoteObservedFingerprintRef.current.startsWith("image:") && clipboardRemoteObservedFingerprintRef.current === clipboardLastLocalFingerprintRef.current) {
+					completeManualClipboardReceive("На этом устройстве уже находится такое же изображение", false);
 				}
 			}
       } catch (reason) {
@@ -2391,7 +2400,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 						clipboardRemoteObservedFingerprintRef.current = imageClipboardFingerprint(hash);
 						if (imageClipboardFingerprint(hash) !== clipboardLastLocalFingerprintRef.current) {
 							stageRemoteClipboardPayload({ kind: "image", image: remoteImage, order: ++clipboardPendingRemoteOrderRef.current });
-						}
+						} else if (clipboardManualReceiveRef.current) completeManualClipboardReceive("На этом устройстве уже находится такое же изображение", false);
 					}
 				} else if (remoteResponse.status !== 204 && !remoteResponse.ok) {
 					throw new Error(`Буфер изображений: HTTP ${remoteResponse.status}`);
@@ -3224,12 +3233,17 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			await writeRemoteClipboardPayload(pending);
 			applied = true;
 			setClipboardSyncState("ready");
+			if (clipboardManualReceiveRef.current) completeManualClipboardReceive("Буфер получен с удалённого компьютера", false);
 			if (sameRemoteClipboardPayload(clipboardPendingRemoteRef.current, pending)) clipboardPendingRemoteRef.current = null;
 		} catch {
 			clipboardPermissionErrorRef.current = true;
 			// Safari and Firefox intentionally require a trusted click before a page
 			// may replace the local clipboard. Present that next action explicitly.
 			setClipboardSyncState("pending");
+			if (clipboardManualReceiveRef.current) {
+				setSASFeedbackError(false);
+				setSASFeedback("Браузеру нужно подтверждение: откройте «Буфер обмена» и ещё раз нажмите «Получить с удалённого ПК»");
+			}
 		} finally {
 			clipboardRemoteWriteBusyRef.current = false;
 			const newest = clipboardPendingRemoteRef.current;
@@ -3541,47 +3555,67 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		setControlsCollapsed(next);
 	}
 
-	async function toggleClipboardSync() {
+	function completeManualClipboardReceive(message: string, failed: boolean) {
+		clipboardManualReceiveRef.current = false;
+		window.clearTimeout(sasFeedbackTimer.current);
+		setClipboardSyncState(failed ? "error" : "ready");
+		setSASFeedbackError(failed);
+		setSASFeedback(message);
+		sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
+	}
+
+	async function sendClipboardToRemote() {
+		setClipboardActionsOpen(false);
 		window.clearTimeout(sasFeedbackTimer.current);
 		setClipboardSyncState("syncing");
 		try {
-			if (!navigator.clipboard?.readText || !navigator.clipboard?.writeText) throw new Error("Этот браузер не поддерживает общий буфер");
-			// A pending payload means the browser previously refused a background
-			// write. The button explicitly says "Получить с удалённого ПК", so honour
-			// that action inside this trusted click instead of comparing it with an
-			// unrelated local value and possibly discarding the remote clipboard.
-			if (clipboardPendingRemoteRef.current) {
-				const applied = await flushPendingRemoteClipboardFromGesture();
-				if (!applied && clipboardPendingRemoteRef.current) throw new Error("Браузер пока не разрешил получить удалённый буфер");
-				await activateRemoteControl();
-				clipboardBackgroundReadBlockedRef.current = false;
-				sendInput({ type: "clipboard_read" });
-				setSASFeedbackError(false);
-				setClipboardSyncState("ready");
-				setSASFeedback("Буфер получен с удалённого компьютера");
-				sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
-				return;
-			}
+			if (!navigator.clipboard?.readText) throw new Error("Браузер не разрешает читать буфер этого устройства");
 			// Read while the button click still owns transient browser activation.
 			// Awaiting the control API first makes Safari discard that grant.
 			const snapshot = await readLocalClipboardSnapshot();
-			const snapshotFingerprint = await localClipboardSnapshotFingerprint(snapshot);
-			const localChanged = snapshotFingerprint !== clipboardLastLocalFingerprintRef.current;
 			await activateRemoteControl();
-			clipboardLastRemoteAckRef.current = 0;
 			clipboardPermissionErrorRef.current = false;
 			clipboardBackgroundReadBlockedRef.current = false;
-			if (localChanged || !clipboardLastLocalFingerprintRef.current) await pushLocalClipboardSnapshot(snapshot);
-			sendInput({ type: "clipboard_read" });
+			await pushLocalClipboardSnapshot(snapshot);
 			setSASFeedbackError(false);
 			setClipboardSyncState("ready");
-			setSASFeedback("Общий буфер синхронизирован в обе стороны");
+			setSASFeedback("Буфер этого устройства передан на удалённый компьютер");
 			sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
 		} catch (reason) {
 			setClipboardSyncState("error");
-			const message = reason instanceof Error ? reason.message : "Браузер не разрешил общий буфер";
+			const message = reason instanceof Error ? reason.message : "Не удалось передать буфер";
 			setSASFeedbackError(true);
-			setSASFeedback(`${message}. На Mac используйте Cmd+C / Cmd+V прямо в удалённом экране.`);
+			setSASFeedback(message);
+		}
+	}
+
+	async function receiveClipboardFromRemote() {
+		setClipboardActionsOpen(false);
+		window.clearTimeout(sasFeedbackTimer.current);
+		setClipboardSyncState("syncing");
+		clipboardManualReceiveRef.current = true;
+		try {
+			if (!navigator.clipboard?.writeText) throw new Error("Браузер не разрешает записывать в буфер этого устройства");
+			if (clipboardPendingRemoteRef.current) {
+				const applied = await flushPendingRemoteClipboardFromGesture();
+				if (!applied && clipboardPendingRemoteRef.current) throw new Error("Браузер пока не разрешил получить удалённый буфер");
+				if (clipboardManualReceiveRef.current) completeManualClipboardReceive("Буфер получен с удалённого компьютера", false);
+				return;
+			}
+			await activateRemoteControl();
+			clipboardPermissionErrorRef.current = false;
+			clipboardBackgroundReadBlockedRef.current = false;
+			sendInput({ type: "clipboard_read" });
+			setSASFeedbackError(false);
+			setSASFeedback("Получаем буфер с удалённого компьютера…");
+			sasFeedbackTimer.current = window.setTimeout(() => {
+				if (clipboardManualReceiveRef.current) completeManualClipboardReceive("Удалённый компьютер не ответил на запрос буфера", true);
+			}, 5_000);
+		} catch (reason) {
+			clipboardManualReceiveRef.current = false;
+			setClipboardSyncState("error");
+			setSASFeedbackError(true);
+			setSASFeedback(reason instanceof Error ? reason.message : "Не удалось получить удалённый буфер");
 		}
 	}
 
@@ -3757,7 +3791,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button className="remote-header-tool" onClick={() => void toggleRemoteFullscreen()} title={fullscreenActive ? "Выйти из полноэкранного режима" : "На весь экран"}><Maximize2 size={17} /><span>{fullscreenActive ? "Свернуть" : "Полный экран"}</span></button>
 				<button className="remote-header-tool" onClick={() => void copyRemoteScreenshot()} title="Скопировать текущий кадр как PNG"><Camera size={17} /><span>Снимок</span></button>
 				{targetWindows && <button className="remote-header-tool" onClick={() => void sendCtrlAltDelete()} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>}
-				{targetWindows && <button className={`remote-header-tool ${clipboardSyncState !== "ready" ? "active" : ""}`} disabled={clipboardSyncState === "syncing"} aria-busy={clipboardSyncState === "syncing"} onClick={() => void toggleClipboardSync()} title="Автоматический общий буфер включён. Эта кнопка немедленно сверяет данные в обе стороны.">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={17} /> : clipboardSyncState === "pending" ? <Download size={17} /> : <Clipboard size={17} />}<span>{remoteClipboardActionLabel(clipboardSyncState)}</span></button>}
+				{targetWindows && <button className={`remote-header-tool ${clipboardSyncState === "pending" || clipboardActionsOpen ? "active" : ""}`} disabled={clipboardSyncState === "syncing"} aria-haspopup="dialog" aria-expanded={clipboardActionsOpen} aria-busy={clipboardSyncState === "syncing"} onClick={() => setClipboardActionsOpen(true)} title="Передать буфер на удалённый ПК или получить его оттуда">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={17} /> : <Clipboard size={17} />}<span>Буфер обмена</span></button>}
 				<button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>
 				{targetWindows && <button className="remote-header-tool" onClick={openRemoteFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>}
 				<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button>
@@ -3782,7 +3816,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		</div>
 		{!compactRemoteClient && fullscreenActive && <nav className="remote-desktop-fullscreen-tools" aria-label="Управление полноэкранным сеансом">
 			<button type="button" onClick={() => void copyRemoteScreenshot()} title="Скопировать снимок"><Camera size={18} /></button>
-			{targetWindows && <button type="button" className={clipboardSyncState !== "ready" ? "active" : ""} disabled={clipboardSyncState === "syncing"} aria-label={remoteClipboardActionLabel(clipboardSyncState)} aria-busy={clipboardSyncState === "syncing"} onClick={() => void toggleClipboardSync()} title={remoteClipboardActionLabel(clipboardSyncState)}>{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={18} /> : clipboardSyncState === "pending" ? <Download size={18} /> : <Clipboard size={18} />}</button>}
+			{targetWindows && <button type="button" className={clipboardSyncState === "pending" || clipboardActionsOpen ? "active" : ""} disabled={clipboardSyncState === "syncing"} aria-label="Открыть буфер обмена" aria-haspopup="dialog" aria-expanded={clipboardActionsOpen} aria-busy={clipboardSyncState === "syncing"} onClick={() => setClipboardActionsOpen(true)} title="Буфер обмена">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={18} /> : <Clipboard size={18} />}</button>}
 			<button type="button" onClick={() => void toggleRemoteFullscreen()} title="Выйти из полноэкранного режима"><Maximize2 size={18} /></button>
 			<button type="button" className="danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /></button>
 		</nav>}
@@ -3814,11 +3848,22 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button type="button" className="remote-tool-button" onClick={resetCamera}><Maximize2 size={15} /> По размеру</button>
 				<button type="button" className="remote-tool-button" onClick={() => void copyRemoteScreenshot()}><Camera size={15} /> Снимок</button>
 				{targetWindows && <button type="button" className="remote-tool-button" onClick={openRemoteFiles}><Folder size={15} /> Файлы</button>}
-				{targetWindows && <button type="button" className={`remote-tool-button ${clipboardSyncState !== "ready" ? "active" : ""}`} disabled={clipboardSyncState === "syncing"} aria-busy={clipboardSyncState === "syncing"} onClick={() => void toggleClipboardSync()} title="Автоматический общий буфер уже включён; кнопка запускает синхронизацию сейчас">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={15} /> : clipboardSyncState === "pending" ? <Download size={15} /> : <Clipboard size={15} />} {remoteClipboardActionLabel(clipboardSyncState, true)}</button>}
+				{targetWindows && <button type="button" className={`remote-tool-button ${clipboardSyncState === "pending" || clipboardActionsOpen ? "active" : ""}`} disabled={clipboardSyncState === "syncing"} aria-haspopup="dialog" aria-expanded={clipboardActionsOpen} aria-busy={clipboardSyncState === "syncing"} onClick={() => setClipboardActionsOpen(true)} title="Выбрать направление копирования">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={15} /> : <Clipboard size={15} />} Буфер обмена</button>}
 				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
 			</div>
 			<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button>
 		</footer>
+		{clipboardActionsOpen && <>
+			<button type="button" className="remote-clipboard-scrim" onClick={() => setClipboardActionsOpen(false)} aria-label="Закрыть буфер обмена" />
+			<section className="remote-clipboard-panel" role="dialog" aria-modal="true" aria-labelledby="remote-clipboard-title">
+				<header><span className="remote-clipboard-icon"><Clipboard size={21} /></span><span><strong id="remote-clipboard-title">Буфер обмена</strong><small>Куда передать скопированный текст или изображение?</small></span><button type="button" onClick={() => setClipboardActionsOpen(false)} aria-label="Закрыть"><X size={18} /></button></header>
+				<div className="remote-clipboard-directions">
+					<button type="button" onClick={() => void sendClipboardToRemote()}><span className="remote-clipboard-direction-icon send"><Upload size={20} /></span><span><strong>{REMOTE_CLIPBOARD_DIRECTION_TITLE.send}</strong><small>То, что скопировано сейчас, появится в буфере компьютера {device.name}</small></span><ChevronRight size={17} /></button>
+					<button type="button" className={clipboardSyncState === "pending" ? "recommended" : ""} onClick={() => void receiveClipboardFromRemote()}><span className="remote-clipboard-direction-icon receive"><Download size={20} /></span><span><strong>{REMOTE_CLIPBOARD_DIRECTION_TITLE.receive} {clipboardSyncState === "pending" && <em>Новые данные</em>}</strong><small>Буфер компьютера {device.name} появится на устройстве, с которого вы подключены</small></span><ChevronRight size={17} /></button>
+				</div>
+				<footer><CheckCircle2 size={15} /><span>Обычно ничего нажимать не нужно: новый буфер передаётся автоматически. Здесь можно повторить передачу вручную.</span></footer>
+			</section>
+		</>}
 		{keyboardOpen && <div className="remote-mobile-keyboard" role="group" aria-label="Ввод на удалённом компьютере">
 			<input ref={mobileKeyboardRef} name="remoteit-live-input" autoComplete="off" value={mobileText} onBeforeInput={(event) => { const input = event.currentTarget; const plan = planRemoteMobileBeforeInput((event.nativeEvent as InputEvent).inputType || "", input.value, input.selectionStart, input.selectionEnd); if (plan.handled && plan.keyCode) { event.preventDefault(); if (plan.keyCode === 13) sendMobileEnter(); else sendMobileBoundaryDelete(plan.keyCode); } }} onInput={(event) => updateMobileText(event.currentTarget.value)} onCompositionEnd={(event) => updateMobileText(event.currentTarget.value)} onSelect={(event) => { const input = event.currentTarget; if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) window.requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length)); }} onKeyDown={(event) => { if ((event.key === "Backspace" || event.key === "Delete") && !event.nativeEvent.isComposing) { const inputType = event.key === "Backspace" ? "deleteContentBackward" : "deleteContentForward"; const plan = planRemoteBoundaryDeletion(inputType, event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd); if (plan.handled && plan.keyCode) { event.preventDefault(); sendMobileBoundaryDelete(plan.keyCode); return; } } if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); sendMobileEnter(); } }} placeholder="Ввод в реальном времени" enterKeyHint="send" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
 			<button type="button" className="remote-keyboard-enter" onClick={sendMobileEnter}>Enter</button>
