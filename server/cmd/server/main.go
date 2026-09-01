@@ -59,6 +59,7 @@ type server struct {
 	desktopSessionRuntime   sync.Map
 	desktopDeviceSessions   sync.Map
 	desktopInputQueues      sync.Map
+	networkTunnels          sync.Map
 	transferProgressSignals sync.Map
 	transferOfferSignals    sync.Map
 	transferChunkLocks      sync.Map
@@ -219,7 +220,7 @@ var schemaStatements = []string{
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         device_id uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
         created_by uuid REFERENCES users(id) ON DELETE SET NULL,
-		job_type text NOT NULL CHECK (job_type IN ('shell','inventory','uninstall','files_list','files_read','files_write')),
+		job_type text NOT NULL CHECK (job_type IN ('shell','inventory','uninstall','files_list','files_read','files_write','action','tunnel')),
         payload jsonb NOT NULL DEFAULT '{}'::jsonb,
         status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','succeeded','failed','cancelled','expired')),
         timeout_seconds integer NOT NULL DEFAULT 30 CHECK (timeout_seconds BETWEEN 5 AND 60),
@@ -241,10 +242,10 @@ var schemaStatements = []string{
             FROM pg_constraint
             WHERE conrelid='agent_jobs'::regclass
               AND conname='agent_jobs_job_type_check'
-              AND pg_get_constraintdef(oid) LIKE '%action%'
+              AND pg_get_constraintdef(oid) LIKE '%tunnel%'
         ) THEN
             ALTER TABLE agent_jobs DROP CONSTRAINT IF EXISTS agent_jobs_job_type_check;
-            ALTER TABLE agent_jobs ADD CONSTRAINT agent_jobs_job_type_check CHECK (job_type IN ('shell','inventory','uninstall','files_list','files_read','files_write','action'));
+            ALTER TABLE agent_jobs ADD CONSTRAINT agent_jobs_job_type_check CHECK (job_type IN ('shell','inventory','uninstall','files_list','files_read','files_write','action','tunnel'));
         END IF;
     END $$`,
 	`DO $$
@@ -272,6 +273,25 @@ var schemaStatements = []string{
         revoked_at timestamptz
     )`,
 	`CREATE INDEX IF NOT EXISTS integration_tokens_user_idx ON integration_tokens(user_id,created_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS network_tunnels (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        device_id uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+        created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+        protocol text NOT NULL CHECK (protocol IN ('rdp','ssh')),
+        target_host inet NOT NULL,
+        target_port integer NOT NULL CHECK (target_port BETWEEN 1 AND 65535),
+        client_token_hash bytea NOT NULL,
+        status text NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting','connected','ended','failed','expired')),
+        created_at timestamptz NOT NULL DEFAULT now(),
+        agent_connected_at timestamptz,
+        client_connected_at timestamptz,
+        connected_at timestamptz,
+        ended_at timestamptz,
+        expires_at timestamptz NOT NULL DEFAULT (now() + interval '2 hours'),
+        error_text text NOT NULL DEFAULT ''
+    )`,
+	`CREATE INDEX IF NOT EXISTS network_tunnels_device_created_idx ON network_tunnels(device_id,created_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS network_tunnels_expires_idx ON network_tunnels(expires_at)`,
 	`CREATE TABLE IF NOT EXISTS action_jobs (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         device_id uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -354,7 +374,7 @@ var schemaStatements = []string{
         direction text NOT NULL CHECK (direction IN ('to_device','from_device')),
         file_name text NOT NULL,
         remote_path text NOT NULL,
-        size_bytes bigint NOT NULL CHECK (size_bytes BETWEEN 0 AND 10737418240),
+		size_bytes bigint NOT NULL CHECK (size_bytes BETWEEN 0 AND 53687091200),
         received_bytes bigint NOT NULL DEFAULT 0,
         status text NOT NULL CHECK (status IN ('uploading','queued','transferring','ready','completed','failed','cancelled','expired')),
         error_text text NOT NULL DEFAULT '',
@@ -365,6 +385,18 @@ var schemaStatements = []string{
         updated_at timestamptz NOT NULL DEFAULT now()
 	)`,
 	`ALTER TABLE remote_file_transfers ADD COLUMN IF NOT EXISTS source_ready boolean NOT NULL DEFAULT false`,
+	`DO $$
+	BEGIN
+		IF NOT EXISTS (
+			SELECT 1 FROM pg_constraint
+			WHERE conrelid='remote_file_transfers'::regclass
+			  AND conname='remote_file_transfers_size_bytes_check'
+			  AND pg_get_constraintdef(oid) LIKE '%53687091200%'
+		) THEN
+			ALTER TABLE remote_file_transfers DROP CONSTRAINT IF EXISTS remote_file_transfers_size_bytes_check;
+			ALTER TABLE remote_file_transfers ADD CONSTRAINT remote_file_transfers_size_bytes_check CHECK (size_bytes BETWEEN 0 AND 53687091200);
+		END IF;
+	END $$`,
 	`CREATE INDEX IF NOT EXISTS remote_file_transfers_queue_idx ON remote_file_transfers(device_id,status,created_at)`,
 }
 
@@ -418,6 +450,7 @@ func main() {
 	r.Post("/api/public/install/resolve", s.resolvePublicInstallCode)
 	r.Post("/api/public/install/windows-agent", s.downloadPublicWindowsAgent)
 	r.Post("/api/public/install/unix-agent", s.downloadPublicUnixAgent)
+	r.Post("/api/public/install/macos-agent", s.downloadPublicMacOSAgent)
 	r.Post("/api/agent/enroll", s.enrollAgent)
 	r.Post("/api/agent/verify", s.verifyAgentRegistration)
 	r.Post("/api/agent/heartbeat", s.agentHeartbeat)
@@ -436,6 +469,8 @@ func main() {
 	r.Put("/api/agent/file-transfers/{id}/data", s.agentUploadTransferChunk)
 	r.Post("/api/agent/file-transfers/{id}/complete", s.agentCompleteFileTransfer)
 	r.Post("/api/agent/file-transfers/{id}/fail", s.agentFailFileTransfer)
+	r.Get("/api/network-tunnels/{id}/agent", s.networkTunnelAgent)
+	r.Get("/api/network-tunnels/{id}/client", s.networkTunnelClient)
 	r.Route("/api", func(r chi.Router) {
 		r.Use(s.requireAuth)
 		r.Get("/auth/me", s.me)
@@ -470,6 +505,8 @@ func main() {
 		r.With(s.requireCSRF).Post("/file-transfers/{id}/ready", s.readyFileTransfer)
 		r.Get("/file-transfers/{id}/download", s.downloadFileTransfer)
 		r.With(s.requireCSRF).Delete("/file-transfers/{id}", s.cancelFileTransfer)
+		r.With(s.requireCSRF).Post("/network-tunnels", s.createNetworkTunnel)
+		r.Get("/network-tunnels/{id}", s.networkTunnelStatus)
 		r.Get("/users", s.listUsers)
 		r.With(s.requireCSRF).Post("/users", s.createUser)
 		r.With(s.requireCSRF).Patch("/users/{id}", s.updateUser)
@@ -477,6 +514,7 @@ func main() {
 		r.Get("/enrollment-tokens", s.listEnrollmentTokens)
 		r.Get("/enrollment-tokens/{id}/windows-agent", s.downloadBoundWindowsAgent)
 		r.Get("/enrollment-tokens/{id}/unix-agent", s.downloadBoundUnixAgent)
+		r.Get("/enrollment-tokens/{id}/macos-agent", s.downloadBoundMacOSAgent)
 		r.With(s.requireCSRF).Post("/enrollment-tokens", s.createEnrollmentToken)
 		r.With(s.requireCSRF).Patch("/enrollment-tokens/{id}", s.updateEnrollmentToken)
 		r.With(s.requireCSRF).Delete("/enrollment-tokens/{id}", s.deleteEnrollmentToken)
@@ -601,6 +639,7 @@ func (s *server) runMaintenance(ctx context.Context) {
 			}
 		}
 		s.removeExpiredTransferFiles()
+		s.removeExpiredNetworkTunnels()
 		s.pruneDesktopRuntimeState(time.Now().Add(-2 * time.Hour))
 		s.loginMu.Lock()
 		for ip, attempt := range s.loginFails {
@@ -1764,7 +1803,8 @@ func (s *server) agentJobResult(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	var jobType string
-	err = tx.QueryRow(r.Context(), `UPDATE agent_jobs SET status=$1,output=$2,error_text=$3,exit_code=$4,completed_at=now(),updated_at=now() WHERE id=$5 AND device_id=$6 AND status='running' RETURNING job_type`, status, truncate(in.Output, 900000), truncate(in.Error, 4096), in.ExitCode, jobID, deviceID).Scan(&jobType)
+	var jobPayload []byte
+	err = tx.QueryRow(r.Context(), `UPDATE agent_jobs SET status=$1,output=$2,error_text=$3,exit_code=$4,completed_at=now(),updated_at=now() WHERE id=$5 AND device_id=$6 AND status='running' RETURNING job_type,payload`, status, truncate(in.Output, 900000), truncate(in.Error, 4096), in.ExitCode, jobID, deviceID).Scan(&jobType, &jobPayload)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "Задание уже завершено или недоступно")
 		return
@@ -1778,6 +1818,14 @@ func (s *server) agentJobResult(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil && jobType == "action" {
 		_, err = tx.Exec(r.Context(), `UPDATE action_jobs SET status=$1,output=$2,error_text=$3,exit_code=$4,started_at=COALESCE(started_at,now()),completed_at=now(),updated_at=now() WHERE execution_job_id=$5 AND device_id=$6`, status, truncate(in.Output, 900000), truncate(in.Error, 4096), in.ExitCode, jobID, deviceID)
+	}
+	if err == nil && jobType == "tunnel" && !in.Success {
+		var payload struct {
+			TunnelID string `json:"tunnelId"`
+		}
+		if json.Unmarshal(jobPayload, &payload) == nil && validTransferID(payload.TunnelID) {
+			_, err = tx.Exec(r.Context(), `UPDATE network_tunnels SET status='failed',error_text=$1,ended_at=now() WHERE id=$2 AND device_id=$3 AND status='waiting'`, truncate(in.Error, 4096), payload.TunnelID, deviceID)
+		}
 	}
 	if err != nil || tx.Commit(r.Context()) != nil {
 		writeError(w, http.StatusInternalServerError, "Не удалось завершить задание")

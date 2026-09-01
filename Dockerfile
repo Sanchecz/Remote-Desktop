@@ -36,16 +36,16 @@ RUN apk add --no-cache cmake curl mingw-w64-gcc nasm ninja && \
 COPY agent/ ./
 RUN /go/bin/goversioninfo -64 -icon=assets/genesisit.ico -application-icon=assets/genesisit.ico -manifest=assets/genesisit.exe.manifest \
       -o=cmd/agent/rsrc_windows_amd64.syso -company=RemoteIt -description="RemoteIt Agent" \
-	-file-version=1.0.38.0 -product-version=1.0.38.0 -product-name=RemoteIt \
+	-file-version=1.0.39.0 -product-version=1.0.39.0 -product-name=RemoteIt \
       -internal-name=RemoteItAgent -original-name=RemoteIt-Agent-Setup.exe \
-	  -ver-major=1 -ver-minor=0 -ver-patch=38 -ver-build=0 \
-	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=38 -product-ver-build=0 assets/versioninfo.json && \
+	  -ver-major=1 -ver-minor=0 -ver-patch=39 -ver-build=0 \
+	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=39 -product-ver-build=0 assets/versioninfo.json && \
     /go/bin/goversioninfo -64 -icon=assets/genesisit.ico -application-icon=assets/genesisit.ico -manifest=assets/genesisit.exe.manifest \
       -o=cmd/console/rsrc_windows_amd64.syso -company=RemoteIt -description="RemoteIt Console" \
-	-file-version=1.0.38.0 -product-version=1.0.38.0 -product-name=RemoteIt \
+	-file-version=1.0.39.0 -product-version=1.0.39.0 -product-name=RemoteIt \
       -internal-name=RemoteItConsole -original-name=RemoteIt-Console.exe \
-	  -ver-major=1 -ver-minor=0 -ver-patch=38 -ver-build=0 \
-	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=38 -product-ver-build=0 assets/versioninfo.json && \
+	  -ver-major=1 -ver-minor=0 -ver-patch=39 -ver-build=0 \
+	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=39 -product-ver-build=0 assets/versioninfo.json && \
     go mod download && go vet -mod=readonly ./... && go test -mod=readonly ./... && mkdir -p /out && \
     CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
       CGO_CFLAGS="-I/opt/libjpeg-turbo-windows/include" \
@@ -69,7 +69,7 @@ RUN mkdir -p ${ANDROID_SDK_ROOT}/cmdline-tools && \
     rm /tmp/android-tools.zip
 ENV PATH=${PATH}:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT}/platform-tools
 RUN yes | sdkmanager --licenses >/dev/null || true && \
-    sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+    sdkmanager "platforms;android-37" "build-tools;36.0.0" "platform-tools"
 RUN wget -q https://services.gradle.org/distributions/gradle-9.5.0-bin.zip -O /tmp/gradle.zip && \
     wget -q https://services.gradle.org/distributions/gradle-9.5.0-bin.zip.sha256 -O /tmp/gradle.sha256 && \
     echo "$(cat /tmp/gradle.sha256)  /tmp/gradle.zip" | sha256sum -c - && \
@@ -81,8 +81,12 @@ RUN --mount=type=secret,id=android_keystore \
     set -a && . /run/secrets/android_signing && set +a && \
     export GENESIS_ANDROID_KEYSTORE=/run/secrets/android_keystore && \
     /opt/gradle/gradle-9.5.0/bin/gradle --no-daemon assembleRelease && \
-    ${ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk && \
-    ${ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner verify --verbose --print-certs agentapp/build/outputs/apk/release/agentapp-release.apk
+    ${ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk > /tmp/app-signer.txt && \
+    ${ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner verify --verbose --print-certs agentapp/build/outputs/apk/release/agentapp-release.apk > /tmp/agentapp-signer.txt && \
+    APP_CERT="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' /tmp/app-signer.txt | head -n 1)" && \
+    AGENT_CERT="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' /tmp/agentapp-signer.txt | head -n 1)" && \
+    test -n "$APP_CERT" && test "$APP_CERT" = "$AGENT_CERT" && \
+    printf 'RemoteIt Android release certificate\nSHA-256: %s\nApplies to: RemoteIt.apk, RemoteIt-Agent-Android.apk\n' "$APP_CERT" > /tmp/APK-SIGNER.txt
 
 FROM alpine:3.23
 RUN apk add --no-cache ca-certificates tzdata && addgroup -S genesis && adduser -S -G genesis genesis
@@ -95,6 +99,7 @@ COPY --from=server-build /out/remoteit-mcp-linux-amd64 /app/web/downloads/remote
 COPY installer/unix/install-remoteit.sh /app/web/downloads/install-remoteit.sh
 COPY --from=android-build /src/mobile/android/app/build/outputs/apk/release/app-release.apk /app/web/downloads/RemoteIt.apk
 COPY --from=android-build /src/mobile/android/agentapp/build/outputs/apk/release/agentapp-release.apk /app/web/downloads/RemoteIt-Agent-Android.apk
+COPY --from=android-build /tmp/APK-SIGNER.txt /app/web/downloads/APK-SIGNER.txt
 RUN cd /app/web/downloads && \
     sed -i 's/\r$//' install-remoteit.sh && \
     sh -n install-remoteit.sh && \
@@ -102,7 +107,7 @@ RUN cd /app/web/downloads && \
     LINUX_SHA="$(sha256sum remoteit-agent-linux-amd64 | cut -d ' ' -f1)" && LINUX_SIZE="$(wc -c < remoteit-agent-linux-amd64 | tr -d ' ')" && \
     MAC_AMD_SHA="$(sha256sum remoteit-agent-macos-amd64 | cut -d ' ' -f1)" && MAC_AMD_SIZE="$(wc -c < remoteit-agent-macos-amd64 | tr -d ' ')" && \
     MAC_ARM_SHA="$(sha256sum remoteit-agent-macos-arm64 | cut -d ' ' -f1)" && MAC_ARM_SIZE="$(wc -c < remoteit-agent-macos-arm64 | tr -d ' ')" && \
-	printf '{"version":"1.0.38","platforms":{"windows-amd64":{"path":"/downloads/remoteit-agent-windows-amd64.exe","sha256":"%s","size":%s},"linux-amd64":{"path":"/downloads/remoteit-agent-linux-amd64","sha256":"%s","size":%s},"darwin-amd64":{"path":"/downloads/remoteit-agent-macos-amd64","sha256":"%s","size":%s},"darwin-arm64":{"path":"/downloads/remoteit-agent-macos-arm64","sha256":"%s","size":%s}}}\n' "$WIN_SHA" "$WIN_SIZE" "$LINUX_SHA" "$LINUX_SIZE" "$MAC_AMD_SHA" "$MAC_AMD_SIZE" "$MAC_ARM_SHA" "$MAC_ARM_SIZE" > AGENT-RELEASE.json && \
+	printf '{"version":"1.0.39","platforms":{"windows-amd64":{"path":"/downloads/remoteit-agent-windows-amd64.exe","sha256":"%s","size":%s},"linux-amd64":{"path":"/downloads/remoteit-agent-linux-amd64","sha256":"%s","size":%s},"darwin-amd64":{"path":"/downloads/remoteit-agent-macos-amd64","sha256":"%s","size":%s},"darwin-arm64":{"path":"/downloads/remoteit-agent-macos-arm64","sha256":"%s","size":%s}}}\n' "$WIN_SHA" "$WIN_SIZE" "$LINUX_SHA" "$LINUX_SIZE" "$MAC_AMD_SHA" "$MAC_AMD_SIZE" "$MAC_ARM_SHA" "$MAC_ARM_SIZE" > AGENT-RELEASE.json && \
 	sha256sum RemoteIt-Console.exe RemoteIt-Agent-Setup.exe RemoteIt-MCP.exe remoteit-mcp-linux-amd64 remoteit-agent-windows-amd64.exe remoteit-agent-linux-amd64 remoteit-agent-macos-amd64 remoteit-agent-macos-arm64 RemoteIt.apk RemoteIt-Agent-Android.apk install-remoteit.sh APK-SIGNER.txt AGENT-RELEASE.json > SHA256SUMS.txt
 USER genesis
 EXPOSE 8080

@@ -2,4 +2,6 @@
 <resources>
     <string name="app_name">RemoteIt Agent</string>
     <string name="accessibility_description">Разрешает выполнять подтверждённые администратором касания, прокрутку и ввод во время активной трансляции RemoteIt. Служба не включает трансляцию экрана самостоятельно.</string>
+    <string name="enrollment_fields_required">Укажите токен и название устройства</string>
+    <string name="enrollment_in_progress">Проверяем токен и создаём Remote ID…</string>
 </resources>

@@ -3,14 +3,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -57,12 +62,146 @@ func executeWindowsPrinterList(ctx context.Context) remoteJobResult {
 	return runFixedActionCommand(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 }
 
+type discoveredNetworkPrinter struct {
+	IP       string   `json:"ip"`
+	Name     string   `json:"name,omitempty"`
+	Services []string `json:"services"`
+	Web      []string `json:"web"`
+}
+
+func executeWindowsPrinterDiscover(ctx context.Context, requestedSubnet string) remoteJobResult {
+	network, agentIP, err := resolveLANScanNetwork(requestedSubnet)
+	if err != nil {
+		return failedAction(err.Error())
+	}
+	addresses := usableIPv4Addresses(network)
+	if len(addresses) == 0 || len(addresses) > 256 {
+		return failedAction("в выбранной подсети нет допустимых адресов или превышен лимит 256")
+	}
+
+	type probeResult struct {
+		printer discoveredNetworkPrinter
+		found   bool
+	}
+	targets := make(chan net.IP)
+	results := make(chan probeResult, len(addresses))
+	workerCount := min(32, len(addresses))
+	var workers sync.WaitGroup
+	for worker := 0; worker < workerCount; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for address := range targets {
+				printer := probeWindowsNetworkPrinter(ctx, address)
+				select {
+				case results <- probeResult{printer: printer, found: len(printer.Services) > 0}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(targets)
+		for _, address := range addresses {
+			select {
+			case targets <- address:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() { workers.Wait(); close(results) }()
+
+	discovered := make([]discoveredNetworkPrinter, 0, 16)
+	for result := range results {
+		if result.found {
+			discovered = append(discovered, result.printer)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return failedAction("поиск принтеров прерван: " + err.Error())
+	}
+	sort.Slice(discovered, func(left, right int) bool {
+		return bytesCompareIP(net.ParseIP(discovered[left].IP), net.ParseIP(discovered[right].IP)) < 0
+	})
+
+	installed := json.RawMessage("[]")
+	if result := executeWindowsPrinterList(ctx); result.Success && strings.TrimSpace(result.Output) != "" {
+		raw := bytes.TrimPrefix([]byte(strings.TrimSpace(result.Output)), []byte{0xef, 0xbb, 0xbf})
+		if json.Valid(raw) {
+			installed = append(json.RawMessage(nil), raw...)
+		}
+	}
+	payload, err := json.MarshalIndent(map[string]any{
+		"subnet": network.String(), "agentIp": agentIP.String(), "installed": installed, "network": discovered,
+	}, "", "  ")
+	if err != nil {
+		return failedAction("не удалось сформировать список принтеров")
+	}
+	return remoteJobResult{Success: true, Output: string(payload), ExitCode: 0}
+}
+
+func probeWindowsNetworkPrinter(ctx context.Context, address net.IP) discoveredNetworkPrinter {
+	printer := discoveredNetworkPrinter{IP: address.String(), Services: []string{}, Web: []string{}}
+	ports := []struct {
+		port    int
+		service string
+	}{
+		{631, "IPP"}, {9100, "JetDirect"}, {515, "LPD"}, {80, "HTTP"}, {443, "HTTPS"},
+	}
+	printServiceFound := false
+	webServices := make([]string, 0, 2)
+	for _, candidate := range ports {
+		dialer := net.Dialer{Timeout: 240 * time.Millisecond}
+		connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(address.String(), strconv.Itoa(candidate.port)))
+		if err != nil {
+			continue
+		}
+		_ = connection.Close()
+		if candidate.port == 631 || candidate.port == 9100 || candidate.port == 515 {
+			printServiceFound = true
+			printer.Services = append(printer.Services, candidate.service)
+		} else {
+			webServices = append(webServices, candidate.service)
+			printer.Web = append(printer.Web, strings.ToLower(candidate.service)+"://"+address.String())
+		}
+	}
+	if !printServiceFound {
+		printer.Services = nil
+		printer.Web = nil
+		return printer
+	}
+	printer.Services = append(printer.Services, webServices...)
+	lookupCtx, cancel := context.WithTimeout(ctx, 180*time.Millisecond)
+	defer cancel()
+	if names, err := net.DefaultResolver.LookupAddr(lookupCtx, address.String()); err == nil && len(names) > 0 {
+		printer.Name = strings.TrimSuffix(names[0], ".")
+	}
+	return printer
+}
+
 func executeWindowsPrinterSettings(context.Context) remoteJobResult {
 	explorer := filepath.Join(os.Getenv("WINDIR"), "explorer.exe")
 	if err := launchInBoundWindowsSession(explorer, "ms-settings:printers"); err != nil {
 		return failedAction(err.Error())
 	}
 	return remoteJobResult{Success: true, Output: "Параметры «Принтеры и сканеры» открыты в закреплённом Windows-сеансе.", ExitCode: 0}
+}
+
+func executeWindowsPrinterWeb(ctx context.Context, host, scheme string) remoteJobResult {
+	if err := validatePrivateLANHost(ctx, host); err != nil {
+		return failedAction(err.Error())
+	}
+	if scheme != "http" && scheme != "https" {
+		return failedAction("неподдерживаемая схема веб-интерфейса принтера")
+	}
+	explorer := filepath.Join(os.Getenv("WINDIR"), "explorer.exe")
+	address := scheme + "://" + host
+	if err := launchInBoundWindowsSession(explorer, address); err != nil {
+		return failedAction(err.Error())
+	}
+	return remoteJobResult{Success: true, Output: "Веб-интерфейс принтера открыт на экране Agent: " + address, ExitCode: 0}
 }
 
 func executeWindowsPrinterSetDefault(ctx context.Context, name string) remoteJobResult {

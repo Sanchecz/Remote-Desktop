@@ -2,6 +2,7 @@ package ru.supportgenesis.remoteit.agent;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.ComponentName;
 import android.content.Context;
 import android.graphics.Path;
 import android.os.Handler;
@@ -14,7 +15,6 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 
 public final class RemoteControlAccessibilityService extends AccessibilityService {
     private static volatile RemoteControlAccessibilityService instance;
@@ -26,8 +26,12 @@ public final class RemoteControlAccessibilityService extends AccessibilityServic
     static boolean isEnabled(Context context) {
         String enabled = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
         if (enabled == null) return false;
-        String component = context.getPackageName() + "/" + RemoteControlAccessibilityService.class.getName();
-        return enabled.toLowerCase(Locale.ROOT).contains(component.toLowerCase(Locale.ROOT));
+        ComponentName expected = new ComponentName(context, RemoteControlAccessibilityService.class);
+        for (String value : enabled.split(":")) {
+            ComponentName candidate = ComponentName.unflattenFromString(value);
+            if (expected.equals(candidate)) return true;
+        }
+        return false;
     }
 
     static boolean dispatch(JSONObject event) {
@@ -138,7 +142,7 @@ public final class RemoteControlAccessibilityService extends AccessibilityServic
         android.os.Bundle arguments = new android.os.Bundle();
         arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, (current == null ? "" : current.toString()) + text);
         node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments);
-        node.recycle();
+        recycleCompatibility(node);
     }
 
     private void removeLastCharacter() {
@@ -149,6 +153,11 @@ public final class RemoteControlAccessibilityService extends AccessibilityServic
         android.os.Bundle arguments = new android.os.Bundle();
         arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, current);
         node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments);
-        node.recycle();
+        recycleCompatibility(node);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void recycleCompatibility(AccessibilityNodeInfo node) {
+        if (android.os.Build.VERSION.SDK_INT < 33) node.recycle();
     }
 }

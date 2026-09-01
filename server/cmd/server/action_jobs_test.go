@@ -149,15 +149,19 @@ func TestNormalizeLANPrinterAndScanActions(t *testing.T) {
 			t.Fatalf("unsafe LAN scan subnet accepted: %q", subnet)
 		}
 	}
-	connection, err := normalizeActionParameters("network.rdp.open", map[string]any{"host": "192.168.1.20", "port": 3389.0, "username": "DOMAIN\\admin"})
-	if err != nil || connection["port"] != int64(3389) {
-		t.Fatalf("valid RDP action rejected: %#v, %v", connection, err)
+	if result, err := normalizeActionParameters("windows.printers.discover", map[string]any{"subnet": "10.24.8.0/24"}); err != nil || result["subnet"] != "10.24.8.0/24" {
+		t.Fatalf("valid printer discovery rejected: %#v, %v", result, err)
 	}
-	if _, err := normalizeActionParameters("network.rdp.open", map[string]any{"host": "8.8.8.8", "port": 3389, "username": "admin"}); err == nil {
-		t.Fatal("public RDP target was accepted")
+	if _, err := normalizeActionParameters("windows.printers.discover", map[string]any{"subnet": "10.24.0.0/16"}); err == nil {
+		t.Fatal("printer discovery accepted a range larger than /24")
 	}
-	if _, err := normalizeActionParameters("network.ssh.open", map[string]any{"host": "server;whoami", "port": 22, "username": "admin"}); err == nil {
-		t.Fatal("unsafe SSH host accepted")
+	if result, err := normalizeActionParameters("windows.printer.open_web", map[string]any{"host": "192.168.1.40", "scheme": "https"}); err != nil || result["scheme"] != "https" {
+		t.Fatalf("valid printer web action rejected: %#v, %v", result, err)
+	}
+	for _, input := range []map[string]any{{"host": "8.8.8.8", "scheme": "https"}, {"host": "192.168.1.40", "scheme": "file"}, {"host": "printer.local", "scheme": "http"}} {
+		if _, err := normalizeActionParameters("windows.printer.open_web", input); err == nil {
+			t.Fatalf("unsafe printer web target accepted: %#v", input)
+		}
 	}
 	if _, err := normalizeActionParameters("windows.scan_folder.configure", map[string]any{"path": `C:\RemoteIt Scans`, "shareName": "RemoteItScans", "principal": `DOMAIN\scanner`}); err != nil {
 		t.Fatalf("valid scan folder rejected: %v", err)

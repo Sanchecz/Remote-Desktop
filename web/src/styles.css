@@ -455,6 +455,17 @@ td code { color: #8becc2; font-size: 11px; padding: 4px 7px; border-radius: 5px;
 .remote-desktop-drop-overlay svg { color: #39e79b; filter: drop-shadow(0 6px 16px rgba(57,231,155,.3)); }
 .remote-desktop-drop-overlay strong { color: #f2fff9; font-size: 18px; }
 .remote-desktop-drop-overlay small { color: #9cc8b6; font-size: 12px; }
+.remote-desktop-drop-destination { position: absolute; z-index: 38; left: 50%; top: 50%; width: min(560px,calc(100% - 32px)); display: grid; gap: 14px; padding: 18px; transform: translate(-50%,-50%); border: 1px solid rgba(57,231,155,.42); border-radius: 18px; background: rgba(8,20,25,.96); color: #edfdf5; box-shadow: 0 24px 80px rgba(0,0,0,.52); backdrop-filter: blur(14px); }
+.remote-desktop-drop-destination > div { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.remote-desktop-drop-destination > div > span:last-child { min-width: 0; display: grid; gap: 3px; }
+.remote-desktop-drop-destination > div strong,.remote-desktop-drop-destination > div small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-desktop-drop-destination > div small { color: #9bb4a8; }
+.remote-desktop-drop-destination nav { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 9px; }
+.remote-desktop-drop-destination nav button { min-height: 76px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 10px; border: 1px solid rgba(255,255,255,.12); border-radius: 13px; background: rgba(255,255,255,.055); color: #edfdf5; cursor: pointer; }
+.remote-desktop-drop-destination nav button:hover,.remote-desktop-drop-destination nav button:focus-visible { border-color: rgba(57,231,155,.62); background: rgba(57,231,155,.12); outline: 0; }
+.remote-desktop-drop-destination nav button > span { display: grid; gap: 2px; text-align: left; font-weight: 800; }
+.remote-desktop-drop-destination nav button small { color: #9bb4a8; font-size: 9px; font-weight: 500; }
+.remote-desktop-drop-destination > .secondary-button { justify-self: end; color: #d9ece3; border-color: rgba(255,255,255,.13); background: rgba(255,255,255,.04); }
 .remote-desktop-drop-progress { position: absolute; z-index: 35; left: 50%; bottom: 18px; transform: translateX(-50%); width: min(540px,calc(100% - 32px)); display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 11px; padding: 12px 14px; border: 1px solid rgba(57,231,155,.38); border-radius: 14px; background: rgba(8,20,25,.92); color: #39e79b; box-shadow: 0 14px 44px rgba(0,0,0,.36); backdrop-filter: blur(12px); pointer-events: none; }
 .remote-desktop-drop-progress > span { min-width: 0; display: grid; gap: 3px; }
 .remote-desktop-drop-progress strong,.remote-desktop-drop-progress small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -873,7 +884,7 @@ td code { color: #8becc2; font-size: 11px; padding: 4px 7px; border-radius: 5px;
 .settings-heading-badge strong { color: var(--text); font-size: 10px; }
 .settings-heading-badge small { color: var(--muted); font-size: 8px; }
 .settings-feedback, .settings-success { margin: 0 0 18px; padding: 12px 14px; border-radius: 11px; }
-.settings-tabs { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); align-items: stretch; gap: 8px; margin: 0 0 20px; padding: 7px; border: 1px solid var(--line); border-radius: 15px; background: color-mix(in srgb,var(--panel-2) 74%,var(--panel)); box-shadow: 0 8px 24px color-mix(in srgb,var(--shadow) 25%,transparent); }
+.settings-tabs { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); align-items: stretch; gap: 8px; margin: 0 0 20px; padding: 7px; border: 1px solid var(--line); border-radius: 15px; background: color-mix(in srgb,var(--panel-2) 74%,var(--panel)); box-shadow: 0 8px 24px color-mix(in srgb,var(--shadow) 25%,transparent); }
 .settings-tabs button { min-width: 0; min-height: 58px; display: flex; align-items: center; gap: 10px; padding: 8px 11px; color: var(--muted); border: 1px solid transparent; border-radius: 11px; background: transparent; font: inherit; cursor: pointer; text-align: left; transition: color .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease,transform .16s ease; }
 .settings-tab-icon { flex: 0 0 36px; width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px; color: var(--muted); background: color-mix(in srgb,var(--muted) 8%,var(--panel)); transition: color .16s ease,background .16s ease; }
 .settings-tab-copy { min-width: 0; display: grid; gap: 2px; }
@@ -894,6 +905,56 @@ td code { color: #8becc2; font-size: 11px; padding: 4px 7px; border-radius: 5px;
 .settings-card-head h2 { margin: 0; color: var(--text); font-size: 15px; }
 .settings-card-head p { margin: 0; color: var(--muted); font-size: 10px; }
 .settings-card-head .icon-button { margin-left: auto; }
+.connection-security-badge { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 13px; border: 1px solid color-mix(in srgb,var(--green) 28%,var(--line)); border-radius: 999px; color: var(--green); background: color-mix(in srgb,var(--green) 7%,var(--panel)); font-size: 10px; font-weight: 800; }
+.connection-page-grid { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(290px,.6fr); gap: 18px; align-items: start; }
+.connection-builder,.connection-help-card,.printer-control-panel { min-width: 0; border: 1px solid var(--line); border-radius: 17px; background: linear-gradient(145deg,var(--panel),color-mix(in srgb,var(--panel-2) 30%,var(--panel))); box-shadow: 0 12px 36px color-mix(in srgb,var(--shadow) 34%,transparent); }
+.connection-builder { display: grid; gap: 16px; padding: 22px; }
+.connection-builder > header { display: flex; align-items: center; gap: 12px; }
+.connection-builder > header > div { min-width: 0; display: grid; gap: 3px; }
+.connection-builder h2,.connection-help-card h2,.printer-control-panel h2,.printer-intro h2 { margin: 0; color: var(--text); font-size: 15px; }
+.connection-builder p,.printer-control-panel p,.printer-intro p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.connection-builder label,.printer-discovery-toolbar label,.settings-network-form label { min-width: 0; display: grid; gap: 6px; color: var(--muted); font-size: 9px; font-weight: 700; }
+.connection-builder input,.connection-builder select,.printer-discovery-toolbar input,.printer-discovery-toolbar select,.settings-network-form input,.settings-network-form select { width: 100%; height: 40px; min-width: 0; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; outline: 0; color: var(--text); background: var(--input-bg); font: inherit; font-size: 10px; }
+.connection-builder input:focus,.connection-builder select:focus,.printer-discovery-toolbar input:focus,.printer-discovery-toolbar select:focus,.settings-network-form input:focus,.settings-network-form select:focus { border-color: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb,var(--green) 10%,transparent); }
+.connection-builder label small { color: var(--muted); font-size: 8px; font-weight: 500; line-height: 1.4; }
+.connection-protocol-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 5px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel-2); }
+.connection-protocol-tabs button { min-height: 39px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid transparent; border-radius: 8px; color: var(--muted); background: transparent; font: inherit; font-size: 10px; font-weight: 800; cursor: pointer; }
+.connection-protocol-tabs button.active { color: var(--green); border-color: color-mix(in srgb,var(--green) 28%,var(--line)); background: var(--panel); box-shadow: 0 5px 16px color-mix(in srgb,var(--green) 9%,transparent); }
+.connection-address-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) 105px; gap: 10px; align-items: start; }
+.connection-credential-grid { display: grid; grid-template-columns: minmax(0,.8fr) minmax(0,1.2fr); gap: 10px; align-items: start; }
+.connection-start { justify-self: stretch; min-height: 43px; }
+.connection-help-card { display: grid; gap: 14px; padding: 22px; }
+.connection-help-card > .stat-icon { width: 42px; height: 42px; }
+.connection-help-card ol { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; counter-reset: connection-step; }
+.connection-help-card li { position: relative; display: grid; gap: 3px; min-height: 35px; padding-left: 38px; counter-increment: connection-step; }
+.connection-help-card li::before { content: counter(connection-step); position: absolute; left: 0; top: 0; width: 27px; height: 27px; display: grid; place-items: center; border-radius: 9px; color: var(--green); background: color-mix(in srgb,var(--green) 10%,var(--panel)); font-size: 10px; font-weight: 900; }
+.connection-help-card li strong { color: var(--text); font-size: 10px; }
+.connection-help-card li span { color: var(--muted); font-size: 8.5px; line-height: 1.45; }
+.connection-console-download { width: 100%; min-height: 40px; justify-content: center; color: var(--green); text-decoration: none; }
+.connection-help-card .limited-notice { margin: 0; font-size: 8px; line-height: 1.5; }
+.printer-control-panel { display: grid; gap: 18px; padding: 22px; }
+.printer-discovery-toolbar { display: grid; grid-template-columns: minmax(240px,1fr) minmax(210px,.72fr) auto auto; gap: 9px; align-items: end; }
+.printer-discovery-toolbar .secondary-button { min-height: 40px; white-space: nowrap; }
+.printer-results-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.printer-results-grid > article { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); }
+.printer-results-grid > article > header { padding: 15px 16px; border-bottom: 1px solid var(--line); background: color-mix(in srgb,var(--panel-2) 65%,var(--panel)); }
+.printer-results-grid > article > header > div { display: grid; gap: 3px; }
+.printer-device-list { display: grid; }
+.printer-device-list > div { min-width: 0; min-height: 63px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.printer-device-list > div:last-child { border-bottom: 0; }
+.printer-device-list > div > span:not(.printer-device-icon) { min-width: 0; display: grid; gap: 3px; }
+.printer-device-list strong,.printer-device-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.printer-device-list strong { color: var(--text); font-size: 10px; }
+.printer-device-list small { color: var(--muted); font-size: 8px; }
+.printer-device-list b,.printer-device-list button { flex: 0 0 auto; padding: 6px 8px; border: 1px solid color-mix(in srgb,var(--green) 22%,var(--line)); border-radius: 7px; color: var(--green); background: color-mix(in srgb,var(--green) 6%,var(--panel)); font: inherit; font-size: 8px; font-weight: 800; cursor: pointer; white-space: nowrap; }
+.printer-device-list b { cursor: default; }
+.printer-device-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; color: var(--green); background: color-mix(in srgb,var(--green) 9%,var(--panel-2)); }
+.printer-device-icon.network { color: var(--blue); background: color-mix(in srgb,var(--blue) 9%,var(--panel-2)); }
+.printer-empty { grid-template-columns: auto minmax(0,1fr) !important; color: var(--muted); font-size: 9px; }
+.printer-intro { min-height: 180px; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 28px; border: 1px dashed color-mix(in srgb,var(--green) 26%,var(--line)); border-radius: 13px; background: color-mix(in srgb,var(--green) 3%,var(--panel)); text-align: left; }
+.printer-intro > div { max-width: 560px; display: grid; gap: 5px; }
+.settings-network-form { display: grid; grid-template-columns: minmax(220px,1fr) minmax(220px,1fr) auto; gap: 10px; align-items: end; }
+.settings-network-form .primary-button { min-height: 40px; white-space: nowrap; }
 .codex-integration-card { display: grid; gap: 16px; margin-bottom: 18px; padding: 20px; border: 1px solid color-mix(in srgb,var(--green) 26%,var(--line)); border-radius: 16px; background: linear-gradient(140deg,color-mix(in srgb,var(--green) 6%,var(--panel)) 0%,var(--panel) 46%); box-shadow: 0 12px 38px color-mix(in srgb,var(--shadow) 48%,transparent); }
 .codex-integration-head { display: flex; align-items: center; gap: 14px; }
 .codex-integration-head > div:not(.codex-security-badge) { min-width: 0; display: grid; gap: 4px; }
@@ -1317,6 +1378,11 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.terminal-command-library > button:last-child { border-right: 0; }
 	.scenario-stats,.users-stats-wide { grid-template-columns: repeat(3,minmax(0,1fr)); }
 	.codex-integration-grid { grid-template-columns: 1fr; }
+	.connection-page-grid { grid-template-columns: minmax(0,1fr); }
+	.connection-help-card { grid-template-columns: auto minmax(0,1fr); align-items: start; }
+	.connection-help-card > h2,.connection-help-card > ol,.connection-help-card > .notice { grid-column: 2; }
+	.printer-discovery-toolbar { grid-template-columns: minmax(220px,1fr) minmax(200px,1fr); }
+	.printer-discovery-toolbar .secondary-button { width: 100%; }
 }
 
 @media (max-width: 760px) {
@@ -1357,6 +1423,16 @@ html[data-theme="blue"] .status-pill.is-online span { background: #1677e8; }
 	.ai-composer { grid-template-columns: minmax(0,1fr) 48px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
 	.ai-composer .primary-button { min-width: 48px; width: 48px; padding: 0; }
 	.ai-composer .primary-button span { display: none; }
+	.connection-security-badge { display: none; }
+	.connection-builder,.connection-help-card,.printer-control-panel { border-radius: 14px; }
+	.connection-builder,.connection-help-card,.printer-control-panel { padding: 15px; }
+	.connection-help-card { display: grid; grid-template-columns: 1fr; }
+	.connection-help-card > h2,.connection-help-card > ol,.connection-help-card > .notice { grid-column: 1; }
+	.connection-address-grid,.connection-credential-grid,.printer-discovery-toolbar,.printer-results-grid,.settings-network-form { grid-template-columns: 1fr; }
+	.connection-address-grid .connection-port { max-width: none; }
+	.printer-discovery-toolbar .secondary-button,.settings-network-form .primary-button { width: 100%; }
+	.printer-device-list > div { grid-template-columns: auto minmax(0,1fr); }
+	.printer-device-list > div > button,.printer-device-list > div > b { grid-column: 2; justify-self: start; }
 	.modal-backdrop { padding: 0; place-items: stretch; }
 	.modal { width: 100vw; max-height: 100dvh; border: 0; border-radius: 0; }
 	.enrollment-modal { height: 100dvh; max-height: 100dvh; }

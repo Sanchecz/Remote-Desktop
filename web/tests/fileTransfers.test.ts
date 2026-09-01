@@ -73,9 +73,9 @@ describe("resumable browser uploads", () => {
 		assert.throws(() => browserTransferChunkLength(101, 100), /контрольная точка/i);
 	});
 
-	it("covers an exact 10 GiB upload without gaps, overlap or unsafe arithmetic", () => {
+	it("covers an exact 50 GiB upload without gaps, overlap or unsafe arithmetic", () => {
 		const GiB = 1024 * 1024 * 1024;
-		const total = 10 * GiB;
+		const total = 50 * GiB;
 		let offset = 0;
 		let chunks = 0;
 		while (offset < total) {
@@ -88,7 +88,7 @@ describe("resumable browser uploads", () => {
 			chunks += 1;
 		}
 		assert.equal(offset, total);
-		assert.equal(chunks, 161);
+		assert.equal(chunks, 801);
 	});
 
 	it("accepts only the exact committed chunk boundary", () => {

@@ -30,13 +30,11 @@ const integrationTokenPrefix = "rmt_mcp_"
 var safeServiceName = regexp.MustCompile(`^[A-Za-z0-9_. -]{1,128}$`)
 var safePackageID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$`)
 var safeLocalPrincipal = regexp.MustCompile(`^[\p{L}\p{N}._@ -]{1,128}$`)
-var safeLANUsername = regexp.MustCompile(`^[\p{L}\p{N}._@\\ -]{1,128}$`)
 var safeWindowsPrincipal = regexp.MustCompile(`^[\p{L}\p{N}._@\\ -]{1,128}$`)
 var safeDownloadName = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{N}._() -]{0,127}$`)
 var sha256Text = regexp.MustCompile(`^[A-Fa-f0-9]{64}$`)
 var vpnName = regexp.MustCompile(`^[\p{L}\p{N}._ -]{1,64}$`)
 var dnsName = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)$`)
-var lanHostName = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)$`)
 var safePrinterName = regexp.MustCompile(`^[^\x00-\x1f]{1,256}$`)
 var safeWindowsPath = regexp.MustCompile(`(?i)^[a-z]:\\[^<>:"|?*\x00-\x1f]{1,220}$`)
 var safeShareName = regexp.MustCompile(`^[\p{L}\p{N}._ -]{1,64}$`)
@@ -126,17 +124,17 @@ var actionDefinitions = map[string]actionDefinition{
 	"diagnostic.lan_scan": {
 		Type: "diagnostic.lan_scan", Title: "Сканирование локальной сети", Description: "Ищет доступные внутренние узлы и типовые службы через выбранный Agent, не изменяя сеть пользователя.", Risk: "read", TimeoutSeconds: 45,
 	},
-	"network.rdp.open": {
-		Type: "network.rdp.open", Title: "Открыть RDP во внутренней сети", Description: "Запускает штатный клиент RDP в закреплённом Windows-сеансе Agent. Порт не публикуется в интернет, пароль не передаётся RemoteIt.", Risk: "high", TimeoutSeconds: 30, SupportedOS: "windows",
-	},
-	"network.ssh.open": {
-		Type: "network.ssh.open", Title: "Открыть SSH во внутренней сети", Description: "Запускает штатный SSH-клиент в закреплённом Windows-сеансе Agent. Пароль и ключи не передаются RemoteIt.", Risk: "high", TimeoutSeconds: 30, SupportedOS: "windows",
-	},
 	"windows.printers.list": {
 		Type: "windows.printers.list", Title: "Список принтеров", Description: "Показывает установленные принтеры, порты, драйверы, очередь и принтер по умолчанию без изменений.", Risk: "read", TimeoutSeconds: 30, SupportedOS: "windows",
 	},
+	"windows.printers.discover": {
+		Type: "windows.printers.discover", Title: "Найти принтеры в локальной сети", Description: "Проверяет только стандартные службы печати в одной внутренней подсети через выбранный Agent и объединяет результат с установленными принтерами.", Risk: "read", TimeoutSeconds: 60, SupportedOS: "windows",
+	},
 	"windows.printers.open_settings": {
 		Type: "windows.printers.open_settings", Title: "Открыть принтеры и сканеры", Description: "Открывает штатную страницу Windows «Принтеры и сканеры» в закреплённом пользовательском сеансе.", Risk: "high", TimeoutSeconds: 30, SupportedOS: "windows",
+	},
+	"windows.printer.open_web": {
+		Type: "windows.printer.open_web", Title: "Открыть веб-интерфейс принтера", Description: "Открывает локальный HTTP/HTTPS-интерфейс выбранного принтера в закреплённом Windows-сеансе Agent.", Risk: "high", TimeoutSeconds: 30, SupportedOS: "windows",
 	},
 	"windows.printer.set_default": {
 		Type: "windows.printer.set_default", Title: "Назначить принтер по умолчанию", Description: "Назначает один точно выбранный установленный принтер принтером по умолчанию.", Risk: "high", ApprovalRequired: true, TimeoutSeconds: 30, SupportedOS: "windows", Rollback: "Вернуть прежний принтер по умолчанию в параметрах Windows.",
@@ -196,9 +194,9 @@ func normalizeActionParameters(action string, input map[string]any) (map[string]
 			return nil, errors.New("это действие не принимает параметры")
 		}
 		return map[string]any{}, nil
-	case "diagnostic.lan_scan":
+	case "diagnostic.lan_scan", "windows.printers.discover":
 		if len(input) > 1 {
-			return nil, errors.New("для сканирования сети допускается только параметр subnet")
+			return nil, errors.New("для сканирования допускается только параметр subnet")
 		}
 		subnet, _ := input["subnet"].(string)
 		subnet = strings.TrimSpace(subnet)
@@ -214,28 +212,21 @@ func normalizeActionParameters(action string, input map[string]any) (map[string]
 			subnet = network.String()
 		}
 		return map[string]any{"subnet": subnet}, nil
-	case "network.rdp.open", "network.ssh.open":
-		if len(input) != 3 {
-			return nil, errors.New("для подключения требуются только host, port и username")
+	case "windows.printer.open_web":
+		if len(input) != 2 {
+			return nil, errors.New("для веб-интерфейса принтера требуются только host и scheme")
 		}
 		host, _ := input["host"].(string)
-		username, _ := input["username"].(string)
-		host, username = strings.TrimSpace(host), strings.TrimSpace(username)
-		parsedHost := net.ParseIP(host)
-		if parsedHost == nil && !lanHostName.MatchString(host) {
-			return nil, errors.New("узел должен быть внутренним IP-адресом или безопасным DNS-именем")
+		scheme, _ := input["scheme"].(string)
+		host, scheme = strings.TrimSpace(host), strings.ToLower(strings.TrimSpace(scheme))
+		address := net.ParseIP(host)
+		if address == nil || (!address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast()) {
+			return nil, errors.New("веб-интерфейс принтера должен иметь внутренний IP-адрес")
 		}
-		if parsedHost != nil && !parsedHost.IsPrivate() && !parsedHost.IsLoopback() && !parsedHost.IsLinkLocalUnicast() {
-			return nil, errors.New("RDP/SSH через Agent разрешён только к внутренним адресам")
+		if scheme != "http" && scheme != "https" {
+			return nil, errors.New("для принтера разрешены только HTTP и HTTPS")
 		}
-		port, err := numericActionParameter(input["port"])
-		if err != nil || port < 1 || port > 65535 {
-			return nil, errors.New("порт должен быть целым числом от 1 до 65535")
-		}
-		if username != "" && !safeLANUsername.MatchString(username) {
-			return nil, errors.New("имя пользователя содержит недопустимые символы")
-		}
-		return map[string]any{"host": host, "port": port, "username": username}, nil
+		return map[string]any{"host": address.String(), "scheme": scheme}, nil
 	case "windows.printer.set_default":
 		if len(input) != 1 {
 			return nil, errors.New("требуется только точное имя принтера")
@@ -416,12 +407,14 @@ func actionSteps(definition actionDefinition, parameters map[string]any) []strin
 		return []string{"Прочитать состояние служб", "Выделить остановленные и ошибочные службы", "Вернуть результат без перезапуска"}
 	case "diagnostic.lan_scan":
 		return []string{"Определить внутреннюю подсеть выбранного Agent", "Проверить не более 256 адресов с ограничением параллельности", "Вернуть найденные RDP, SSH, файловые, веб- и печатные службы"}
-	case "network.rdp.open", "network.ssh.open":
-		return []string{fmt.Sprintf("Проверить, что %s доступен только как внутренний адрес", parameters["host"]), "Запустить штатный клиент в закреплённом Windows-сеансе", "Не передавать и не сохранять пароль в RemoteIt"}
+	case "windows.printers.discover":
+		return []string{"Определить одну внутреннюю подсеть выбранного Agent", "Проверить только стандартные IPP, JetDirect, LPD и веб-порты принтеров", "Объединить сетевые устройства с уже установленными принтерами"}
 	case "windows.printers.list":
 		return []string{"Прочитать установленные принтеры и порты", "Определить состояние очередей и принтер по умолчанию", "Вернуть структурированный список без изменений"}
 	case "windows.printers.open_settings":
 		return []string{"Найти закреплённый Windows-сеанс", "Открыть штатную страницу принтеров и сканеров", "Оставить ввод реквизитов внутри Windows"}
+	case "windows.printer.open_web":
+		return []string{fmt.Sprintf("Повторно проверить внутренний адрес принтера %s", parameters["host"]), "Открыть его HTTP/HTTPS-интерфейс штатным браузером закреплённого Windows-сеанса"}
 	case "windows.printer.set_default":
 		return []string{fmt.Sprintf("Проверить установленный принтер %s", parameters["name"]), "Назначить его принтером по умолчанию", "Повторно прочитать итоговое состояние"}
 	case "windows.scan_folder.configure":
@@ -431,7 +424,7 @@ func actionSteps(definition actionDefinition, parameters map[string]any) []strin
 	case "process.terminate":
 		return []string{fmt.Sprintf("Проверить процесс PID %v", parameters["pid"]), "Завершить только этот PID", "Зафиксировать код результата"}
 	case "file.download":
-		return []string{fmt.Sprintf("Скачать %s по HTTPS в изолированный staging-каталог", parameters["fileName"]), "Ограничить сценарий размером 2 ГБ; для файлов до 10 ГБ использовать канал передачи RemoteIt", "Сверить SHA-256 до публикации файла и не запускать его"}
+		return []string{fmt.Sprintf("Скачать %s по HTTPS в изолированный staging-каталог", parameters["fileName"]), "Ограничить сценарий размером 2 ГБ; для файлов до 50 ГБ использовать потоковый канал передачи RemoteIt", "Сверить SHA-256 до публикации файла и не запускать его"}
 	case "package.install":
 		return []string{fmt.Sprintf("Найти точный пакет %s в системном менеджере", parameters["packageId"]), "Установить без произвольной командной строки", "Вернуть код и журнал менеджера пакетов"}
 	case "local.group.add_member":

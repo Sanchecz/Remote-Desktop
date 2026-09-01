@@ -169,7 +169,7 @@ func decodeAndNormalizeActionParameters(action string, raw json.RawMessage) (map
 			return nil, errors.New("диагностическое действие не принимает параметры")
 		}
 		return map[string]any{}, nil
-	case "diagnostic.lan_scan":
+	case "diagnostic.lan_scan", "windows.printers.discover":
 		if len(input) > 1 {
 			return nil, errors.New("параметры сканирования локальной сети недопустимы")
 		}
@@ -187,6 +187,18 @@ func decodeAndNormalizeActionParameters(action string, raw json.RawMessage) (map
 			subnet = network.String()
 		}
 		return map[string]any{"subnet": subnet}, nil
+	case "windows.printer.open_web":
+		if runtime.GOOS != "windows" || len(input) != 2 {
+			return nil, errors.New("параметры веб-интерфейса принтера недопустимы")
+		}
+		host, _ := input["host"].(string)
+		scheme, _ := input["scheme"].(string)
+		host, scheme = strings.TrimSpace(host), strings.ToLower(strings.TrimSpace(scheme))
+		address := net.ParseIP(host)
+		if address == nil || (!address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast()) || !agentOneOf(scheme, "http", "https") {
+			return nil, errors.New("адрес веб-интерфейса принтера не прошёл локальную проверку Agent")
+		}
+		return map[string]any{"host": address.String(), "scheme": scheme}, nil
 	case "network.rdp.open", "network.ssh.open":
 		if runtime.GOOS != "windows" || len(input) != 3 {
 			return nil, errors.New("параметры внутреннего подключения недопустимы")
@@ -390,6 +402,9 @@ func executeTypedAction(ctx context.Context, cfg *config, action string, paramet
 	case "diagnostic.lan_scan":
 		subnet, _ := parameters["subnet"].(string)
 		return executeLANScan(ctx, subnet)
+	case "windows.printers.discover":
+		subnet, _ := parameters["subnet"].(string)
+		return executeWindowsPrinterDiscover(ctx, subnet)
 	case "network.rdp.open", "network.ssh.open":
 		host, _ := parameters["host"].(string)
 		username, _ := parameters["username"].(string)
@@ -400,6 +415,10 @@ func executeTypedAction(ctx context.Context, cfg *config, action string, paramet
 		return executeWindowsPrinterList(ctx)
 	case "windows.printers.open_settings":
 		return executeWindowsPrinterSettings(ctx)
+	case "windows.printer.open_web":
+		host, _ := parameters["host"].(string)
+		scheme, _ := parameters["scheme"].(string)
+		return executeWindowsPrinterWeb(ctx, host, scheme)
 	case "windows.printer.set_default":
 		name, _ := parameters["name"].(string)
 		return executeWindowsPrinterSetDefault(ctx, name)

@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-func remoteUserDesktopDirectory(cfg *config) (string, error) {
+func remoteUserKnownDirectory(cfg *config, valueName string) (string, error) {
 	if cfg == nil {
 		return "", errors.New("не задан пользователь удалённого рабочего стола")
 	}
@@ -30,22 +30,31 @@ func remoteUserDesktopDirectory(cfg *config) (string, error) {
 		return "", errors.New("не удалось определить профиль закреплённого Windows-пользователя")
 	}
 	profile = expandWindowsProfilePath(profile, profile)
-	desktop := filepath.Join(profile, "Desktop")
+	defaults := map[string]string{"Desktop": "Desktop", "Downloads": "Downloads", "Personal": "Documents"}
+	folderName, ok := defaults[valueName]
+	if !ok {
+		return "", errors.New("неподдерживаемая папка закреплённого пользователя")
+	}
+	destination := filepath.Join(profile, folderName)
 	if shellKey, shellErr := registry.OpenKey(registry.USERS, sid+`\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders`, registry.QUERY_VALUE); shellErr == nil {
-		if configured, _, valueErr := shellKey.GetStringValue("Desktop"); valueErr == nil && strings.TrimSpace(configured) != "" {
-			desktop = expandWindowsProfilePath(configured, profile)
+		if configured, _, valueErr := shellKey.GetStringValue(valueName); valueErr == nil && strings.TrimSpace(configured) != "" {
+			destination = expandWindowsProfilePath(configured, profile)
 		}
 		shellKey.Close()
 	}
-	desktop = filepath.Clean(desktop)
-	if !filepath.IsAbs(desktop) {
-		return "", errors.New("Windows вернул некорректный путь рабочего стола")
+	destination = filepath.Clean(destination)
+	if !filepath.IsAbs(destination) {
+		return "", errors.New("Windows вернул некорректный путь пользовательской папки")
 	}
-	info, statErr := os.Stat(desktop)
+	info, statErr := os.Stat(destination)
 	if statErr != nil || !info.IsDir() {
-		return "", errors.New("рабочий стол закреплённого пользователя недоступен")
+		return "", errors.New("папка закреплённого пользователя недоступна")
 	}
-	return desktop, nil
+	return destination, nil
+}
+
+func remoteUserDesktopDirectory(cfg *config) (string, error) {
+	return remoteUserKnownDirectory(cfg, "Desktop")
 }
 
 func expandWindowsProfilePath(value, profile string) string {

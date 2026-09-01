@@ -119,6 +119,10 @@ public final class ScreenShareService extends Service {
 
     private void ensureCaptureGeometry() {
         if (!RUNNING.get()) return;
+        if (!RemoteControlAccessibilityService.isEnabled(this)) {
+            stopSelfSafely();
+            return;
+        }
         int[] geometry = desiredGeometry();
         if (geometry[0] != captureWidth || geometry[1] != captureHeight) imageHandler.post(this::createCaptureSurface);
     }

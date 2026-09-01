@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="agent_scroll" type="id" />
+    <item name="enrollment_server" type="id" />
+    <item name="enrollment_token" type="id" />
+    <item name="enrollment_name" type="id" />
+</resources>

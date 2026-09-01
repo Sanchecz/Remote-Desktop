@@ -18,13 +18,15 @@ import (
 )
 
 const (
-	maxLargeTransfer              int64 = 10 * 1024 * 1024 * 1024
-	largeTransferChunk            int64 = 64 * 1024 * 1024
-	transferSourceWaitTimeout           = 5 * time.Minute
-	transferIdleTimeout                 = 45 * time.Second
-	transferDownloadAttempts            = 5
-	transferCompleteAttempts            = 6
-	remoteUserDesktopTransferPath       = "::remoteit-user-desktop::"
+	maxLargeTransfer                int64 = 50 * 1024 * 1024 * 1024
+	largeTransferChunk              int64 = 64 * 1024 * 1024
+	transferSourceWaitTimeout             = 5 * time.Minute
+	transferIdleTimeout                   = 45 * time.Second
+	transferDownloadAttempts              = 5
+	transferCompleteAttempts              = 6
+	remoteUserDesktopTransferPath         = "::remoteit-user-desktop::"
+	remoteUserDownloadsTransferPath       = "::remoteit-user-downloads::"
+	remoteUserDocumentsTransferPath       = "::remoteit-user-documents::"
 )
 
 type largeFileTransfer struct {
@@ -46,7 +48,7 @@ func (reader transferActivityReader) Read(buffer []byte) (int, error) {
 }
 
 // newTransferIdleWatchdog cancels only a stalled request, not a merely slow
-// transfer. Every successful body read refreshes the deadline, so a 10 GiB
+// transfer. Every successful body read refreshes the deadline, so a 50 GiB
 // file can run for hours on a slow link while a dead Wi-Fi/VPN TCP flow is
 // released quickly enough for the checkpoint retry to take over.
 func newTransferIdleWatchdog(parent context.Context, idle time.Duration) (context.Context, context.CancelFunc, func()) {
@@ -156,7 +158,7 @@ func executeLargeFileTransfer(ctx context.Context, client *http.Client, cfg *con
 		return errors.New("сервер вернул некорректный идентификатор передачи")
 	}
 	if transfer.Size < 0 || transfer.Size > maxLargeTransfer {
-		return errors.New("размер передачи превышает 10 ГБ")
+		return errors.New("размер передачи превышает 50 ГБ")
 	}
 	switch transfer.Direction {
 	case "to_device":
@@ -306,7 +308,13 @@ func receiveLargeFile(ctx context.Context, client *http.Client, cfg *config, tra
 func resolveLargeTransferDestination(cfg *config, raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == remoteUserDesktopTransferPath {
-		return remoteUserDesktopDirectory(cfg)
+		return remoteUserKnownDirectory(cfg, "Desktop")
+	}
+	if raw == remoteUserDownloadsTransferPath {
+		return remoteUserKnownDirectory(cfg, "Downloads")
+	}
+	if raw == remoteUserDocumentsTransferPath {
+		return remoteUserKnownDirectory(cfg, "Personal")
 	}
 	return filepath.Clean(raw), nil
 }
@@ -330,7 +338,7 @@ func sendLargeFile(ctx context.Context, client *http.Client, cfg *config, transf
 		return errors.New("передавать можно только обычные файлы")
 	}
 	if info.Size() != transfer.Size || info.Size() > maxLargeTransfer {
-		return errors.New("размер файла изменился или превышает 10 ГБ")
+		return errors.New("размер файла изменился или превышает 50 ГБ")
 	}
 	offset := transfer.Received
 	if offset < 0 || offset > transfer.Size {

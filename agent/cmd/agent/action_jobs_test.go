@@ -135,6 +135,18 @@ func TestAgentLANAndPrinterActionValidation(t *testing.T) {
 		if _, err := decodeAndNormalizeActionParameters("network.rdp.open", json.RawMessage(`{"host":"8.8.8.8","port":3389,"username":"admin"}`)); err == nil {
 			t.Fatal("public RDP target was accepted by Agent")
 		}
+		if _, err := decodeAndNormalizeActionParameters("windows.printers.discover", json.RawMessage(`{"subnet":"172.16.2.0/24"}`)); err != nil {
+			t.Fatalf("valid printer discovery rejected: %v", err)
+		}
+		if _, err := decodeAndNormalizeActionParameters("windows.printers.discover", json.RawMessage(`{"subnet":"172.16.0.0/16"}`)); err == nil {
+			t.Fatal("printer discovery accepted a range larger than /24")
+		}
+		if _, err := decodeAndNormalizeActionParameters("windows.printer.open_web", json.RawMessage(`{"host":"192.168.1.40","scheme":"http"}`)); err != nil {
+			t.Fatalf("valid printer web target rejected: %v", err)
+		}
+		if _, err := decodeAndNormalizeActionParameters("windows.printer.open_web", json.RawMessage(`{"host":"1.1.1.1","scheme":"https"}`)); err == nil {
+			t.Fatal("public printer web target accepted")
+		}
 		if _, err := decodeAndNormalizeActionParameters("windows.scan_folder.configure", json.RawMessage(`{"path":"C:\\RemoteIt Scans","shareName":"RemoteItScans","principal":"Users"}`)); err != nil {
 			t.Fatalf("valid scan folder rejected: %v", err)
 		}

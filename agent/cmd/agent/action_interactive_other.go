@@ -12,8 +12,16 @@ func executeWindowsPrinterList(context.Context) remoteJobResult {
 	return failedAction("управление принтерами поддерживается только Windows Agent")
 }
 
+func executeWindowsPrinterDiscover(context.Context, string) remoteJobResult {
+	return failedAction("поиск принтеров поддерживается только Windows Agent")
+}
+
 func executeWindowsPrinterSettings(context.Context) remoteJobResult {
 	return failedAction("управление принтерами поддерживается только Windows Agent")
+}
+
+func executeWindowsPrinterWeb(context.Context, string, string) remoteJobResult {
+	return failedAction("веб-интерфейс принтера поддерживается только Windows Agent")
 }
 
 func executeWindowsPrinterSetDefault(context.Context, string) remoteJobResult {

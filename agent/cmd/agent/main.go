@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	version       = "1.0.38"
+	version       = "1.0.39"
 	defaultServer = "https://supportgenesis.ru"
 )
 
@@ -573,6 +573,9 @@ func (buffer *cappedBuffer) String() string {
 }
 
 func executeRemoteJob(parent context.Context, cfg *config, job *remoteJob) remoteJobResult {
+	if job.Type == "tunnel" {
+		return startNetworkTunnel(parent, cfg, job)
+	}
 	timeout := job.TimeoutSeconds
 	maximumTimeout := 60
 	if job.Type == "action" {

@@ -16,14 +16,14 @@ if (releaseTaskRequested && !releaseSigningConfigured) {
 
 android {
     namespace = "ru.supportgenesis.remoteit.agent"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "ru.supportgenesis.remoteit.agent"
         minSdk = 26
-        targetSdk = 36
-        versionCode = 13
-        versionName = "1.0.38"
+        targetSdk = 37
+        versionCode = 14
+        versionName = "1.0.39"
     }
 
     signingConfigs {
@@ -57,4 +57,8 @@ android {
 
 tasks.withType<JavaCompile>().configureEach {
     options.compilerArgs.add("-Xlint:deprecation")
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
 }

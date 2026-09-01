@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	maxTransferSize   int64 = 10 * 1024 * 1024 * 1024
+	maxTransferSize   int64 = 50 * 1024 * 1024 * 1024
 	transferChunkSize int64 = 64 * 1024 * 1024
-	maxStagedSize     int64 = 20 * 1024 * 1024 * 1024
+	maxStagedSize     int64 = 50 * 1024 * 1024 * 1024
 )
 
 type fileTransfer struct {
@@ -157,7 +157,7 @@ func (s *server) createFileTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Size < 0 || in.Size > maxTransferSize {
-		writeError(w, http.StatusBadRequest, "Размер файла не должен превышать 10 ГБ")
+		writeError(w, http.StatusBadRequest, "Размер файла не должен превышать 50 ГБ")
 		return
 	}
 	var online bool
