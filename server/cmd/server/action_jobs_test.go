@@ -153,6 +153,9 @@ func TestNormalizeLANPrinterAndScanActions(t *testing.T) {
 	if err != nil || connection["port"] != int64(3389) {
 		t.Fatalf("valid RDP action rejected: %#v, %v", connection, err)
 	}
+	if _, err := normalizeActionParameters("network.rdp.open", map[string]any{"host": "8.8.8.8", "port": 3389, "username": "admin"}); err == nil {
+		t.Fatal("public RDP target was accepted")
+	}
 	if _, err := normalizeActionParameters("network.ssh.open", map[string]any{"host": "server;whoami", "port": 22, "username": "admin"}); err == nil {
 		t.Fatal("unsafe SSH host accepted")
 	}

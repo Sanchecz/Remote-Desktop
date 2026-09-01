@@ -194,7 +194,11 @@ func decodeAndNormalizeActionParameters(action string, raw json.RawMessage) (map
 		host, _ := input["host"].(string)
 		username, _ := input["username"].(string)
 		host, username = strings.TrimSpace(host), strings.TrimSpace(username)
-		if net.ParseIP(host) == nil && !safeAgentLANHost.MatchString(host) {
+		parsedHost := net.ParseIP(host)
+		if parsedHost == nil && !safeAgentLANHost.MatchString(host) {
+			return nil, errors.New("адрес внутреннего узла недопустим")
+		}
+		if parsedHost != nil && !parsedHost.IsPrivate() && !parsedHost.IsLoopback() && !parsedHost.IsLinkLocalUnicast() {
 			return nil, errors.New("адрес внутреннего узла недопустим")
 		}
 		port, err := agentIntegerParameter(input["port"])

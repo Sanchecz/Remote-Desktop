@@ -221,8 +221,12 @@ func normalizeActionParameters(action string, input map[string]any) (map[string]
 		host, _ := input["host"].(string)
 		username, _ := input["username"].(string)
 		host, username = strings.TrimSpace(host), strings.TrimSpace(username)
-		if net.ParseIP(host) == nil && !lanHostName.MatchString(host) {
+		parsedHost := net.ParseIP(host)
+		if parsedHost == nil && !lanHostName.MatchString(host) {
 			return nil, errors.New("узел должен быть внутренним IP-адресом или безопасным DNS-именем")
+		}
+		if parsedHost != nil && !parsedHost.IsPrivate() && !parsedHost.IsLoopback() && !parsedHost.IsLinkLocalUnicast() {
+			return nil, errors.New("RDP/SSH через Agent разрешён только к внутренним адресам")
 		}
 		port, err := numericActionParameter(input["port"])
 		if err != nil || port < 1 || port > 65535 {

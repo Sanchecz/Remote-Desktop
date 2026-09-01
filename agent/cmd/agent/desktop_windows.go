@@ -410,7 +410,14 @@ func runDesktopInputWorker(ctx context.Context, tasks <-chan desktopInputTask, r
 				// Windows is already showing Winlogon — exactly where SAS is needed.
 				if event.Type == "sas" {
 					sasErr := executeDesktopInput(event, task.capture)
-					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: "sas", err: sasErr})
+					sasValue := ""
+					if sasErr == nil {
+						var windowsSessionID uint32
+						if windows.ProcessIdToSessionId(uint32(os.Getpid()), &windowsSessionID) == nil {
+							sasValue = fmt.Sprintf("session:%d", windowsSessionID)
+						}
+					}
+					result.acknowledgedResults = append(result.acknowledgedResults, desktopAcknowledgedInputResult{inputID: event.ID, inputType: "sas", value: sasValue, err: sasErr})
 					if result.err == nil && sasErr != nil {
 						result.err = sasErr
 					}

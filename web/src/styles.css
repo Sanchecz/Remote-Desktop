@@ -76,7 +76,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--green); out
 .theme-switcher button.active { color: var(--text); background: var(--panel); box-shadow: 0 2px 8px var(--shadow); }
 .theme-switcher-compact button { width: 29px; padding: 0; justify-content: center; }
 
-.login-page { width: 100%; height: 100dvh; min-height: 100dvh; display: grid; place-items: center; padding: 24px; position: relative; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; background: radial-gradient(circle at 50% -20%, #15232a 0%, var(--bg) 38%); }
+.login-page { width: 100%; min-height: 100dvh; display: grid; place-items: center; padding: 24px; position: relative; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; background: radial-gradient(circle at 50% -20%, #15232a 0%, var(--bg) 38%); }
 .login-page:before { content: ""; position: absolute; inset: 0; opacity: .19; background-image: linear-gradient(#26303e 1px, transparent 1px), linear-gradient(90deg,#26303e 1px,transparent 1px); background-size: 54px 54px; mask-image: linear-gradient(to bottom,black,transparent 78%); }
 .login-glow { position: absolute; border-radius: 50%; filter: blur(100px); opacity: .16; }
 .login-glow-one { width: 420px; height: 420px; background: #24d996; top: -170px; right: 5%; }

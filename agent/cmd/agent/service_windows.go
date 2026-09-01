@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -26,6 +27,8 @@ import (
 )
 
 const windowsServiceName = "GenesisItAgent"
+
+const windowsUpdateRollbackSuffix = ".rollback"
 
 type serviceHandler struct {
 	run func(context.Context) error
@@ -581,8 +584,9 @@ func cleanupPlatformCommand() error {
 		cleanupError = "папка установленного Agent осталась на компьютере"
 	}
 	_ = reportWindowsCleanup(payload, cleanupSuccess, cleanupError)
-	self, _ := os.Executable()
-	scheduleWindowsDelete(self)
+	if self, executableErr := os.Executable(); executableErr == nil && strings.TrimSpace(self) != "" {
+		scheduleWindowsDelete(self)
+	}
 	scheduleWindowsDelete(payloadPath)
 	return nil
 }
@@ -624,11 +628,44 @@ func updatePlatformCommand() error {
 	if err := waitForWindowsProcessExit(uint32(*waitPID), 60*time.Second); err != nil {
 		return err
 	}
+	if self, executableErr := os.Executable(); executableErr == nil && strings.TrimSpace(self) != "" {
+		defer scheduleWindowsDelete(self)
+	}
+	rollbackPath, err := prepareWindowsUpdateRollback(*target)
+	if err != nil {
+		return fmt.Errorf("подготовка отката обновления: %w", err)
+	}
+	rollbackRequired := rollbackPath != ""
+	defer func() {
+		if !rollbackRequired && rollbackPath != "" {
+			_ = os.Remove(rollbackPath)
+		}
+	}()
 	requestedUserInstall = *userMode
 	if err := installPlatform(); err != nil {
-		return fmt.Errorf("установка обновления: %w", err)
+		installErr := fmt.Errorf("установка обновления: %w", err)
+		if rollbackPath == "" {
+			return installErr
+		}
+		if rollbackErr := restoreWindowsUpdate(*target, rollbackPath, *userMode); rollbackErr != nil {
+			return fmt.Errorf("%v; автоматический откат также не выполнен: %w", installErr, rollbackErr)
+		}
+		rollbackRequired = false
+		appendPublicAgentEvent("warning", "update", "Обновление отменено", "Предыдущая рабочая версия Agent восстановлена автоматически")
+		return fmt.Errorf("%v; предыдущая версия восстановлена", installErr)
 	}
-	self, _ := os.Executable()
+	if err := waitForWindowsUpdateHealth(*target, *expectedVersion, *userMode, 30*time.Second); err != nil {
+		if rollbackPath == "" {
+			return fmt.Errorf("проверка новой версии после установки: %w", err)
+		}
+		if rollbackErr := restoreWindowsUpdate(*target, rollbackPath, *userMode); rollbackErr != nil {
+			return fmt.Errorf("проверка новой версии после установки: %v; автоматический откат также не выполнен: %w", err, rollbackErr)
+		}
+		rollbackRequired = false
+		appendPublicAgentEvent("warning", "update", "Обновление отменено", "Новая версия не прошла локальную проверку; предыдущая версия восстановлена автоматически")
+		return fmt.Errorf("проверка новой версии после установки: %v; предыдущая версия восстановлена", err)
+	}
+	rollbackRequired = false
 	if !*userMode {
 		// The service is upgraded in session 0. Restart every interactive companion
 		// so the tray UI and Remote Control engine switch to this version immediately.
@@ -637,8 +674,169 @@ func updatePlatformCommand() error {
 		}
 		log.Printf("RemoteIt Agent обновлён до %s; интерактивный Agent будет перезапущен службой", version)
 	}
-	scheduleWindowsDelete(self)
 	return nil
+}
+
+func prepareWindowsUpdateRollback(target string) (string, error) {
+	info, err := os.Stat(target)
+	if err != nil {
+		return "", fmt.Errorf("установленная версия Agent недоступна: %w", err)
+	}
+	if info.IsDir() {
+		return "", errors.New("путь установленной версии Agent указывает на каталог")
+	}
+	rollbackPath := target + windowsUpdateRollbackSuffix
+	_ = os.Remove(rollbackPath)
+	if err := copyFileExact(target, rollbackPath); err != nil {
+		return "", err
+	}
+	if err := verifyIdenticalFiles(target, rollbackPath); err != nil {
+		_ = os.Remove(rollbackPath)
+		return "", err
+	}
+	return rollbackPath, nil
+}
+
+func waitForWindowsUpdateHealth(target, expectedVersion string, userMode bool, timeout time.Duration) error {
+	output, err := exec.Command(target, "version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("новый EXE не запускается: %w (%s)", err, strings.TrimSpace(string(output)))
+	}
+	if strings.TrimSpace(string(output)) != strings.TrimSpace(expectedVersion) {
+		return fmt.Errorf("новый EXE сообщил версию %q вместо %q", strings.TrimSpace(string(output)), expectedVersion)
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status, statusErr := loadRuntimeStatus()
+		runtimeHealthy := statusErr == nil && status.Running && status.PID > 0 && windowsProcessMatchesPath(uint32(status.PID), target)
+		if userMode {
+			if runtimeHealthy {
+				return nil
+			}
+		} else if runtimeHealthy && windowsServiceRunning() {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if userMode {
+		return errors.New("пользовательский Agent не подтвердил запуск за 30 секунд")
+	}
+	return errors.New("служба RemoteIt не перешла в состояние Running за 30 секунд")
+}
+
+func windowsProcessMatchesPath(processID uint32, target string) bool {
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, processID)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(process)
+	buffer := make([]uint16, 32768)
+	size := uint32(len(buffer))
+	if windows.QueryFullProcessImageName(process, 0, &buffer[0], &size) != nil {
+		return false
+	}
+	return samePath(windows.UTF16ToString(buffer[:size]), target)
+}
+
+func windowsServiceRunning() bool {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return false
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(windowsServiceName)
+	if err != nil {
+		return false
+	}
+	defer service.Close()
+	status, err := service.Query()
+	return err == nil && status.State == svc.Running
+}
+
+func restoreWindowsUpdate(target, rollbackPath string, userMode bool) error {
+	if err := verifyIdenticalFileSource(rollbackPath); err != nil {
+		return err
+	}
+	if userMode {
+		if err := stopWindowsUserProcesses(target); err != nil {
+			return err
+		}
+		if err := copyFileExact(rollbackPath, target); err != nil {
+			return fmt.Errorf("не удалось вернуть прежний EXE: %w", err)
+		}
+		for _, argument := range []string{"run", "tray"} {
+			command := exec.Command(target, argument)
+			command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+			if err := command.Start(); err != nil {
+				return fmt.Errorf("прежний пользовательский Agent восстановлен, но не запущен: %w", err)
+			}
+			_ = command.Process.Release()
+		}
+		return nil
+	}
+	manager, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("не удалось открыть диспетчер служб для отката: %w", err)
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(windowsServiceName)
+	if err != nil {
+		return fmt.Errorf("не удалось открыть службу для отката: %w", err)
+	}
+	defer service.Close()
+	if err := stopWindowsService(service); err != nil {
+		return err
+	}
+	stopWindowsProcessesInDirs([]string{filepath.Dir(target)})
+	if err := copyFileExact(rollbackPath, target); err != nil {
+		return fmt.Errorf("не удалось вернуть прежний EXE: %w", err)
+	}
+	if err := service.Start(); err != nil {
+		return fmt.Errorf("прежний EXE восстановлен, но служба не запустилась: %w", err)
+	}
+	return nil
+}
+
+func verifyIdenticalFileSource(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("резервная копия Agent недоступна: %w", err)
+	}
+	if info.IsDir() || info.Size() <= 0 {
+		return errors.New("резервная копия Agent некорректна")
+	}
+	return nil
+}
+
+func verifyIdenticalFiles(first, second string) error {
+	firstHash, firstSize, err := fileSHA256(first)
+	if err != nil {
+		return err
+	}
+	secondHash, secondSize, err := fileSHA256(second)
+	if err != nil {
+		return err
+	}
+	if firstSize != secondSize || firstHash != secondHash {
+		return errors.New("резервная копия Agent не прошла проверку целостности")
+	}
+	return nil
+}
+
+func fileSHA256(path string) ([sha256.Size]byte, int64, error) {
+	var sum [sha256.Size]byte
+	file, err := os.Open(path)
+	if err != nil {
+		return sum, 0, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	size, err := io.Copy(hash, file)
+	if err != nil {
+		return sum, 0, err
+	}
+	copy(sum[:], hash.Sum(nil))
+	return sum, size, nil
 }
 
 func allowedWindowsAgentTarget(target string, userMode bool) bool {
@@ -796,6 +994,14 @@ func containsArgument(expected string) bool {
 }
 
 func copyFile(source, target string) error {
+	return copyFileAtomic(source, target, true)
+}
+
+func copyFileExact(source, target string) error {
+	return copyFileAtomic(source, target, false)
+}
+
+func copyFileAtomic(source, target string, stripBoundInstaller bool) error {
 	in, err := os.Open(source)
 	if err != nil {
 		return err
@@ -807,12 +1013,17 @@ func copyFile(source, target string) error {
 	if err != nil {
 		return err
 	}
-	if baseSize, bound := boundExecutableBaseSize(source); bound {
+	if baseSize, bound := boundExecutableBaseSize(source); stripBoundInstaller && bound {
 		_, err = io.CopyN(out, in, baseSize)
 	} else {
 		_, err = io.Copy(out, in)
 	}
 	if err != nil {
+		out.Close()
+		_ = os.Remove(temporary)
+		return err
+	}
+	if err := out.Sync(); err != nil {
 		out.Close()
 		_ = os.Remove(temporary)
 		return err

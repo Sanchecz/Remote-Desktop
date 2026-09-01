@@ -132,6 +132,9 @@ func TestAgentLANAndPrinterActionValidation(t *testing.T) {
 		if _, err := decodeAndNormalizeActionParameters("network.rdp.open", json.RawMessage(`{"host":"192.168.1.10","port":3389,"username":"admin"}`)); err != nil {
 			t.Fatalf("valid RDP action rejected: %v", err)
 		}
+		if _, err := decodeAndNormalizeActionParameters("network.rdp.open", json.RawMessage(`{"host":"8.8.8.8","port":3389,"username":"admin"}`)); err == nil {
+			t.Fatal("public RDP target was accepted by Agent")
+		}
 		if _, err := decodeAndNormalizeActionParameters("windows.scan_folder.configure", json.RawMessage(`{"path":"C:\\RemoteIt Scans","shareName":"RemoteItScans","principal":"Users"}`)); err != nil {
 			t.Fatalf("valid scan folder rejected: %v", err)
 		}

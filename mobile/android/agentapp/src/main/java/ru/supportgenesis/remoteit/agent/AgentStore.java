@@ -14,7 +14,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 
 final class AgentStore {
-    static final String VERSION = "1.0.37";
+    static final String VERSION = "1.0.38";
     private static final String PREFS = "remoteit_agent";
 
     final String serverUrl;

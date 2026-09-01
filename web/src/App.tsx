@@ -231,7 +231,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.37";
+const LATEST_AGENT_VERSION = "1.0.38";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1126,6 +1126,7 @@ type DesktopSession = {
 		id: number;
 		type: string;
 		error: string;
+		value?: string;
 		at: string;
 	} | null;
 	clipboardAck?: {
@@ -1951,7 +1952,8 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 					setError(acknowledgement.error);
 				} else {
 					setSASFeedbackError(false);
-					setSASFeedback("Ctrl+Alt+Delete выполнен системной службой Windows");
+					const windowsSession = acknowledgement.value?.match(/^session:(\d+)$/)?.[1];
+					setSASFeedback(`Ctrl+Alt+Delete передан защищённому экрану Windows${windowsSession ? ` · сеанс ${windowsSession}` : ""}`);
 					sasFeedbackTimer.current = window.setTimeout(() => setSASFeedback(""), 4_500);
 				}
 			}
@@ -3450,8 +3452,9 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	async function sendCtrlAltDelete() {
 		// Ctrl+Alt+Delete is a Windows Secure Attention Sequence. It cannot be
 		// synthesized with ordinary key packets. Use the acknowledged HTTP path for
-		// this privileged event so the UI reports success only after the Windows
-		// service, not merely the web server, has executed SendSAS.
+		// this privileged event so the UI reports dispatch only after the Windows
+		// service, not merely the web server, has called SendSAS. Windows exposes no
+		// return value that could prove the protected screen was visibly redrawn.
 		releaseRemoteModifiers();
 		setError("");
 		window.clearTimeout(sasFeedbackTimer.current);
