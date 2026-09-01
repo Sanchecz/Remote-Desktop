@@ -71,9 +71,9 @@ ENV PATH=${PATH}:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT
 # New command-line tools publish API 37 as platforms/android-37.0 and use the
 # Android CLI.  The old sdkmanager alias no longer exposes this platform even
 # though it is present in Google's repository.
-RUN yes | android sdk install \
+RUN yes | android --no-metrics sdk install \
     "platforms/android-37.0" "build-tools/36.0.0" "platform-tools" && \
-    yes | sdkmanager --licenses >/dev/null && \
+    yes | timeout 180 sdkmanager --licenses >/dev/null && \
     test -s "${ANDROID_SDK_ROOT}/licenses/android-sdk-license"
 RUN wget -q https://services.gradle.org/distributions/gradle-9.5.0-bin.zip -O /tmp/gradle.zip && \
     wget -q https://services.gradle.org/distributions/gradle-9.5.0-bin.zip.sha256 -O /tmp/gradle.sha256 && \
