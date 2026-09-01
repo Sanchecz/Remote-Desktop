@@ -1,6 +1,18 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestNetworkTunnelDeviceOnlineQueryMatchesDeviceSchema(t *testing.T) {
+	if !strings.Contains(networkTunnelDeviceOnlineQuery, "NOT pending_removal") {
+		t.Fatal("network tunnel availability must reject devices pending removal")
+	}
+	if strings.Contains(networkTunnelDeviceOnlineQuery, "pending_removal_at") {
+		t.Fatal("network tunnel availability references a column that is not part of the devices schema")
+	}
+}
 
 func TestNetworkTunnelPrivateIPv4(t *testing.T) {
 	for _, input := range []string{"10.0.0.25", "172.16.4.3", "192.168.1.105"} {

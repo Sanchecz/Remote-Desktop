@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	networkTunnelLifetime     = 2 * time.Hour
-	networkTunnelPerUserLimit = 8
+	networkTunnelLifetime          = 2 * time.Hour
+	networkTunnelPerUserLimit      = 8
+	networkTunnelDeviceOnlineQuery = `SELECT last_seen>now()-interval '75 seconds' AND NOT pending_removal FROM devices WHERE id=$1`
 )
 
 type networkTunnelRuntime struct {
@@ -91,7 +92,7 @@ func (s *server) createNetworkTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var online bool
-	if err := s.db.QueryRow(r.Context(), `SELECT last_seen>now()-interval '75 seconds' AND pending_removal_at IS NULL FROM devices WHERE id=$1`, input.DeviceID).Scan(&online); errors.Is(err, pgx.ErrNoRows) {
+	if err := s.db.QueryRow(r.Context(), networkTunnelDeviceOnlineQuery, input.DeviceID).Scan(&online); errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "Agent не найден")
 		return
 	} else if err != nil {
