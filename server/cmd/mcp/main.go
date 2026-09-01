@@ -19,7 +19,7 @@ import (
 
 const (
 	bridgeName            = "remoteit"
-	bridgeVersion         = "1.0.35"
+	bridgeVersion         = "1.0.36"
 	defaultProtocol       = "2025-06-18"
 	defaultRemoteItServer = "https://supportgenesis.ru"
 )
@@ -183,6 +183,13 @@ func remoteItTools() []toolDefinition {
 		"diagnostic.system",
 		"diagnostic.network",
 		"diagnostic.services",
+		"diagnostic.lan_scan",
+		"network.rdp.open",
+		"network.ssh.open",
+		"windows.printers.list",
+		"windows.printers.open_settings",
+		"windows.printer.set_default",
+		"windows.scan_folder.configure",
 		"service.restart",
 		"process.terminate",
 		"file.download",
@@ -199,7 +206,7 @@ func remoteItTools() []toolDefinition {
 		"parameters": map[string]any{
 			"type":                 "object",
 			"additionalProperties": true,
-			"description":          "Exact typed parameters: {} for diagnostics/system.reboot; {name} for service.restart; {pid} for process.terminate; {url,sha256,fileName} for file.download; {packageId} for package.install; {member,group} for local.group.add_member; {name,serverAddress,tunnelType,authenticationMethod} for windows.vpn.upsert; {shell,script} for script.execute. The RemoteIt server and Agent reject missing, extra, or unsafe fields. Never put passwords, tokens, private keys, or other secrets in a script.",
+			"description":          "Exact typed parameters: {} for basic diagnostics/printer listing/settings/system.reboot; {subnet} for diagnostic.lan_scan (empty selects the Agent subnet); {host,port,username} for network.rdp.open/network.ssh.open; {name} for service.restart/windows.printer.set_default; {path,shareName,principal} for windows.scan_folder.configure; {pid} for process.terminate; {url,sha256,fileName} for file.download; {packageId} for package.install; {member,group} for local.group.add_member; {name,serverAddress,tunnelType,authenticationMethod} for windows.vpn.upsert; {shell,script} for script.execute. The server and Agent reject missing, extra, public-network, or unsafe fields. Never include passwords, tokens, private keys, or other secrets.",
 		},
 	}
 	return []toolDefinition{

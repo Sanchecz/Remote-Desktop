@@ -463,16 +463,37 @@ func (s *server) deleteDesktopFrame(sessionID string) {
 	})
 }
 
-func (s *server) desktopFrameLock(sessionID string) *sync.Mutex {
-	lock := &sync.Mutex{}
-	actual, _ := s.desktopFrameLocks.LoadOrStore(sessionID, lock)
-	return actual.(*sync.Mutex)
+type desktopFrameSessionLock struct {
+	mutex sync.Mutex
+	users int
+}
+
+func (s *server) lockDesktopFrame(sessionID string) func() {
+	// Acquiring a reference is serialized with maintenance. A waiter therefore
+	// keeps the registry entry alive before it blocks on the per-session mutex;
+	// pruning can never split one session across two independent mutexes.
+	s.desktopFrameLocksMu.Lock()
+	value, exists := s.desktopFrameLocks.Load(sessionID)
+	if !exists {
+		value = &desktopFrameSessionLock{}
+		s.desktopFrameLocks.Store(sessionID, value)
+	}
+	entry := value.(*desktopFrameSessionLock)
+	entry.users++
+	s.desktopFrameLocksMu.Unlock()
+
+	entry.mutex.Lock()
+	return func() {
+		entry.mutex.Unlock()
+		s.desktopFrameLocksMu.Lock()
+		entry.users--
+		s.desktopFrameLocksMu.Unlock()
+	}
 }
 
 func (s *server) resetDesktopFrameDatabaseTouch(sessionID string, attemptedAt time.Time) {
-	lock := s.desktopFrameLock(sessionID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := s.lockDesktopFrame(sessionID)
+	defer unlock()
 	current, ok := s.loadDesktopFrame(sessionID)
 	if !ok || !current.DatabaseTouchAt.Equal(attemptedAt) {
 		return
@@ -592,6 +613,30 @@ func (s *server) pruneDesktopRuntimeState(cutoff time.Time) {
 		}
 		return true
 	})
+	// Only unreferenced entries may be removed. lockDesktopFrame increments the
+	// reference under this same registry mutex before waiting, so maintenance
+	// cannot create two independent locks for one session.
+	s.desktopFrameLocksMu.Lock()
+	s.desktopFrameLocks.Range(func(key, value any) bool {
+		sessionID, ok := key.(string)
+		entry, entryOK := value.(*desktopFrameSessionLock)
+		if !ok || !entryOK {
+			s.desktopFrameLocks.Delete(key)
+			return true
+		}
+		if entry.users != 0 {
+			return true
+		}
+		if _, active := s.desktopSessionRuntime.Load(sessionID); active {
+			return true
+		}
+		if _, hasFrame := s.desktopFrames.Load(sessionID); hasFrame {
+			return true
+		}
+		s.desktopFrameLocks.Delete(key)
+		return true
+	})
+	s.desktopFrameLocksMu.Unlock()
 }
 
 type desktopInputEvent struct {
@@ -1175,8 +1220,7 @@ func (s *server) storeDesktopFrameSequenced(ctx context.Context, sessionID, devi
 	if !active || runtime.DeviceID != deviceID {
 		return false, errDesktopSessionInactive
 	}
-	lock := s.desktopFrameLock(sessionID)
-	lock.Lock()
+	unlock := s.lockDesktopFrame(sessionID)
 	previous, hasPrevious := s.loadDesktopFrame(sessionID)
 	frameLane := 0
 	if producerSequence > 0 {
@@ -1184,7 +1228,7 @@ func (s *server) storeDesktopFrameSequenced(ctx context.Context, sessionID, devi
 	}
 	lanePrevious, hasLanePrevious := s.loadDesktopFrameLane(sessionID, frameLane)
 	if producerSequence > 0 && hasLanePrevious && lanePrevious.ProducerSequence >= producerSequence {
-		lock.Unlock()
+		unlock()
 		return false, nil
 	}
 	if producerSequence > 0 && hasPrevious && previous.ProducerSequence > 0 && producerSequence <= previous.ProducerSequence {
@@ -1196,7 +1240,7 @@ func (s *server) storeDesktopFrameSequenced(ctx context.Context, sessionID, devi
 		lateFrame := desktopFrameState{Frame: immutableFrame, ViewerPayload: viewerPayload, Width: width, Height: height, At: now, Sequence: producerSequence, ProducerSequence: producerSequence, DeviceID: deviceID, DatabaseTouchAt: previous.DatabaseTouchAt}
 		s.desktopFrameLanes.Store(sessionID+"\x00"+strconv.Itoa(frameLane), lateFrame)
 		s.desktopAgentSeen.Store(sessionID, now)
-		lock.Unlock()
+		unlock()
 		s.signalDesktopFrame(sessionID, frameLane)
 		return true, nil
 	}
@@ -1221,7 +1265,7 @@ func (s *server) storeDesktopFrameSequenced(ctx context.Context, sessionID, devi
 	}
 	s.desktopFrameLanes.Store(sessionID+"\x00"+strconv.Itoa(frameLane), laneFrame)
 	s.desktopAgentSeen.Store(sessionID, now)
-	lock.Unlock()
+	unlock()
 	s.signalDesktopFrame(sessionID, frameLane)
 	if touchDatabase {
 		// A slow database heartbeat must not hold the per-session frame lock. The

@@ -72,7 +72,7 @@ import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteFullscreenScaleMode, remoteViewpor
 import { isCurrentRemoteFallbackGeneration, isRecoverableRemoteStatusFailure, isRemoteFrameStreamStalled, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
 import { abortableDelay, browserTransferChunkLength, fileTransferProgress, isAbortError, uploadTransferChunk, validateTransferCheckpoint } from "./fileTransfers";
 import { createRemoteFrameRetirementScheduler } from "./remoteFramePresentation";
-import { imageClipboardFingerprint, newerRemoteClipboardPayload, REMOTE_CLIPBOARD_COPY_READ_DELAYS, REMOTE_CLIPBOARD_COPY_TIMEOUT, REMOTE_CLIPBOARD_DIRECTION_TITLE, sameRemoteClipboardPayload, shouldResolveRemoteClipboardCopy, textClipboardFingerprint, type RemoteClipboardCopyGate, type RemoteClipboardPayload, type RemoteClipboardSyncState } from "./remoteClipboard";
+import { imageClipboardFingerprint, newerRemoteClipboardPayload, REMOTE_CLIPBOARD_COPY_READ_DELAYS, REMOTE_CLIPBOARD_COPY_TIMEOUT, sameRemoteClipboardPayload, shouldResolveRemoteClipboardCopy, textClipboardFingerprint, type RemoteClipboardCopyGate, type RemoteClipboardPayload, type RemoteClipboardSyncState } from "./remoteClipboard";
 
 type User = {
   id: string;
@@ -231,7 +231,7 @@ type Section = "devices" | "remote" | "sessions" | "terminal" | "scripts" | "tok
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.35";
+const LATEST_AGENT_VERSION = "1.0.36";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1063,6 +1063,7 @@ function DeviceDrawer({ device, currentUser, csrf, onClose, onAccessChanged, onR
 	const canDelete = currentUser.role === "owner" || currentUser.role === "admin";
 	const supportsAgentJobs = !device.os.toLowerCase().includes("android");
 	const supportsConfirmedUninstall = supportsAgentJobs && versionAtLeast(device.agentVersion, "0.6.0");
+	const canUseAdminTools = (currentUser.role === "owner" || currentUser.role === "admin") && device.accessGranted && supportsAgentJobs;
 
   async function rename(event: FormEvent) {
     event.preventDefault(); setSaving(true); setError("");
@@ -1101,6 +1102,7 @@ function DeviceDrawer({ device, currentUser, csrf, onClose, onAccessChanged, onR
     {(currentUser.role === "owner" || device.accessProtected) && <DeviceAccessPanel device={device} currentUser={currentUser} csrf={csrf} onChanged={onAccessChanged} />}
     {canOperate && <RemoteDesktopPreview device={device} csrf={csrf} onConnect={setDesktopSessionId} />}
     {desktopSessionId && <RemoteDesktopModal device={device} csrf={csrf} initialSessionId={desktopSessionId} onClose={() => setDesktopSessionId("")} />}
+		{canUseAdminTools && device.os.toLowerCase().includes("windows") && <DeviceLANAndPrinterTools device={device} csrf={csrf} />}
     {canOperate && <form className="rename-form" onSubmit={rename}><label><span>Название в RemoteIt</span><input value={name} onChange={(event) => setName(event.target.value)} maxLength={64} required /></label><label><span>Группа</span><input value={group} onChange={(event) => setGroup(event.target.value)} maxLength={100} required /></label><div className="device-edit-actions"><button className="secondary-button" disabled={saving || (name.trim() === device.name && group.trim() === device.group)}><Save size={16} /> Сохранить</button></div>{error && <div className="form-error">{error}</div>}</form>}
     {canDelete && device.accessGranted && <section className="device-removal-card"><div><strong>Удаление устройства</strong><small>{supportsConfirmedUninstall ? "Можно дождаться подтверждённой деинсталляции Agent либо сразу убрать недоступный компьютер только из панели." : "Эту версию Agent нельзя деинсталлировать с подтверждением, но устройство можно сразу удалить только из панели."}</small></div>{device.pendingRemoval && <div className="notice limited-notice"><Clock3 size={17} /><span>Удаление Agent ожидает следующего подключения. Это не загрузка: команду можно оставить в очереди либо удалить запись из панели прямо сейчас.</span></div>}<div className="device-removal-actions"><button type="button" className="danger-button" disabled={saving || device.pendingRemoval || !supportsConfirmedUninstall} onClick={() => void removeDevice()}><Ban size={16} /> {supportsConfirmedUninstall ? "Удалить Agent и устройство" : "Подтверждённое удаление недоступно"}</button><button type="button" className="secondary-button forget-device-button" disabled={saving} onClick={() => void forgetDevice()}><Trash2 size={16} /> Удалить только из панели</button></div></section>}
     {canOperate && supportsAgentJobs && <RemoteFiles device={device} csrf={csrf} />}
@@ -1248,6 +1250,113 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
 
   const unavailableReason = !device.online ? "Агент не в сети" : !remoteScreenSupportedOS(device.os) ? "Доступно для Windows и Android" : !desktopCompatible ? `Обновите Agent ${device.agentVersion || "старой версии"} до 0.6.0` : "Предпросмотр недоступен";
   return <section className="remote-preview-card"><header><div><span className="eyebrow">УДАЛЁННЫЙ ДОСТУП</span><strong><ScreenShare size={18} /> Живой экран</strong><small>{supported ? frameURL ? "Предпросмотр онлайн · управление выключено" : connected ? "Agent подключён · ожидаем первый кадр" : "Подключаем защищённый предпросмотр…" : unavailableReason}</small></div><span className={`preview-live ${connected && !!frameURL ? "active" : ""}`}><span />{connected && frameURL ? "LIVE" : "WAIT"}</span></header><button type="button" className="remote-preview-screen" disabled={!supported || !sessionId || !frameURL} onContextMenu={(event) => event.preventDefault()} onClick={() => { if (device.os.toLowerCase().includes("windows")) primeRemoteClipboardFromConnectionGesture(); handedOff.current = true; onConnect(sessionId); }}>{frameURL ? <img ref={previewImageRef} src={frameURL} draggable={false} onError={() => { setFrameURL(""); setError("Получен повреждённый кадр — ожидаем следующий"); }} /> : <span><Monitor size={38} /><strong>{error || (supported ? "Ожидаем изображение от Agent" : unavailableReason)}</strong><small>{desktopCompatible ? "Диагностика обновляется автоматически" : "Скачайте новый агент из раздела токенов"}</small></span>}<b><MousePointer2 size={17} /> Открыть подключение</b></button><footer><ShieldCheck size={14} /> Пассивный предпросмотр журналируется, но не показывает всплывающее уведомление. Оно появится при первом управляющем действии.</footer></section>;
+}
+
+type LANScanResult = {
+	subnet: string;
+	agentIp: string;
+	scanned: number;
+	hosts: Array<{ ip: string; name?: string; latencyMs: number; openPorts: number[] }>;
+	durationMs: number;
+};
+
+type PrinterInfo = {
+	Name?: string;
+	Type?: string;
+	DriverName?: string;
+	PortName?: string;
+	PrinterStatus?: string | number;
+	WorkOffline?: boolean;
+	Default?: boolean;
+};
+
+function DeviceLANAndPrinterTools({ device, csrf }: { device: Device; csrf: string }) {
+	const [tab, setTab] = useState<"network" | "printers">("network");
+	const [host, setHost] = useState("");
+	const [protocol, setProtocol] = useState<"rdp" | "ssh">("rdp");
+	const [port, setPort] = useState(3389);
+	const [username, setUsername] = useState("");
+	const [subnet, setSubnet] = useState("");
+	const [scan, setScan] = useState<LANScanResult | null>(null);
+	const [printers, setPrinters] = useState<PrinterInfo[]>([]);
+	const [scanPath, setScanPath] = useState("C:\\RemoteIt Scans");
+	const [shareName, setShareName] = useState("RemoteItScans");
+	const [principal, setPrincipal] = useState(device.currentUser || "Users");
+	const [busy, setBusy] = useState("");
+	const [message, setMessage] = useState("");
+	const [error, setError] = useState("");
+
+	useEffect(() => setPort(protocol === "rdp" ? 3389 : 22), [protocol]);
+
+	async function waitForAction(id: string): Promise<ActionJob> {
+		const deadline = Date.now() + 70_000;
+		while (Date.now() < deadline) {
+			const job = await api<ActionJob>(`/api/action-jobs/${id}`);
+			if (["succeeded", "failed", "cancelled", "expired"].includes(job.status)) return job;
+			await new Promise((resolve) => window.setTimeout(resolve, 700));
+		}
+		throw new Error("Agent не завершил действие за отведённое время");
+	}
+
+	async function runTool(action: string, parameters: Record<string, unknown>, confirmation = "") {
+		if (confirmation && !window.confirm(confirmation)) return null;
+		setBusy(action); setError(""); setMessage("");
+		try {
+			const created = await api<{ id: string; approvalRequired: boolean }>("/api/action-jobs", {
+				method: "POST",
+				body: JSON.stringify({ deviceId: device.id, action, parameters, idempotencyKey: `${action}-${Date.now()}-${crypto.randomUUID?.() || Math.random()}` }),
+			}, csrf);
+			if (created.approvalRequired) await api(`/api/action-jobs/${created.id}/approve`, { method: "POST" }, csrf);
+			const completed = await waitForAction(created.id);
+			if (completed.status !== "succeeded") throw new Error(completed.error || `Действие завершилось со статусом ${completed.status}`);
+			setMessage(completed.output || "Готово");
+			return completed;
+		} catch (reason) {
+			setError(reason instanceof Error ? reason.message : "Действие не выполнено");
+			return null;
+		} finally {
+			setBusy("");
+		}
+	}
+
+	async function scanNetwork() {
+		const job = await runTool("diagnostic.lan_scan", { subnet: subnet.trim() });
+		if (!job) return;
+		try { setScan(JSON.parse(job.output) as LANScanResult); }
+		catch { setError("Agent вернул неполный результат сканирования"); }
+	}
+
+	async function openConnection(targetHost = host, targetPort = port, targetProtocol = protocol) {
+		if (!targetHost.trim()) { setError("Укажите внутренний IP или имя компьютера"); return; }
+		const job = await runTool(`network.${targetProtocol}.open`, { host: targetHost.trim(), port: targetPort, username: username.trim() });
+		if (job) setMessage(`${targetProtocol.toUpperCase()} открыт на экране ${device.name}. Введите реквизиты в системном окне.`);
+	}
+
+	async function loadPrinters() {
+		const job = await runTool("windows.printers.list", {});
+		if (!job) return;
+		try {
+			const parsed = JSON.parse(job.output || "[]") as PrinterInfo | PrinterInfo[];
+			setPrinters(Array.isArray(parsed) ? parsed : parsed ? [parsed] : []);
+			setMessage("");
+		} catch { setError("Windows вернула неполный список принтеров"); }
+	}
+
+	return <section className="device-admin-tools">
+		<header><span className="device-admin-tools-icon"><Wifi size={20} /></span><div><span className="eyebrow">ИНСТРУМЕНТЫ УСТРОЙСТВА</span><h3>Локальная сеть и оборудование</h3><p>Работа через Agent без публикации внутренних портов в интернет.</p></div></header>
+		<nav><button type="button" className={tab === "network" ? "active" : ""} onClick={() => setTab("network")}><Server size={16} /> Сеть, RDP и SSH</button><button type="button" className={tab === "printers" ? "active" : ""} onClick={() => setTab("printers")}><HardDrive size={16} /> Принтеры и сканы</button></nav>
+		{tab === "network" ? <div className="device-tool-body">
+			<div className="lan-scan-line"><label><span>Подсеть (необязательно)</span><input value={subnet} onChange={(event) => setSubnet(event.target.value)} placeholder="Автоматически или 192.168.1.0/24" /></label><button type="button" className="secondary-button" disabled={!!busy || !device.online} onClick={() => void scanNetwork()}>{busy === "diagnostic.lan_scan" ? <RefreshCw className="spin" size={16} /> : <Search size={16} />} Найти устройства</button></div>
+			<div className="lan-connect-line"><label><span>Протокол</span><select value={protocol} onChange={(event) => setProtocol(event.target.value as "rdp" | "ssh")}><option value="rdp">RDP</option><option value="ssh">SSH</option></select></label><label className="grow"><span>IP или имя</span><input value={host} onChange={(event) => setHost(event.target.value)} placeholder="192.168.1.105" /></label><label><span>Порт</span><input type="number" min={1} max={65535} value={port} onChange={(event) => setPort(Number(event.target.value))} /></label><label><span>Пользователь</span><input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="необязательно" /></label><button type="button" className="primary-button" disabled={!!busy || !device.online} onClick={() => void openConnection()}>{busy.startsWith("network.") ? <RefreshCw className="spin" size={16} /> : <Play size={16} />} Открыть</button></div>
+			{scan && <div className="lan-scan-results"><div><strong>{scan.subnet}</strong><span>Agent {scan.agentIp} · проверено {scan.scanned} · {scan.durationMs} мс</span></div>{scan.hosts.length ? scan.hosts.map((item) => <article key={item.ip}><span className="lan-host-state" /><div><strong>{item.name || item.ip}</strong><small>{item.name ? item.ip + " · " : ""}{item.openPorts.map((value) => `${value}`).join(", ")}</small></div><span>{item.latencyMs} мс</span>{item.openPorts.includes(3389) && <button type="button" onClick={() => void openConnection(item.ip, 3389, "rdp")}>RDP</button>}{item.openPorts.includes(22) && <button type="button" onClick={() => void openConnection(item.ip, 22, "ssh")}>SSH</button>}</article>) : <p>Типовые службы в этой подсети не обнаружены.</p>}</div>}
+		</div> : <div className="device-tool-body">
+			<div className="printer-toolbar"><button type="button" className="secondary-button" disabled={!!busy || !device.online} onClick={() => void loadPrinters()}>{busy === "windows.printers.list" ? <RefreshCw className="spin" size={16} /> : <RefreshCw size={16} />} Обновить список</button><button type="button" className="secondary-button" disabled={!!busy || !device.online} onClick={() => void runTool("windows.printers.open_settings", {})}><Settings size={16} /> Открыть настройки Windows</button><button type="button" className="secondary-button" disabled={!!busy || !device.online} onClick={() => void runTool("service.restart", { name: "Spooler" }, "Перезапустить только службу очереди печати Spooler?")}><RefreshCw size={16} /> Перезапустить очередь</button></div>
+			{printers.length > 0 && <div className="printer-list">{printers.map((printer) => <article key={printer.Name}><div><strong>{printer.Name || "Без имени"}{printer.Default ? " · по умолчанию" : ""}</strong><small>{printer.PortName || "порт не указан"} · {printer.DriverName || "драйвер не указан"}</small></div>{!printer.Default && printer.Name && <button type="button" onClick={() => void runTool("windows.printer.set_default", { name: printer.Name }, `Назначить «${printer.Name}» принтером по умолчанию?`)}>По умолчанию</button>}</article>)}</div>}
+			<div className="scan-folder-form"><strong>Папка сканов для МФУ</strong><p>RemoteIt создаст папку и общий ресурс для одной существующей учётной записи. Пароль вводится только на самом МФУ.</p><label><span>Папка</span><input value={scanPath} onChange={(event) => setScanPath(event.target.value)} /></label><label><span>Имя ресурса</span><input value={shareName} onChange={(event) => setShareName(event.target.value)} /></label><label><span>Учётная запись</span><input value={principal} onChange={(event) => setPrincipal(event.target.value)} /></label><button type="button" className="primary-button" disabled={!!busy || !device.online} onClick={() => void runTool("windows.scan_folder.configure", { path: scanPath, shareName, principal }, `Создать SMB-папку \\${device.hostname || device.name}\\${shareName} и выдать изменение только ${principal}?`)}><FolderOpen size={16} /> Настроить папку</button></div>
+		</div>}
+		{message && <div className="device-tool-message"><CheckCircle2 size={15} /> <span>{message}</span></div>}
+		{error && <div className="form-error">{error}</div>}
+	</section>;
 }
 
 function capturePointerSafely(target: Element, pointerId: number) {
@@ -1415,7 +1524,6 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	const [sasFeedback, setSASFeedback] = useState("");
 	const [sasFeedbackError, setSASFeedbackError] = useState(false);
 	const [clipboardSyncState, setClipboardSyncState] = useState<RemoteClipboardSyncState>("ready");
-	const [clipboardActionsOpen, setClipboardActionsOpen] = useState(false);
 	const [pointerMode, setPointerMode] = useState<"direct" | "trackpad">("trackpad");
 	const [filesOpen, setFilesOpen] = useState(false);
 	const [desktopDropActive, setDesktopDropActive] = useState(false);
@@ -3580,7 +3688,6 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	async function sendClipboardToRemote() {
-		setClipboardActionsOpen(false);
 		window.clearTimeout(sasFeedbackTimer.current);
 		setClipboardSyncState("syncing");
 		try {
@@ -3605,7 +3712,6 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 	}
 
 	async function receiveClipboardFromRemote() {
-		setClipboardActionsOpen(false);
 		window.clearTimeout(sasFeedbackTimer.current);
 		setClipboardSyncState("syncing");
 		clipboardManualReceiveRef.current = true;
@@ -3632,6 +3738,18 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			setSASFeedbackError(true);
 			setSASFeedback(reason instanceof Error ? reason.message : "Не удалось получить удалённый буфер");
 		}
+	}
+
+	async function syncSharedClipboard() {
+		// One predictable control replaces the old direction picker. When Windows
+		// has newer data, the click grants the browser permission to receive it;
+		// otherwise the current local clipboard is sent to Windows. Normal Ctrl/Cmd
+		// C/V continues to synchronise automatically in both directions.
+		if (clipboardPendingRemoteRef.current || clipboardSyncState === "pending") {
+			await receiveClipboardFromRemote();
+			return;
+		}
+		await sendClipboardToRemote();
 	}
 
 	async function pushLocalClipboardSnapshot(snapshot: LocalClipboardSnapshot) {
@@ -3806,7 +3924,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button className="remote-header-tool" onClick={() => void toggleRemoteFullscreen()} title={fullscreenActive ? "Выйти из полноэкранного режима" : "На весь экран"}><Maximize2 size={17} /><span>{fullscreenActive ? "Свернуть" : "Полный экран"}</span></button>
 				<button className="remote-header-tool" onClick={() => void copyRemoteScreenshot()} title="Скопировать текущий кадр как PNG"><Camera size={17} /><span>Снимок</span></button>
 				{targetWindows && <button className="remote-header-tool" onClick={() => void sendCtrlAltDelete()} title="Отправить Ctrl+Alt+Del"><Keyboard size={17} /><span>Ctrl+Alt+Del</span></button>}
-				{targetWindows && <button className={`remote-header-tool ${clipboardSyncState === "pending" || clipboardActionsOpen ? "active" : ""}`} disabled={clipboardSyncState === "syncing"} aria-haspopup="dialog" aria-expanded={clipboardActionsOpen} aria-busy={clipboardSyncState === "syncing"} onClick={() => setClipboardActionsOpen(true)} title="Передать буфер на удалённый ПК или получить его оттуда">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={17} /> : <Clipboard size={17} />}<span>Буфер обмена</span></button>}
+				{targetWindows && <button className={`remote-header-tool ${clipboardSyncState === "pending" ? "active" : ""}`} disabled={clipboardSyncState === "syncing"} aria-busy={clipboardSyncState === "syncing"} onClick={() => void syncSharedClipboard()} title="Общий буфер работает в обе стороны; нажмите для ручной синхронизации">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={17} /> : <Clipboard size={17} />}<span>Общий буфер</span></button>}
 				<button className={`remote-header-tool ${keyboardOpen ? "active" : ""}`} onClick={() => setMobileKeyboardVisibility(!keyboardOpen)} title="Экранная клавиатура"><Keyboard size={17} /><span>Клавиатура</span></button>
 				{targetWindows && <button className="remote-header-tool" onClick={openRemoteFiles} title="Файлы устройства"><Folder size={17} /><span>Файлы</span></button>}
 				<button className="remote-header-tool danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /><span>Завершить</span></button>
@@ -3831,7 +3949,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 		</div>
 		{!compactRemoteClient && fullscreenActive && <nav className="remote-desktop-fullscreen-tools" aria-label="Управление полноэкранным сеансом">
 			<button type="button" onClick={() => void copyRemoteScreenshot()} title="Скопировать снимок"><Camera size={18} /></button>
-			{targetWindows && <button type="button" className={clipboardSyncState === "pending" || clipboardActionsOpen ? "active" : ""} disabled={clipboardSyncState === "syncing"} aria-label="Открыть буфер обмена" aria-haspopup="dialog" aria-expanded={clipboardActionsOpen} aria-busy={clipboardSyncState === "syncing"} onClick={() => setClipboardActionsOpen(true)} title="Буфер обмена">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={18} /> : <Clipboard size={18} />}</button>}
+			{targetWindows && <button type="button" className={clipboardSyncState === "pending" ? "active" : ""} disabled={clipboardSyncState === "syncing"} aria-label="Синхронизировать общий буфер" aria-busy={clipboardSyncState === "syncing"} onClick={() => void syncSharedClipboard()} title="Общий буфер">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={18} /> : <Clipboard size={18} />}</button>}
 			<button type="button" onClick={() => void toggleRemoteFullscreen()} title="Выйти из полноэкранного режима"><Maximize2 size={18} /></button>
 			<button type="button" className="danger" onClick={finishRemoteSession} title="Завершить сеанс"><Power size={18} /></button>
 		</nav>}
@@ -3863,22 +3981,11 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 				<button type="button" className="remote-tool-button" onClick={resetCamera}><Maximize2 size={15} /> По размеру</button>
 				<button type="button" className="remote-tool-button" onClick={() => void copyRemoteScreenshot()}><Camera size={15} /> Снимок</button>
 				{targetWindows && <button type="button" className="remote-tool-button" onClick={openRemoteFiles}><Folder size={15} /> Файлы</button>}
-				{targetWindows && <button type="button" className={`remote-tool-button ${clipboardSyncState === "pending" || clipboardActionsOpen ? "active" : ""}`} disabled={clipboardSyncState === "syncing"} aria-haspopup="dialog" aria-expanded={clipboardActionsOpen} aria-busy={clipboardSyncState === "syncing"} onClick={() => setClipboardActionsOpen(true)} title="Выбрать направление копирования">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={15} /> : <Clipboard size={15} />} Буфер обмена</button>}
+				{targetWindows && <button type="button" className={`remote-tool-button ${clipboardSyncState === "pending" ? "active" : ""}`} disabled={clipboardSyncState === "syncing"} aria-busy={clipboardSyncState === "syncing"} onClick={() => void syncSharedClipboard()} title="Общий буфер работает в обе стороны">{clipboardSyncState === "syncing" ? <RefreshCw className="spin" size={15} /> : <Clipboard size={15} />} Общий буфер</button>}
 				<button type="button" className="remote-tool-button remote-collapse-tool" onClick={toggleControls} title={controlsCollapsed ? "Открыть управление" : "Скрыть управление"}><SlidersHorizontal size={16} />{controlsCollapsed ? "Управление" : "Скрыть"}</button>
 			</div>
 			<button className="danger-button remote-footer-end" onClick={finishRemoteSession}><Power size={15} /> Завершить сеанс</button>
 		</footer>
-		{clipboardActionsOpen && <>
-			<button type="button" className="remote-clipboard-scrim" onClick={() => setClipboardActionsOpen(false)} aria-label="Закрыть буфер обмена" />
-			<section className="remote-clipboard-panel" role="dialog" aria-modal="true" aria-labelledby="remote-clipboard-title">
-				<header><span className="remote-clipboard-icon"><Clipboard size={21} /></span><span><strong id="remote-clipboard-title">Буфер обмена</strong><small>Куда передать скопированный текст или изображение?</small></span><button type="button" onClick={() => setClipboardActionsOpen(false)} aria-label="Закрыть"><X size={18} /></button></header>
-				<div className="remote-clipboard-directions">
-					<button type="button" onClick={() => void sendClipboardToRemote()}><span className="remote-clipboard-direction-icon send"><Upload size={20} /></span><span><strong>{REMOTE_CLIPBOARD_DIRECTION_TITLE.send}</strong><small>То, что скопировано сейчас, появится в буфере компьютера {device.name}</small></span><ChevronRight size={17} /></button>
-					<button type="button" className={clipboardSyncState === "pending" ? "recommended" : ""} onClick={() => void receiveClipboardFromRemote()}><span className="remote-clipboard-direction-icon receive"><Download size={20} /></span><span><strong>{REMOTE_CLIPBOARD_DIRECTION_TITLE.receive} {clipboardSyncState === "pending" && <em>Новые данные</em>}</strong><small>Буфер компьютера {device.name} появится на устройстве, с которого вы подключены</small></span><ChevronRight size={17} /></button>
-				</div>
-				<footer><CheckCircle2 size={15} /><span>Обычно ничего нажимать не нужно: новый буфер передаётся автоматически. Здесь можно повторить передачу вручную.</span></footer>
-			</section>
-		</>}
 		{keyboardOpen && <div className="remote-mobile-keyboard" role="group" aria-label="Ввод на удалённом компьютере">
 			<input ref={mobileKeyboardRef} name="remoteit-live-input" autoComplete="off" value={mobileText} onBeforeInput={(event) => { const input = event.currentTarget; const plan = planRemoteMobileBeforeInput((event.nativeEvent as InputEvent).inputType || "", input.value, input.selectionStart, input.selectionEnd); if (plan.handled && plan.keyCode) { event.preventDefault(); if (plan.keyCode === 13) sendMobileEnter(); else sendMobileBoundaryDelete(plan.keyCode); } }} onInput={(event) => updateMobileText(event.currentTarget.value)} onCompositionEnd={(event) => updateMobileText(event.currentTarget.value)} onSelect={(event) => { const input = event.currentTarget; if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) window.requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length)); }} onKeyDown={(event) => { if ((event.key === "Backspace" || event.key === "Delete") && !event.nativeEvent.isComposing) { const inputType = event.key === "Backspace" ? "deleteContentBackward" : "deleteContentForward"; const plan = planRemoteBoundaryDeletion(inputType, event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd); if (plan.handled && plan.keyCode) { event.preventDefault(); sendMobileBoundaryDelete(plan.keyCode); return; } } if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); sendMobileEnter(); } }} placeholder="Ввод в реальном времени" enterKeyHint="send" inputMode="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
 			<button type="button" className="remote-keyboard-enter" onClick={sendMobileEnter}>Enter</button>
@@ -4383,6 +4490,13 @@ const actionNames: Record<string, string> = {
   "diagnostic.system": "Диагностика системы",
   "diagnostic.network": "Диагностика сети",
   "diagnostic.services": "Диагностика служб",
+  "diagnostic.lan_scan": "Сканирование локальной сети",
+  "network.rdp.open": "Открытие RDP через Agent",
+  "network.ssh.open": "Открытие SSH через Agent",
+  "windows.printers.list": "Список принтеров",
+  "windows.printers.open_settings": "Открытие принтеров Windows",
+  "windows.printer.set_default": "Принтер по умолчанию",
+  "windows.scan_folder.configure": "Папка сканов",
   "service.restart": "Перезапуск службы",
   "process.terminate": "Завершение процесса",
   "file.download": "Безопасное скачивание файла",

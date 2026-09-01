@@ -1175,6 +1175,11 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 				}
 			}
 			if captureErr == nil {
+				// The user-token launch is a one-process recovery bridge for an RDP
+				// generation that denied the SYSTEM graphics token. Once it has proved
+				// the bound desktop readable, make the next restart eligible for the
+				// normal SYSTEM mode again so Winlogon/SAS capture is not weakened.
+				clearDesktopWorkerUserTokenFallbackRequest()
 				// Upload success/error and Auto adaptation are handled asynchronously
 				// through frameUploadResults above.
 			}
@@ -1214,6 +1219,9 @@ func runDesktopAgentLoop(done <-chan struct{}) {
 					// server-side remote session and viewer remain active.
 					// Preserve the diagnostic across the helper restart. The same browser
 					// lease remains valid, and the first successful frame clears it.
+					if desktopVDIShouldUseUserTokenFallback(captureErr) {
+						requestDesktopWorkerUserTokenFallback()
+					}
 					return
 				}
 			} else {

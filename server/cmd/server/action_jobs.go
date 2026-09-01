@@ -30,10 +30,16 @@ const integrationTokenPrefix = "rmt_mcp_"
 var safeServiceName = regexp.MustCompile(`^[A-Za-z0-9_. -]{1,128}$`)
 var safePackageID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$`)
 var safeLocalPrincipal = regexp.MustCompile(`^[\p{L}\p{N}._@ -]{1,128}$`)
+var safeLANUsername = regexp.MustCompile(`^[\p{L}\p{N}._@\\ -]{1,128}$`)
+var safeWindowsPrincipal = regexp.MustCompile(`^[\p{L}\p{N}._@\\ -]{1,128}$`)
 var safeDownloadName = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{N}._() -]{0,127}$`)
 var sha256Text = regexp.MustCompile(`^[A-Fa-f0-9]{64}$`)
 var vpnName = regexp.MustCompile(`^[\p{L}\p{N}._ -]{1,64}$`)
 var dnsName = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)$`)
+var lanHostName = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)$`)
+var safePrinterName = regexp.MustCompile(`^[^\x00-\x1f]{1,256}$`)
+var safeWindowsPath = regexp.MustCompile(`(?i)^[a-z]:\\[^<>:"|?*\x00-\x1f]{1,220}$`)
+var safeShareName = regexp.MustCompile(`^[\p{L}\p{N}._ -]{1,64}$`)
 
 type actionSigner struct {
 	private ed25519.PrivateKey
@@ -117,6 +123,27 @@ var actionDefinitions = map[string]actionDefinition{
 	"diagnostic.services": {
 		Type: "diagnostic.services", Title: "Диагностика служб", Description: "Показывает службы с ошибками и остановленные важные службы без изменения системы.", Risk: "read", TimeoutSeconds: 30,
 	},
+	"diagnostic.lan_scan": {
+		Type: "diagnostic.lan_scan", Title: "Сканирование локальной сети", Description: "Ищет доступные внутренние узлы и типовые службы через выбранный Agent, не изменяя сеть пользователя.", Risk: "read", TimeoutSeconds: 45,
+	},
+	"network.rdp.open": {
+		Type: "network.rdp.open", Title: "Открыть RDP во внутренней сети", Description: "Запускает штатный клиент RDP в закреплённом Windows-сеансе Agent. Порт не публикуется в интернет, пароль не передаётся RemoteIt.", Risk: "high", TimeoutSeconds: 30, SupportedOS: "windows",
+	},
+	"network.ssh.open": {
+		Type: "network.ssh.open", Title: "Открыть SSH во внутренней сети", Description: "Запускает штатный SSH-клиент в закреплённом Windows-сеансе Agent. Пароль и ключи не передаются RemoteIt.", Risk: "high", TimeoutSeconds: 30, SupportedOS: "windows",
+	},
+	"windows.printers.list": {
+		Type: "windows.printers.list", Title: "Список принтеров", Description: "Показывает установленные принтеры, порты, драйверы, очередь и принтер по умолчанию без изменений.", Risk: "read", TimeoutSeconds: 30, SupportedOS: "windows",
+	},
+	"windows.printers.open_settings": {
+		Type: "windows.printers.open_settings", Title: "Открыть принтеры и сканеры", Description: "Открывает штатную страницу Windows «Принтеры и сканеры» в закреплённом пользовательском сеансе.", Risk: "high", TimeoutSeconds: 30, SupportedOS: "windows",
+	},
+	"windows.printer.set_default": {
+		Type: "windows.printer.set_default", Title: "Назначить принтер по умолчанию", Description: "Назначает один точно выбранный установленный принтер принтером по умолчанию.", Risk: "high", ApprovalRequired: true, TimeoutSeconds: 30, SupportedOS: "windows", Rollback: "Вернуть прежний принтер по умолчанию в параметрах Windows.",
+	},
+	"windows.scan_folder.configure": {
+		Type: "windows.scan_folder.configure", Title: "Настроить папку сканов", Description: "Создаёт указанную папку и SMB-ресурс только для выбранной существующей учётной записи Windows. Пароль не хранится в RemoteIt.", Risk: "high", ApprovalRequired: true, TimeoutSeconds: 60, SupportedOS: "windows", Rollback: "Удалить SMB-ресурс командой Remove-SmbShare; сама папка и уже полученные сканы сохранятся.",
+	},
 	"service.restart": {
 		Type: "service.restart", Title: "Перезапуск службы", Description: "Перезапускает одну явно указанную системную службу.", Risk: "high", ApprovalRequired: true, TimeoutSeconds: 60, Rollback: "Проверить состояние службы; при необходимости запустить её повторно.",
 	},
@@ -164,11 +191,72 @@ func normalizeActionParameters(action string, input map[string]any) (map[string]
 		input = map[string]any{}
 	}
 	switch action {
-	case "diagnostic.system", "diagnostic.network", "diagnostic.services", "system.reboot":
+	case "diagnostic.system", "diagnostic.network", "diagnostic.services", "windows.printers.list", "windows.printers.open_settings", "system.reboot":
 		if len(input) != 0 {
 			return nil, errors.New("это действие не принимает параметры")
 		}
 		return map[string]any{}, nil
+	case "diagnostic.lan_scan":
+		if len(input) > 1 {
+			return nil, errors.New("для сканирования сети допускается только параметр subnet")
+		}
+		subnet, _ := input["subnet"].(string)
+		subnet = strings.TrimSpace(subnet)
+		if subnet != "" {
+			ip, network, err := net.ParseCIDR(subnet)
+			if err != nil || ip.To4() == nil || !ip.IsPrivate() {
+				return nil, errors.New("подсеть должна быть внутренней IPv4-подсетью в формате CIDR")
+			}
+			ones, bits := network.Mask.Size()
+			if bits != 32 || ones < 24 || ones > 32 {
+				return nil, errors.New("за один запуск можно сканировать не более 256 внутренних IPv4-адресов (/24…/32)")
+			}
+			subnet = network.String()
+		}
+		return map[string]any{"subnet": subnet}, nil
+	case "network.rdp.open", "network.ssh.open":
+		if len(input) != 3 {
+			return nil, errors.New("для подключения требуются только host, port и username")
+		}
+		host, _ := input["host"].(string)
+		username, _ := input["username"].(string)
+		host, username = strings.TrimSpace(host), strings.TrimSpace(username)
+		if net.ParseIP(host) == nil && !lanHostName.MatchString(host) {
+			return nil, errors.New("узел должен быть внутренним IP-адресом или безопасным DNS-именем")
+		}
+		port, err := numericActionParameter(input["port"])
+		if err != nil || port < 1 || port > 65535 {
+			return nil, errors.New("порт должен быть целым числом от 1 до 65535")
+		}
+		if username != "" && !safeLANUsername.MatchString(username) {
+			return nil, errors.New("имя пользователя содержит недопустимые символы")
+		}
+		return map[string]any{"host": host, "port": port, "username": username}, nil
+	case "windows.printer.set_default":
+		if len(input) != 1 {
+			return nil, errors.New("требуется только точное имя принтера")
+		}
+		name, _ := input["name"].(string)
+		name = strings.TrimSpace(name)
+		if !safePrinterName.MatchString(name) {
+			return nil, errors.New("имя принтера недопустимо")
+		}
+		return map[string]any{"name": name}, nil
+	case "windows.scan_folder.configure":
+		if len(input) != 3 {
+			return nil, errors.New("для папки сканов требуются только path, shareName и principal")
+		}
+		path, _ := input["path"].(string)
+		shareName, _ := input["shareName"].(string)
+		principal, _ := input["principal"].(string)
+		path, shareName, principal = strings.TrimSpace(path), strings.TrimSpace(shareName), strings.TrimSpace(principal)
+		if !safeWindowsPath.MatchString(path) || strings.Contains(path, `..`) {
+			return nil, errors.New("папка сканов должна быть абсолютным безопасным путём Windows")
+		}
+		if !safeShareName.MatchString(shareName) || strings.HasSuffix(shareName, "$") || !safeWindowsPrincipal.MatchString(principal) {
+			return nil, errors.New("имя общего ресурса или учётной записи недопустимо")
+		}
+		return map[string]any{"path": path, "shareName": shareName, "principal": principal}, nil
 	case "service.restart":
 		if len(input) != 1 {
 			return nil, errors.New("для перезапуска службы требуется только параметр name")
@@ -284,6 +372,36 @@ func normalizeActionParameters(action string, input map[string]any) (map[string]
 	}
 }
 
+func numericActionParameter(value any) (int64, error) {
+	var number int64
+	switch typed := value.(type) {
+	case float64:
+		if math.Trunc(typed) != typed {
+			return 0, errors.New("not an integer")
+		}
+		number = int64(typed)
+	case int:
+		number = int64(typed)
+	case int64:
+		number = typed
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0, err
+		}
+		number = parsed
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		number = parsed
+	default:
+		return 0, errors.New("not a number")
+	}
+	return number, nil
+}
+
 func actionSteps(definition actionDefinition, parameters map[string]any) []string {
 	switch definition.Type {
 	case "diagnostic.system":
@@ -292,6 +410,18 @@ func actionSteps(definition actionDefinition, parameters map[string]any) []strin
 		return []string{"Собрать интерфейсы и IP", "Прочитать маршруты и DNS", "Вернуть результат без изменения сети"}
 	case "diagnostic.services":
 		return []string{"Прочитать состояние служб", "Выделить остановленные и ошибочные службы", "Вернуть результат без перезапуска"}
+	case "diagnostic.lan_scan":
+		return []string{"Определить внутреннюю подсеть выбранного Agent", "Проверить не более 256 адресов с ограничением параллельности", "Вернуть найденные RDP, SSH, файловые, веб- и печатные службы"}
+	case "network.rdp.open", "network.ssh.open":
+		return []string{fmt.Sprintf("Проверить, что %s доступен только как внутренний адрес", parameters["host"]), "Запустить штатный клиент в закреплённом Windows-сеансе", "Не передавать и не сохранять пароль в RemoteIt"}
+	case "windows.printers.list":
+		return []string{"Прочитать установленные принтеры и порты", "Определить состояние очередей и принтер по умолчанию", "Вернуть структурированный список без изменений"}
+	case "windows.printers.open_settings":
+		return []string{"Найти закреплённый Windows-сеанс", "Открыть штатную страницу принтеров и сканеров", "Оставить ввод реквизитов внутри Windows"}
+	case "windows.printer.set_default":
+		return []string{fmt.Sprintf("Проверить установленный принтер %s", parameters["name"]), "Назначить его принтером по умолчанию", "Повторно прочитать итоговое состояние"}
+	case "windows.scan_folder.configure":
+		return []string{fmt.Sprintf("Создать папку %s при отсутствии", parameters["path"]), fmt.Sprintf("Создать или проверить SMB-ресурс %s", parameters["shareName"]), fmt.Sprintf("Выдать изменение только учётной записи %s", parameters["principal"]), "Вернуть UNC-путь для настройки МФУ"}
 	case "service.restart":
 		return []string{fmt.Sprintf("Проверить службу %s", parameters["name"]), "Перезапустить только выбранную службу", "Проверить итоговое состояние"}
 	case "process.terminate":

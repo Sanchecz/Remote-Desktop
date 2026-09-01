@@ -139,3 +139,27 @@ func TestOnlyOwnerAndAdminCanUseCodexIntegration(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeLANPrinterAndScanActions(t *testing.T) {
+	if result, err := normalizeActionParameters("diagnostic.lan_scan", map[string]any{"subnet": "192.168.50.0/24"}); err != nil || result["subnet"] != "192.168.50.0/24" {
+		t.Fatalf("valid LAN scan rejected: %#v, %v", result, err)
+	}
+	for _, subnet := range []string{"8.8.8.0/24", "10.0.0.0/16", "not-a-network"} {
+		if _, err := normalizeActionParameters("diagnostic.lan_scan", map[string]any{"subnet": subnet}); err == nil {
+			t.Fatalf("unsafe LAN scan subnet accepted: %q", subnet)
+		}
+	}
+	connection, err := normalizeActionParameters("network.rdp.open", map[string]any{"host": "192.168.1.20", "port": 3389.0, "username": "DOMAIN\\admin"})
+	if err != nil || connection["port"] != int64(3389) {
+		t.Fatalf("valid RDP action rejected: %#v, %v", connection, err)
+	}
+	if _, err := normalizeActionParameters("network.ssh.open", map[string]any{"host": "server;whoami", "port": 22, "username": "admin"}); err == nil {
+		t.Fatal("unsafe SSH host accepted")
+	}
+	if _, err := normalizeActionParameters("windows.scan_folder.configure", map[string]any{"path": `C:\RemoteIt Scans`, "shareName": "RemoteItScans", "principal": `DOMAIN\scanner`}); err != nil {
+		t.Fatalf("valid scan folder rejected: %v", err)
+	}
+	if _, err := normalizeActionParameters("windows.scan_folder.configure", map[string]any{"path": `C:\..\Windows`, "shareName": "RemoteItScans", "principal": "Users"}); err == nil {
+		t.Fatal("traversing scan folder accepted")
+	}
+}

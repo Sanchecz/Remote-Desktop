@@ -475,6 +475,41 @@ func TestDesktopRuntimeCleanupRemovesEverySessionObject(t *testing.T) {
 	}
 }
 
+func TestDesktopRuntimeMaintenancePrunesOnlyOrphanFrameLocks(t *testing.T) {
+	s := &server{}
+	staleSession := "stale-session"
+	activeSession := "active-session"
+	frameSession := "frame-session"
+	heldSession := "held-session"
+	s.lockDesktopFrame(staleSession)()
+	s.lockDesktopFrame(activeSession)()
+	s.lockDesktopFrame(frameSession)()
+	releaseHeld := s.lockDesktopFrame(heldSession)
+	now := time.Now().UTC()
+	s.desktopSessionRuntime.Store(activeSession, desktopSessionRuntimeState{ValidatedAt: now})
+	s.desktopFrames.Store(frameSession, desktopFrameState{At: now})
+
+	s.pruneDesktopRuntimeState(now.Add(-time.Minute))
+
+	if _, ok := s.desktopFrameLocks.Load(staleSession); ok {
+		t.Fatal("orphan frame lock was not pruned")
+	}
+	if _, ok := s.desktopFrameLocks.Load(activeSession); !ok {
+		t.Fatal("active runtime frame lock was pruned")
+	}
+	if _, ok := s.desktopFrameLocks.Load(frameSession); !ok {
+		t.Fatal("live frame lock was pruned")
+	}
+	if _, ok := s.desktopFrameLocks.Load(heldSession); !ok {
+		t.Fatal("referenced frame lock was pruned")
+	}
+	releaseHeld()
+	s.pruneDesktopRuntimeState(now.Add(-time.Minute))
+	if _, ok := s.desktopFrameLocks.Load(heldSession); ok {
+		t.Fatal("released orphan frame lock was not pruned")
+	}
+}
+
 func TestDesktopRuntimeCarriesCursorPolicy(t *testing.T) {
 	s := &server{}
 	runtime := desktopSessionRuntimeState{DeviceID: "device", Control: true, TargetFPS: 60, CursorVisible: true, ValidatedAt: time.Now().UTC()}

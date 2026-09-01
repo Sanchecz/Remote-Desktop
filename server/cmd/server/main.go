@@ -46,6 +46,7 @@ type server struct {
 	desktopAgentCredentials sync.Map
 	desktopFrames           sync.Map
 	desktopFrameLanes       sync.Map
+	desktopFrameLocksMu     sync.Mutex
 	desktopFrameLocks       sync.Map
 	desktopFrameDiagnostics sync.Map
 	desktopFrameSignals     sync.Map
@@ -406,7 +407,11 @@ func main() {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(2 * time.Hour))
+	// Ordinary HTTP requests remain bounded, but upgraded WebSocket streams are
+	// intentionally long lived. Applying chi's Timeout middleware to an upgraded
+	// connection cancels an otherwise healthy remote-control session after two
+	// hours and then tries to write an HTTP timeout response to a hijacked socket.
+	r.Use(timeoutUnlessWebSocket(2 * time.Hour))
 	r.Use(s.securityHeaders)
 	r.Get("/healthz", s.health)
 	r.Post("/api/auth/login", s.login)
@@ -510,6 +515,42 @@ func main() {
 	}
 	log.Printf("RemoteIt server listening on :%s", port)
 	log.Fatal(httpServer.ListenAndServe())
+}
+
+func timeoutUnlessWebSocket(timeout time.Duration) func(http.Handler) http.Handler {
+	withTimeout := middleware.Timeout(timeout)
+	return func(next http.Handler) http.Handler {
+		timed := withTimeout(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if websocketUpgradeRequested(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			timed.ServeHTTP(w, r)
+		})
+	}
+}
+
+func websocketUpgradeRequested(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodGet || !desktopWebSocketPath(r.URL.Path) || !strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
+		return false
+	}
+	for _, value := range r.Header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func desktopWebSocketPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 6 && parts[0] == "api" && parts[1] == "desktop" && parts[2] == "agent" && parts[3] == "sessions" && parts[4] != "" && parts[5] == "stream" {
+		return true
+	}
+	return len(parts) == 4 && parts[0] == "api" && parts[1] == "desktop-sessions" && parts[2] != "" && parts[3] == "stream"
 }
 
 func (s *server) migrate(ctx context.Context) error {

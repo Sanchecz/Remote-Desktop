@@ -1,9 +1,55 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestTimeoutUnlessWebSocket(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		headers   http.Header
+		wantTimed bool
+	}{
+		{name: "ordinary request", method: http.MethodGet, path: "/api/devices", wantTimed: true},
+		{name: "viewer websocket upgrade", method: http.MethodGet, path: "/api/desktop-sessions/session-id/stream", headers: http.Header{"Upgrade": {"websocket"}, "Connection": {"keep-alive, Upgrade"}}, wantTimed: false},
+		{name: "agent websocket upgrade", method: http.MethodGet, path: "/api/desktop/agent/sessions/session-id/stream", headers: http.Header{"Upgrade": {"websocket"}, "Connection": {"Upgrade"}}, wantTimed: false},
+		{name: "forged upgrade on ordinary API", method: http.MethodGet, path: "/api/devices", headers: http.Header{"Upgrade": {"websocket"}, "Connection": {"Upgrade"}}, wantTimed: true},
+		{name: "post cannot bypass timeout", method: http.MethodPost, path: "/api/desktop-sessions/session-id/stream", headers: http.Header{"Upgrade": {"websocket"}, "Connection": {"Upgrade"}}, wantTimed: true},
+		{name: "upgrade header without connection token", method: http.MethodGet, path: "/api/desktop-sessions/session-id/stream", headers: http.Header{"Upgrade": {"websocket"}}, wantTimed: true},
+		{name: "connection token without websocket upgrade", method: http.MethodGet, path: "/api/desktop-sessions/session-id/stream", headers: http.Header{"Connection": {"Upgrade"}}, wantTimed: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := timeoutUnlessWebSocket(time.Minute)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, hasDeadline := r.Context().Deadline()
+				if hasDeadline != test.wantTimed {
+					t.Fatalf("deadline present = %v, want %v", hasDeadline, test.wantTimed)
+				}
+				if test.wantTimed && r.Context().Value(deadlineProbeKey{}) != "kept" {
+					t.Fatal("request context values were not preserved")
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request = request.WithContext(context.WithValue(request.Context(), deadlineProbeKey{}, "kept"))
+			request.Header = test.headers.Clone()
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+			}
+		})
+	}
+}
+
+type deadlineProbeKey struct{}
 
 func TestPasswordHashRoundTrip(t *testing.T) {
 	hash, err := hashPassword("correct horse battery staple")

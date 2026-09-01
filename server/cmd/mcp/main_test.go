@@ -65,7 +65,7 @@ func TestActionSchemaExposesExpandedGuardedCatalog(t *testing.T) {
 	properties, _ := plan.InputSchema["properties"].(map[string]any)
 	action, _ := properties["action"].(map[string]any)
 	values, _ := action["enum"].([]string)
-	for _, expected := range []string{"file.download", "package.install", "local.group.add_member", "windows.vpn.upsert", "system.reboot", "script.execute"} {
+	for _, expected := range []string{"diagnostic.lan_scan", "network.rdp.open", "network.ssh.open", "windows.printers.list", "windows.scan_folder.configure", "file.download", "package.install", "local.group.add_member", "windows.vpn.upsert", "system.reboot", "script.execute"} {
 		found := false
 		for _, value := range values {
 			found = found || value == expected

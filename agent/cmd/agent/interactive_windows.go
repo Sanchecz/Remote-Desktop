@@ -23,7 +23,10 @@ import (
 // attached to the worker from the previous WinStation.
 const interactiveCompanionInterval = 2 * time.Second
 
-var windowsSessionBindingMu sync.Mutex
+var (
+	windowsSessionBindingMu                sync.Mutex
+	desktopWorkerFallbackMarkerCleanupOnce sync.Once
+)
 
 // runInteractiveCompanionBroker keeps the visible tray and desktop-capture
 // companion in exactly one SID-bound interactive Windows session. Windows services run
@@ -365,6 +368,37 @@ func desktopWorkerVersionPath(target string) string {
 	return desktopWorkerPath(target) + ".version"
 }
 
+func desktopWorkerUserTokenFallbackPath(target string, sessionID uint32) string {
+	return fmt.Sprintf("%s.session-%d.user-token", target, sessionID)
+}
+
+func requestDesktopWorkerUserTokenFallback() {
+	executable, err := os.Executable()
+	if err != nil {
+		return
+	}
+	var sessionID uint32
+	if windows.ProcessIdToSessionId(uint32(os.Getpid()), &sessionID) != nil || sessionID == 0 {
+		return
+	}
+	marker := desktopWorkerUserTokenFallbackPath(filepath.Clean(executable), sessionID)
+	_ = os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o600)
+}
+
+func clearDesktopWorkerUserTokenFallbackRequest() {
+	desktopWorkerFallbackMarkerCleanupOnce.Do(func() {
+		executable, err := os.Executable()
+		if err != nil {
+			return
+		}
+		var sessionID uint32
+		if windows.ProcessIdToSessionId(uint32(os.Getpid()), &sessionID) != nil || sessionID == 0 {
+			return
+		}
+		_ = os.Remove(desktopWorkerUserTokenFallbackPath(filepath.Clean(executable), sessionID))
+	})
+}
+
 func ensureInteractiveDesktopCompanions(target string) ([]uint32, error) {
 	sessions, err := activeWindowsSessions()
 	if err != nil {
@@ -430,6 +464,47 @@ func ensureInteractiveDesktopCompanions(target string) ([]uint32, error) {
 }
 
 func launchInteractiveDesktopCompanion(target string, sessionID uint32) error {
+	if _, err := os.Stat(desktopWorkerUserTokenFallbackPath(target, sessionID)); err == nil {
+		return launchInteractiveDesktopCompanionAsUser(target, sessionID)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("проверка VDI-режима запуска: %w", err)
+	}
+	return launchInteractiveDesktopCompanionAsSystem(target, sessionID)
+}
+
+func launchInteractiveDesktopCompanionAsUser(target string, sessionID uint32) error {
+	var token windows.Token
+	if err := windows.WTSQueryUserToken(sessionID, &token); err != nil {
+		return fmt.Errorf("VDI-токен закреплённого пользователя: %w", err)
+	}
+	defer token.Close()
+	var environment *uint16
+	if err := windows.CreateEnvironmentBlock(&environment, token, false); err != nil {
+		return fmt.Errorf("VDI-окружение закреплённого пользователя: %w", err)
+	}
+	defer windows.DestroyEnvironmentBlock(environment)
+	application, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return err
+	}
+	commandLine, err := windows.UTF16PtrFromString(fmt.Sprintf(`"%s" desktop-worker`, target))
+	if err != nil {
+		return err
+	}
+	desktop, _ := windows.UTF16PtrFromString(`winsta0\default`)
+	workingDirectory, _ := windows.UTF16PtrFromString(filepath.Dir(target))
+	startup := windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfo{})), Desktop: desktop, Flags: windows.STARTF_USESHOWWINDOW, ShowWindow: windows.SW_HIDE}
+	var process windows.ProcessInformation
+	flags := uint32(windows.CREATE_UNICODE_ENVIRONMENT | windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP)
+	if err := windows.CreateProcessAsUser(token, application, commandLine, nil, nil, false, flags, environment, workingDirectory, &startup, &process); err != nil {
+		return fmt.Errorf("запуск VDI-модуля с токеном закреплённого пользователя: %w", err)
+	}
+	windows.CloseHandle(process.Thread)
+	windows.CloseHandle(process.Process)
+	return nil
+}
+
+func launchInteractiveDesktopCompanionAsSystem(target string, sessionID uint32) error {
 	var serviceToken windows.Token
 	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE|windows.TOKEN_ADJUST_PRIVILEGES, &serviceToken); err != nil {
 		return fmt.Errorf("токен службы: %w", err)

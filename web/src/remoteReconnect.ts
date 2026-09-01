@@ -29,7 +29,7 @@ export function isRecoverableRemoteStatusFailure(consecutiveFailures: number) {
 // a working path. Leave enough margin for the heartbeat plus normal Internet
 // jitter, then replace the stale sockets instead of making the user reopen the
 // session manually.
-export function isRemoteFrameStreamStalled(lastFrameAt: number, now: number, thresholdMs = 8_000) {
+export function isRemoteFrameStreamStalled(lastFrameAt: number, now: number, thresholdMs = 6_500) {
 	if (!Number.isFinite(lastFrameAt) || !Number.isFinite(now) || !Number.isFinite(thresholdMs) || thresholdMs <= 0) return false;
 	return now - lastFrameAt >= thresholdMs;
 }

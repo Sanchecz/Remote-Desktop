@@ -39,3 +39,13 @@ func desktopVDIRecoveryDelay(failures int) time.Duration {
 func desktopVDIRecoveryShouldRestart(startedAt, now time.Time) bool {
 	return !startedAt.IsZero() && !now.Before(startedAt.Add(desktopVDIRecoveryRestartAfter))
 }
+
+func desktopVDIShouldUseUserTokenFallback(err error) bool {
+	if err == nil {
+		return false
+	}
+	// DXGI reports HRESULT 0x80070005 when the VDI display adapter rejects the
+	// LocalSystem token after an RDP reconnect. A fresh process is still required,
+	// but it must be launched with the exact SID-bound user's primary token.
+	return strings.Contains(strings.ToLower(err.Error()), "80070005")
+}

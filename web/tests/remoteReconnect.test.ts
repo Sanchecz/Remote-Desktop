@@ -26,8 +26,8 @@ test("stale HTTP fallback responses cannot leak across WebSocket recovery", () =
 });
 
 test("an OPEN but silent stream is replaced after the static-frame heartbeat margin", () => {
-	assert.equal(isRemoteFrameStreamStalled(1_000, 8_999), false);
-	assert.equal(isRemoteFrameStreamStalled(1_000, 9_000), true);
+	assert.equal(isRemoteFrameStreamStalled(1_000, 7_499), false);
+	assert.equal(isRemoteFrameStreamStalled(1_000, 7_500), true);
 	assert.equal(isRemoteFrameStreamStalled(Number.NaN, 9_000), false);
 	assert.equal(isRemoteFrameStreamStalled(1_000, 9_000, 0), false);
 });

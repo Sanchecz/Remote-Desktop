@@ -29,10 +29,16 @@ const maxRememberedActionNonces = 128
 var safeAgentServiceName = regexp.MustCompile(`^[A-Za-z0-9_. -]{1,128}$`)
 var safeAgentPackageID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$`)
 var safeAgentPrincipal = regexp.MustCompile(`^[\p{L}\p{N}._@ -]{1,128}$`)
+var safeAgentLANUsername = regexp.MustCompile(`^[\p{L}\p{N}._@\\ -]{1,128}$`)
+var safeAgentWindowsPrincipal = regexp.MustCompile(`^[\p{L}\p{N}._@\\ -]{1,128}$`)
 var safeAgentDownloadName = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{N}._() -]{0,127}$`)
 var agentSHA256Text = regexp.MustCompile(`^[A-Fa-f0-9]{64}$`)
 var safeAgentVPNName = regexp.MustCompile(`^[\p{L}\p{N}._ -]{1,64}$`)
 var safeAgentDNSName = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)$`)
+var safeAgentLANHost = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)$`)
+var safeAgentPrinterName = regexp.MustCompile(`^[^\x00-\x1f]{1,256}$`)
+var safeAgentWindowsPath = regexp.MustCompile(`(?i)^[a-z]:\\[^<>:"|?*\x00-\x1f]{1,220}$`)
+var safeAgentShareName = regexp.MustCompile(`^[\p{L}\p{N}._ -]{1,64}$`)
 
 const maxActionDownloadBytes int64 = 2 * 1024 * 1024 * 1024
 
@@ -158,11 +164,69 @@ func decodeAndNormalizeActionParameters(action string, raw json.RawMessage) (map
 		input = map[string]any{}
 	}
 	switch action {
-	case "diagnostic.system", "diagnostic.network", "diagnostic.services", "system.reboot":
+	case "diagnostic.system", "diagnostic.network", "diagnostic.services", "windows.printers.list", "windows.printers.open_settings", "system.reboot":
 		if len(input) != 0 {
 			return nil, errors.New("диагностическое действие не принимает параметры")
 		}
 		return map[string]any{}, nil
+	case "diagnostic.lan_scan":
+		if len(input) > 1 {
+			return nil, errors.New("параметры сканирования локальной сети недопустимы")
+		}
+		subnet, _ := input["subnet"].(string)
+		subnet = strings.TrimSpace(subnet)
+		if subnet != "" {
+			ip, network, err := net.ParseCIDR(subnet)
+			if err != nil || ip.To4() == nil || !ip.IsPrivate() {
+				return nil, errors.New("сканировать можно только внутреннюю IPv4-подсеть")
+			}
+			ones, bits := network.Mask.Size()
+			if bits != 32 || ones < 24 || ones > 32 {
+				return nil, errors.New("за один запуск допускается не более 256 адресов")
+			}
+			subnet = network.String()
+		}
+		return map[string]any{"subnet": subnet}, nil
+	case "network.rdp.open", "network.ssh.open":
+		if runtime.GOOS != "windows" || len(input) != 3 {
+			return nil, errors.New("параметры внутреннего подключения недопустимы")
+		}
+		host, _ := input["host"].(string)
+		username, _ := input["username"].(string)
+		host, username = strings.TrimSpace(host), strings.TrimSpace(username)
+		if net.ParseIP(host) == nil && !safeAgentLANHost.MatchString(host) {
+			return nil, errors.New("адрес внутреннего узла недопустим")
+		}
+		port, err := agentIntegerParameter(input["port"])
+		if err != nil || port < 1 || port > 65535 {
+			return nil, errors.New("порт внутреннего узла недопустим")
+		}
+		if username != "" && !safeAgentLANUsername.MatchString(username) {
+			return nil, errors.New("имя пользователя внутреннего подключения недопустимо")
+		}
+		return map[string]any{"host": host, "port": port, "username": username}, nil
+	case "windows.printer.set_default":
+		if runtime.GOOS != "windows" || len(input) != 1 {
+			return nil, errors.New("параметры принтера недопустимы")
+		}
+		name, _ := input["name"].(string)
+		name = strings.TrimSpace(name)
+		if !safeAgentPrinterName.MatchString(name) {
+			return nil, errors.New("имя принтера недопустимо")
+		}
+		return map[string]any{"name": name}, nil
+	case "windows.scan_folder.configure":
+		if runtime.GOOS != "windows" || len(input) != 3 {
+			return nil, errors.New("параметры папки сканов недопустимы")
+		}
+		path, _ := input["path"].(string)
+		shareName, _ := input["shareName"].(string)
+		principal, _ := input["principal"].(string)
+		path, shareName, principal = strings.TrimSpace(path), strings.TrimSpace(shareName), strings.TrimSpace(principal)
+		if !safeAgentWindowsPath.MatchString(path) || strings.Contains(path, `..`) || !safeAgentShareName.MatchString(shareName) || strings.HasSuffix(shareName, "$") || !safeAgentWindowsPrincipal.MatchString(principal) {
+			return nil, errors.New("параметры папки сканов не прошли локальную проверку Agent")
+		}
+		return map[string]any{"path": path, "shareName": shareName, "principal": principal}, nil
 	case "service.restart":
 		name, _ := input["name"].(string)
 		name = strings.TrimSpace(name)
@@ -262,6 +326,24 @@ func decodeAndNormalizeActionParameters(action string, raw json.RawMessage) (map
 	}
 }
 
+func agentIntegerParameter(value any) (int64, error) {
+	switch typed := value.(type) {
+	case json.Number:
+		return typed.Int64()
+	case float64:
+		if typed != float64(int64(typed)) {
+			return 0, errors.New("not an integer")
+		}
+		return int64(typed), nil
+	case string:
+		return strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+	case int64:
+		return typed, nil
+	default:
+		return 0, errors.New("not a number")
+	}
+}
+
 func agentActionRequestHash(deviceID, action string, parameters map[string]any) string {
 	payload, _ := json.Marshal(struct {
 		DeviceID   string         `json:"deviceId"`
@@ -301,6 +383,27 @@ func executeTypedAction(ctx context.Context, cfg *config, action string, paramet
 		return executeNetworkDiagnostic(ctx)
 	case "diagnostic.services":
 		return executeServicesDiagnostic(ctx)
+	case "diagnostic.lan_scan":
+		subnet, _ := parameters["subnet"].(string)
+		return executeLANScan(ctx, subnet)
+	case "network.rdp.open", "network.ssh.open":
+		host, _ := parameters["host"].(string)
+		username, _ := parameters["username"].(string)
+		port, _ := parameters["port"].(int64)
+		protocol := strings.TrimSuffix(strings.TrimPrefix(action, "network."), ".open")
+		return executeInteractiveNetworkClient(ctx, protocol, host, int(port), username)
+	case "windows.printers.list":
+		return executeWindowsPrinterList(ctx)
+	case "windows.printers.open_settings":
+		return executeWindowsPrinterSettings(ctx)
+	case "windows.printer.set_default":
+		name, _ := parameters["name"].(string)
+		return executeWindowsPrinterSetDefault(ctx, name)
+	case "windows.scan_folder.configure":
+		path, _ := parameters["path"].(string)
+		shareName, _ := parameters["shareName"].(string)
+		principal, _ := parameters["principal"].(string)
+		return executeWindowsScanFolderConfigure(ctx, path, shareName, principal)
 	case "service.restart":
 		name, _ := parameters["name"].(string)
 		return executeServiceRestart(ctx, name)

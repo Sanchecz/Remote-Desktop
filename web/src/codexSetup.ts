@@ -91,6 +91,8 @@ export function buildCodexOperatorInstruction(baseURL: string) {
 5. Создай задание RemoteIt и дождись его проверки владельцем или администратором в панели. Критические действия и script.execute подтверждает владелец.
 6. После подтверждения дождись завершения, проверь требуемый результат и сообщи ID задания, код завершения и значимый вывод.
 7. Никогда не выполняй действие на другом устройстве, если указанный Remote ID отсутствует, неоднозначен или находится не в сети.
+8. Для внутренней сети используй diagnostic.lan_scan. RDP/SSH открывай только типизированными network.rdp.open/network.ssh.open и только к private-адресам; не запрашивай и не передавай пароль.
+9. Для принтеров предпочитай windows.printers.list, windows.printers.open_settings, windows.printer.set_default и windows.scan_folder.configure; не заменяй их произвольным скриптом без необходимости.
 
 ГОТОВЫЙ ЗАПРОС ДЛЯ ДРУГОГО CODEX
 Используй RemoteIt MCP.

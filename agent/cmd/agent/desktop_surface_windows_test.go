@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -21,6 +22,18 @@ func TestDesktopRequiresSecureCapture(t *testing.T) {
 		if actual := desktopRequiresSecureCapture(test.name); actual != test.secure {
 			t.Fatalf("desktopRequiresSecureCapture(%q) = %v, want %v", test.name, actual, test.secure)
 		}
+	}
+}
+
+func TestDesktopVDIUserTokenFallbackOnlyForAccessDenied(t *testing.T) {
+	if !desktopVDIShouldUseUserTokenFallback(errors.New("gdi-dxgi-create-3-80070005-failed-reinit-failed")) {
+		t.Fatal("DXGI E_ACCESSDENIED must select the SID-bound user-token fallback")
+	}
+	if desktopVDIShouldUseUserTokenFallback(errors.New("gdi-dxgi-frame-11-887a0026")) {
+		t.Fatal("unrelated DXGI failures must keep the normal process restart path")
+	}
+	if desktopVDIShouldUseUserTokenFallback(nil) {
+		t.Fatal("nil error selected a token fallback")
 	}
 }
 

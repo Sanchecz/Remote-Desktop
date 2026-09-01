@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -117,5 +118,22 @@ func TestExpandedSignedActionsRejectUnsafeParameters(t *testing.T) {
 				t.Fatalf("unsafe parameters were accepted for %s", test.action)
 			}
 		})
+	}
+}
+
+func TestAgentLANAndPrinterActionValidation(t *testing.T) {
+	if _, err := decodeAndNormalizeActionParameters("diagnostic.lan_scan", json.RawMessage(`{"subnet":"192.168.10.0/24"}`)); err != nil {
+		t.Fatalf("valid LAN scan rejected: %v", err)
+	}
+	if _, err := decodeAndNormalizeActionParameters("diagnostic.lan_scan", json.RawMessage(`{"subnet":"1.1.1.0/24"}`)); err == nil {
+		t.Fatal("public LAN scan range accepted")
+	}
+	if runtime.GOOS == "windows" {
+		if _, err := decodeAndNormalizeActionParameters("network.rdp.open", json.RawMessage(`{"host":"192.168.1.10","port":3389,"username":"admin"}`)); err != nil {
+			t.Fatalf("valid RDP action rejected: %v", err)
+		}
+		if _, err := decodeAndNormalizeActionParameters("windows.scan_folder.configure", json.RawMessage(`{"path":"C:\\RemoteIt Scans","shareName":"RemoteItScans","principal":"Users"}`)); err != nil {
+			t.Fatalf("valid scan folder rejected: %v", err)
+		}
 	}
 }
