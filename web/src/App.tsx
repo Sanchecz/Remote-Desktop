@@ -354,14 +354,14 @@ function Login({ onLogin, theme, onTheme }: { onLogin: (user: User, csrf: string
           </label>
           <label>
             <span>Пароль</span>
-            <div className="input-wrap"><LockKeyhole size={18} /><input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required autoFocus={!installCode} /></div>
+            <div className="input-wrap"><LockKeyhole size={18} /><input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required /></div>
           </label>
           {error && <div className="form-error">{error}</div>}
           <button className="primary-button login-button" disabled={loading}>{loading ? <RefreshCw className="spin" size={18} /> : <KeyRound size={18} />} Войти</button>
         </form>
 		<div className="login-divider"><span>ИЛИ УСТАНОВИТЬ AGENT</span></div>
 		<form className="public-install-form" onSubmit={resolveInstallCode}>
-			<label><span>Код установки</span><div className="input-wrap"><Download size={18} /><input value={installCode} onChange={(event) => { setInstallCode(event.target.value); setInstallInfo(null); setInstallError(""); }} placeholder="Вставьте код от администратора" autoFocus={Boolean(installCode)} required /></div></label>
+			<label><span>Код установки</span><div className="input-wrap"><Download size={18} /><input value={installCode} onChange={(event) => { setInstallCode(event.target.value); setInstallInfo(null); setInstallError(""); }} placeholder="Вставьте код от администратора" required /></div></label>
 			{installError && <div className="form-error">{installError}</div>}
 			{installInfo ? <div className="public-install-result"><div className="public-install-result-head"><span className="status-dot" /><div><strong>{installInfo.name}</strong><small>Группа «{installInfo.group}» · осталось установок: {installInfo.remaining}</small></div></div><div className="public-install-platforms"><button type="button" onClick={() => void downloadPublicAgent("windows")} disabled={installLoading}><DeviceOSIcon os="Windows" size={25} /><span>Windows<small>готовый EXE</small></span></button><button type="button" onClick={() => void downloadPublicAgent("macos")} disabled={installLoading}><DeviceOSIcon os="macOS" size={25} /><span>macOS<small>установщик SH</small></span></button><button type="button" onClick={() => void downloadPublicAgent("linux")} disabled={installLoading}><DeviceOSIcon os="Linux" size={25} /><span>Linux<small>установщик SH</small></span></button><button type="button" onClick={() => void downloadPublicAndroidAgent()} disabled={installLoading}><DeviceOSIcon os="Android" size={25} /><span>Android Agent<small>APK · код скопирован</small></span></button></div><p>Agent запросит имя устройства и автоматически появится в панели администратора. Для Android вставьте скопированный код и разрешите показ экрана.</p></div> : <button className="secondary-button public-install-submit" disabled={installLoading}>{installLoading ? <RefreshCw className="spin" size={17} /> : <Download size={17} />} Получить Agent</button>}
 		</form>
