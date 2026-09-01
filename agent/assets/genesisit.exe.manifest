@@ -3,7 +3,7 @@
   <assemblyIdentity
     type="win32"
     name="RemoteIt.Agent"
-      version="1.0.36.0"
+      version="1.0.37.0"
     processorArchitecture="*" />
   <description>RemoteIt Agent</description>
   <dependency>

@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"reflect"
 	"testing"
 )
 
@@ -25,5 +26,24 @@ func TestResolveLANScanNetworkRejectsPublicAndOversized(t *testing.T) {
 		if _, _, err := resolveLANScanNetwork(candidate); err == nil {
 			t.Fatalf("unsafe scan network accepted: %s", candidate)
 		}
+	}
+}
+
+func TestParseLANNeighborTableIsLanguageIndependentAndPrivate(t *testing.T) {
+	input := []byte("Interface: 192.168.1.10 --- 0x9\n" +
+		"  Internet Address      Physical Address      Type\n" +
+		"  192.168.1.1           aa-bb-cc-dd-ee-ff     dynamic\n" +
+		"  192.168.1.20          11-22-33-44-55-66     динамический\n" +
+		"  192.168.1.1           aa-bb-cc-dd-ee-ff     dynamic\n" +
+		"  8.8.8.8               00-00-00-00-00-00     static\n" +
+		"  224.0.0.22            01-00-5e-00-00-16     static\n")
+	neighbors := parseLANNeighborTable(input)
+	got := make([]string, 0, len(neighbors))
+	for _, neighbor := range neighbors {
+		got = append(got, neighbor.String())
+	}
+	want := []string{"192.168.1.1", "192.168.1.20"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected neighbor table: got=%v want=%v", got, want)
 	}
 }

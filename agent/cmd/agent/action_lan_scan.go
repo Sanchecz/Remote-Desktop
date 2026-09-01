@@ -8,11 +8,8 @@ import (
 	"net"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
-
-var lanScanPorts = []int{22, 80, 135, 139, 443, 445, 515, 631, 3389, 5357, 8000, 8080, 9100}
 
 type lanScanHost struct {
 	IP        string `json:"ip"`
@@ -40,43 +37,9 @@ func executeLANScan(ctx context.Context, requestedSubnet string) remoteJobResult
 		return failedAction("в выбранной подсети нет допустимых адресов или превышен лимит 256")
 	}
 	started := time.Now().UTC()
-	type scanTarget struct{ ip net.IP }
-	targets := make(chan scanTarget)
-	results := make(chan lanScanHost, len(addresses))
-	workerCount := 32
-	if len(addresses) < workerCount {
-		workerCount = len(addresses)
-	}
-	var workers sync.WaitGroup
-	for worker := 0; worker < workerCount; worker++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for target := range targets {
-				if host, ok := scanLANHost(ctx, target.ip); ok {
-					select {
-					case results <- host:
-					case <-ctx.Done():
-						return
-					}
-				}
-			}
-		}()
-	}
-	go func() {
-		defer close(targets)
-		for _, address := range addresses {
-			select {
-			case targets <- scanTarget{ip: address}:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	go func() { workers.Wait(); close(results) }()
-	hosts := make([]lanScanHost, 0, 32)
-	for host := range results {
-		hosts = append(hosts, host)
+	hosts, scanErr := scanLANHosts(ctx, addresses, agentIP)
+	if scanErr != nil {
+		return failedAction("сканирование локальной сети не выполнено: " + scanErr.Error())
 	}
 	if err := ctx.Err(); err != nil {
 		return failedAction("сканирование локальной сети прервано: " + err.Error())
@@ -186,30 +149,36 @@ func usableIPv4Addresses(network *net.IPNet) []net.IP {
 	return addresses
 }
 
-func scanLANHost(ctx context.Context, ip net.IP) (lanScanHost, bool) {
-	started := time.Now()
-	openPorts := make([]int, 0, 4)
-	dialer := net.Dialer{Timeout: 140 * time.Millisecond}
-	for _, port := range lanScanPorts {
-		connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), fmt.Sprint(port)))
-		if err == nil {
-			openPorts = append(openPorts, port)
-			_ = connection.Close()
-		}
-		if ctx.Err() != nil {
-			return lanScanHost{}, false
-		}
+func resolveLANScanHostName(ctx context.Context, host *lanScanHost) {
+	if host == nil || net.ParseIP(host.IP) == nil {
+		return
 	}
-	if len(openPorts) == 0 {
-		return lanScanHost{}, false
-	}
-	host := lanScanHost{IP: ip.String(), Latency: max(time.Since(started).Milliseconds(), 1), OpenPorts: openPorts}
 	lookupCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	if names, err := net.DefaultResolver.LookupAddr(lookupCtx, ip.String()); err == nil && len(names) > 0 {
+	if names, err := net.DefaultResolver.LookupAddr(lookupCtx, host.IP); err == nil && len(names) > 0 {
 		host.Name = strings.TrimSuffix(names[0], ".")
 	}
-	return host, true
+}
+
+func parseLANNeighborTable(output []byte) []net.IP {
+	seen := make(map[string]struct{})
+	neighbors := make([]net.IP, 0, 32)
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		ip := net.ParseIP(fields[0]).To4()
+		if ip == nil || !ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() {
+			continue
+		}
+		if _, ok := seen[ip.String()]; ok {
+			continue
+		}
+		seen[ip.String()] = struct{}{}
+		neighbors = append(neighbors, ip)
+	}
+	return neighbors
 }
 
 func bytesCompareIP(left, right net.IP) int {
