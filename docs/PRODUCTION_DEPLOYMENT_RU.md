@@ -2,6 +2,8 @@
 
 Эта инструкция разворачивает новый независимый экземпляр RemoteIt на чистом VDS. Она не содержит рабочих паролей, токенов, IP-адресов, SSH-ключей или приватных ключей подписи.
 
+Если задача — установить RemoteIt на новый хостинг либо перенести туда уже работающую систему с сохранением пользователей, устройств и Remote ID, начните с единой инструкции [INSTALL_NEW_HOSTING_RU.md](INSTALL_NEW_HOSTING_RU.md).
+
 ## 1. Требования
 
 - Ubuntu 22.04/24.04 x86-64;
@@ -18,15 +20,15 @@
 ```sh
 sudo install -d -m 0750 /opt/genesisit/releases /opt/genesisit/shared /opt/genesisit/backups
 sudo install -d -m 0750 /opt/genesisit/releases/1.0.43
-sudo tar -xzf remoteit-1.0.43-source.tar.gz -C /opt/genesisit/releases/1.0.43
+sudo tar -xzf RemoteIt-source-1.0.43.tar.gz -C /opt/genesisit/releases/1.0.43
 sudo ln -sfn /opt/genesisit/releases/1.0.43 /opt/genesisit/current
 cd /opt/genesisit/current
 ```
 
-Проверьте SHA-256 до распаковки:
+Проверьте SHA-256 по `DELIVERABLES-SHA256.txt` до распаковки:
 
 ```sh
-sha256sum -c remoteit-1.0.43-source.tar.gz.sha256
+grep 'RemoteIt-source-1.0.43.tar.gz$' DELIVERABLES-SHA256.txt | sha256sum -c -
 ```
 
 ## 3. Закрытая конфигурация

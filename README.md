@@ -2,6 +2,10 @@
 
 RemoteIt — частная платформа удалённого администрирования Windows 10/11/Server, Ubuntu/Linux, macOS и Android. В состав входят адаптивная веб-панель, настольная консоль, PWA, компьютерные Agent, Android-приложение администратора и отдельный Android Agent пользователя.
 
+## Установка на новый хостинг
+
+Единая русская инструкция для чистого VDS, переноса действующей системы с сохранением Remote ID, проверки, резервного копирования и отката: [docs/INSTALL_NEW_HOSTING_RU.md](docs/INSTALL_NEW_HOSTING_RU.md).
+
 ## Рабочие адреса
 
 - Панель: `https://supportgenesis.ru`
@@ -113,7 +117,7 @@ MCP-мост запускается только на доверенном ко�
 
 Полная процедура, проверки целостности и откат описаны в [docs/MIGRATION.md](docs/MIGRATION.md).
 
-Первичное production-развёртывание для нового владельца, настройка домена, выпуск первого токена, обновление и ежедневная эксплуатация описаны в [docs/PRODUCTION_DEPLOYMENT_RU.md](docs/PRODUCTION_DEPLOYMENT_RU.md).
+Полный маршрут установки на новый хостинг — от пустого Ubuntu VDS до проверенного production, а также перенос существующей системы без смены Remote ID — описан в [docs/INSTALL_NEW_HOSTING_RU.md](docs/INSTALL_NEW_HOSTING_RU.md). Дополнительные детали первого запуска и ежедневной эксплуатации находятся в [docs/PRODUCTION_DEPLOYMENT_RU.md](docs/PRODUCTION_DEPLOYMENT_RU.md).
 
 Проверка дампа без изменения БД:
 
