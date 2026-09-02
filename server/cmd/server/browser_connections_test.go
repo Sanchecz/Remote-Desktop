@@ -42,3 +42,34 @@ func TestEncryptGuacamoleJSONSignsAndEncryptsExpectedPayload(t *testing.T) {
 		t.Fatalf("unexpected decrypted payload: %s", plaintext)
 	}
 }
+
+func TestGuacamoleRDPParametersPreserveQualityAndFastPaths(t *testing.T) {
+	parameters := guacamoleConnectionParameters(browserConnectionInput{
+		Protocol: "rdp", Username: "operator", Password: "temporary", Domain: "OFFICE",
+	}, "app", 41234)
+	want := map[string]string{
+		"hostname": "app", "port": "41234", "username": "operator", "password": "temporary", "domain": "OFFICE",
+		"resize-method": "display-update", "color-depth": "24", "enable-font-smoothing": "true",
+		"disable-gfx": "false", "disable-bitmap-caching": "false", "disable-offscreen-caching": "false",
+	}
+	for key, expected := range want {
+		if parameters[key] != expected {
+			t.Fatalf("unexpected RDP parameter %s: got=%q want=%q", key, parameters[key], expected)
+		}
+	}
+	if parameters["force-lossless"] != "" {
+		t.Fatal("RDP must keep Guacamole adaptive compression instead of forcing a high-latency lossless stream")
+	}
+}
+
+func TestGuacamoleSSHParametersDoNotLeakRDPOptions(t *testing.T) {
+	parameters := guacamoleConnectionParameters(browserConnectionInput{Protocol: "ssh"}, "app", 40222)
+	if parameters["enable-sftp"] != "true" {
+		t.Fatal("SSH connection must keep SFTP support")
+	}
+	for _, key := range []string{"color-depth", "disable-gfx", "resize-method"} {
+		if _, exists := parameters[key]; exists {
+			t.Fatalf("SSH unexpectedly contains RDP parameter %s", key)
+		}
+	}
+}

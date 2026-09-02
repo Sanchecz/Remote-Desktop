@@ -123,25 +123,7 @@ func (s *server) createBrowserConnection(w http.ResponseWriter, r *http.Request)
 
 	bridgePort := listener.Addr().(*net.TCPAddr).Port
 	tunnelHost := envOr("REMOTEIT_GUACAMOLE_TUNNEL_HOST", "app")
-	parameters := map[string]string{"hostname": tunnelHost, "port": strconv.Itoa(bridgePort)}
-	if in.Username != "" {
-		parameters["username"] = in.Username
-	}
-	if in.Password != "" {
-		parameters["password"] = in.Password
-	}
-	if in.Protocol == "rdp" {
-		if in.Domain != "" {
-			parameters["domain"] = in.Domain
-		}
-		parameters["security"] = "any"
-		parameters["ignore-cert"] = "true"
-		parameters["resize-method"] = "display-update"
-		parameters["enable-font-smoothing"] = "true"
-		parameters["enable-desktop-composition"] = "true"
-	} else {
-		parameters["enable-sftp"] = "true"
-	}
+	parameters := guacamoleConnectionParameters(in, tunnelHost, bridgePort)
 	connectionName := fmt.Sprintf("RemoteIt %s · %s", strings.ToUpper(in.Protocol), target)
 	authPayload := map[string]any{
 		"username":    "remoteit-" + a.UserID,
@@ -156,6 +138,36 @@ func (s *server) createBrowserConnection(w http.ResponseWriter, r *http.Request)
 	launchURL := "/guacamole/?" + url.Values{"data": []string{encrypted}}.Encode()
 	s.audit(r.Context(), a, nil, "browser_connection.created", "network_tunnel", tunnelID, clientIP(r), map[string]any{"deviceId": in.DeviceID, "protocol": in.Protocol, "targetHost": target, "targetPort": in.Port, "jobId": jobID})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": tunnelID, "launchUrl": launchURL, "expiresAt": expiresAt})
+}
+
+func guacamoleConnectionParameters(in browserConnectionInput, tunnelHost string, bridgePort int) map[string]string {
+	parameters := map[string]string{"hostname": tunnelHost, "port": strconv.Itoa(bridgePort)}
+	if in.Username != "" {
+		parameters["username"] = in.Username
+	}
+	if in.Password != "" {
+		parameters["password"] = in.Password
+	}
+	if in.Protocol == "rdp" {
+		if in.Domain != "" {
+			parameters["domain"] = in.Domain
+		}
+		parameters["security"] = "any"
+		parameters["ignore-cert"] = "true"
+		parameters["resize-method"] = "display-update"
+		parameters["color-depth"] = "24"
+		parameters["enable-font-smoothing"] = "true"
+		parameters["enable-desktop-composition"] = "true"
+		// Guacamole 1.6 enables GFX and the RDP bitmap/offscreen caches by
+		// default. Keep those fast paths explicit so a future configuration
+		// change cannot silently degrade responsiveness or image stability.
+		parameters["disable-gfx"] = "false"
+		parameters["disable-bitmap-caching"] = "false"
+		parameters["disable-offscreen-caching"] = "false"
+	} else {
+		parameters["enable-sftp"] = "true"
+	}
+	return parameters
 }
 
 func guacamoleJSONSecret() ([]byte, error) {

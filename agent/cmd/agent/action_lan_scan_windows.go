@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -93,10 +94,90 @@ func scanLANHosts(ctx context.Context, addresses []net.IP, agentIP net.IP) ([]la
 	for _, host := range byIP {
 		hosts = append(hosts, host)
 	}
+	resolveMissingWindowsLANHostNames(ctx, hosts)
 	sort.Slice(hosts, func(left, right int) bool {
 		return bytesCompareIP(net.ParseIP(hosts[left].IP), net.ParseIP(hosts[right].IP)) < 0
 	})
 	return hosts, nil
+}
+
+// Neighbours learned from ARP and the local Agent address are merged after the
+// active probe workers finish. Enrich those rows as well, otherwise the scan
+// shows an IP even when Windows can resolve a useful computer name. Reverse DNS
+// is attempted for every unnamed host; NetBIOS is only used for Windows-like
+// endpoints and is tightly bounded so discovery cannot stall on silent hosts.
+func resolveMissingWindowsLANHostNames(ctx context.Context, hosts []lanScanHost) {
+	if len(hosts) == 0 {
+		return
+	}
+	indexes := make(chan int)
+	workerCount := min(12, len(hosts))
+	var workers sync.WaitGroup
+	for worker := 0; worker < workerCount; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range indexes {
+				if hosts[index].Name != "" {
+					continue
+				}
+				resolveLANScanHostName(ctx, &hosts[index])
+				if hosts[index].Name == "" && hasLANPort(hosts[index].OpenPorts, 445, 3389) {
+					hosts[index].Name = windowsNetBIOSHostName(ctx, hosts[index].IP)
+				}
+			}
+		}()
+	}
+	for index := range hosts {
+		select {
+		case indexes <- index:
+		case <-ctx.Done():
+			close(indexes)
+			workers.Wait()
+			return
+		}
+	}
+	close(indexes)
+	workers.Wait()
+}
+
+func hasLANPort(ports []int, expected ...int) bool {
+	for _, port := range ports {
+		for _, candidate := range expected {
+			if port == candidate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func windowsNetBIOSHostName(ctx context.Context, ip string) string {
+	lookupCtx, cancel := context.WithTimeout(ctx, 650*time.Millisecond)
+	defer cancel()
+	command := exec.CommandContext(lookupCtx, "nbtstat.exe", "-A", ip)
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+	output, err := command.Output()
+	if err != nil {
+		return ""
+	}
+	return parseWindowsNetBIOSHostName(output)
+}
+
+func parseWindowsNetBIOSHostName(output []byte) string {
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		for index, field := range fields {
+			if field != "<00>" || index == 0 {
+				continue
+			}
+			name := strings.TrimSpace(fields[index-1])
+			if name != "" && len(name) <= 63 && !strings.ContainsAny(name, "\\/:") {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 func probeKnownLANPorts(ctx context.Context, host string) []int {

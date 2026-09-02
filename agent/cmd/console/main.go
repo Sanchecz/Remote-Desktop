@@ -27,7 +27,7 @@ import (
 )
 
 const consoleURL = "https://supportgenesis.ru"
-const consoleBuildVersion = "1.0.42"
+const consoleBuildVersion = "1.0.43"
 
 func main() {
 	installedPath, relaunch, installErr := ensureConsoleInstalled()

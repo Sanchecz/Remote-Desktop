@@ -8,6 +8,7 @@ RUN pnpm run build
 FROM golang:1.26-alpine AS server-build
 WORKDIR /src/server
 COPY server/ ./
+COPY Caddyfile /src/Caddyfile
 RUN go mod download && go vet -mod=readonly ./... && go test -mod=readonly ./... && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/genesis-server ./cmd/server && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/remoteit-mcp-linux-amd64 ./cmd/mcp && \
@@ -36,16 +37,16 @@ RUN apk add --no-cache cmake curl mingw-w64-gcc nasm ninja && \
 COPY agent/ ./
 RUN /go/bin/goversioninfo -64 -icon=assets/genesisit.ico -application-icon=assets/genesisit.ico -manifest=assets/genesisit.exe.manifest \
       -o=cmd/agent/rsrc_windows_amd64.syso -company=RemoteIt -description="RemoteIt Agent" \
-	-file-version=1.0.42.0 -product-version=1.0.42.0 -product-name=RemoteIt \
+	-file-version=1.0.43.0 -product-version=1.0.43.0 -product-name=RemoteIt \
       -internal-name=RemoteItAgent -original-name=RemoteIt-Agent-Setup.exe \
-	  -ver-major=1 -ver-minor=0 -ver-patch=42 -ver-build=0 \
-	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=42 -product-ver-build=0 assets/versioninfo.json && \
+	  -ver-major=1 -ver-minor=0 -ver-patch=43 -ver-build=0 \
+	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=43 -product-ver-build=0 assets/versioninfo.json && \
     /go/bin/goversioninfo -64 -icon=assets/genesisit.ico -application-icon=assets/genesisit.ico -manifest=assets/genesisit.exe.manifest \
       -o=cmd/console/rsrc_windows_amd64.syso -company=RemoteIt -description="RemoteIt Console" \
-	-file-version=1.0.42.0 -product-version=1.0.42.0 -product-name=RemoteIt \
+	-file-version=1.0.43.0 -product-version=1.0.43.0 -product-name=RemoteIt \
       -internal-name=RemoteItConsole -original-name=RemoteIt-Console.exe \
-	  -ver-major=1 -ver-minor=0 -ver-patch=42 -ver-build=0 \
-	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=42 -product-ver-build=0 assets/versioninfo.json && \
+	  -ver-major=1 -ver-minor=0 -ver-patch=43 -ver-build=0 \
+	-product-ver-major=1 -product-ver-minor=0 -product-ver-patch=43 -product-ver-build=0 assets/versioninfo.json && \
     go mod download && go vet -mod=readonly ./... && go test -mod=readonly ./... && mkdir -p /out && \
     CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
       CGO_CFLAGS="-I/opt/libjpeg-turbo-windows/include" \
@@ -112,7 +113,7 @@ RUN cd /app/web/downloads && \
     LINUX_SHA="$(sha256sum remoteit-agent-linux-amd64 | cut -d ' ' -f1)" && LINUX_SIZE="$(wc -c < remoteit-agent-linux-amd64 | tr -d ' ')" && \
     MAC_AMD_SHA="$(sha256sum remoteit-agent-macos-amd64 | cut -d ' ' -f1)" && MAC_AMD_SIZE="$(wc -c < remoteit-agent-macos-amd64 | tr -d ' ')" && \
     MAC_ARM_SHA="$(sha256sum remoteit-agent-macos-arm64 | cut -d ' ' -f1)" && MAC_ARM_SIZE="$(wc -c < remoteit-agent-macos-arm64 | tr -d ' ')" && \
-	printf '{"version":"1.0.42","platforms":{"windows-amd64":{"path":"/downloads/remoteit-agent-windows-amd64.exe","sha256":"%s","size":%s},"linux-amd64":{"path":"/downloads/remoteit-agent-linux-amd64","sha256":"%s","size":%s},"darwin-amd64":{"path":"/downloads/remoteit-agent-macos-amd64","sha256":"%s","size":%s},"darwin-arm64":{"path":"/downloads/remoteit-agent-macos-arm64","sha256":"%s","size":%s}}}\n' "$WIN_SHA" "$WIN_SIZE" "$LINUX_SHA" "$LINUX_SIZE" "$MAC_AMD_SHA" "$MAC_AMD_SIZE" "$MAC_ARM_SHA" "$MAC_ARM_SIZE" > AGENT-RELEASE.json && \
+	printf '{"version":"1.0.43","platforms":{"windows-amd64":{"path":"/downloads/remoteit-agent-windows-amd64.exe","sha256":"%s","size":%s},"linux-amd64":{"path":"/downloads/remoteit-agent-linux-amd64","sha256":"%s","size":%s},"darwin-amd64":{"path":"/downloads/remoteit-agent-macos-amd64","sha256":"%s","size":%s},"darwin-arm64":{"path":"/downloads/remoteit-agent-macos-arm64","sha256":"%s","size":%s}}}\n' "$WIN_SHA" "$WIN_SIZE" "$LINUX_SHA" "$LINUX_SIZE" "$MAC_AMD_SHA" "$MAC_AMD_SIZE" "$MAC_ARM_SHA" "$MAC_ARM_SIZE" > AGENT-RELEASE.json && \
 	sha256sum RemoteIt-Console.exe RemoteIt-Agent-Setup.exe RemoteIt-MCP.exe remoteit-mcp-linux-amd64 remoteit-agent-windows-amd64.exe remoteit-agent-linux-amd64 remoteit-agent-macos-amd64 remoteit-agent-macos-arm64 RemoteIt.apk RemoteIt-Agent-Android.apk install-remoteit.sh APK-SIGNER.txt AGENT-RELEASE.json > SHA256SUMS.txt
 USER genesis
 EXPOSE 8080

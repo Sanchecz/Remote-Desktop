@@ -1,4 +1,4 @@
-const VERSION = "remoteit-pwa-1.0.42-1";
+const VERSION = "remoteit-pwa-1.0.43-1";
 const SHELL_CACHE = VERSION + "-shell";
 const STATIC_FILES = ["/", "/manifest.webmanifest", "/icons/icon-192.png", "/icons/icon-512.png"];
 
