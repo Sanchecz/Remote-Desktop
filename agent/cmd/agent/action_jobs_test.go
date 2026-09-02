@@ -26,7 +26,8 @@ func signedAgentTestJob(t *testing.T, private ed25519.PrivateKey, cfg *config, e
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &remoteJob{ID: envelope.ActionJobID, Type: "action", Payload: map[string]any{
+	return &remoteJob{ID: "delivery-" + envelope.ActionJobID, Type: "action", Payload: map[string]any{
+		"actionJobId":   envelope.ActionJobID,
 		"signedEnvelope": base64.RawStdEncoding.EncodeToString(payload),
 		"signature":      base64.RawStdEncoding.EncodeToString(ed25519.Sign(private, payload)),
 	}}
@@ -63,6 +64,15 @@ func TestSignedActionVerificationRejectsTamperingWrongDeviceAndExpiry(t *testing
 	job := signedAgentTestJob(t, private, cfg, envelope)
 	if _, _, err := verifySignedActionJob(cfg, job); err != nil {
 		t.Fatalf("valid action was rejected: %v", err)
+	}
+	mismatchedID := *job
+	mismatchedID.Payload = map[string]any{}
+	for key, value := range job.Payload {
+		mismatchedID.Payload[key] = value
+	}
+	mismatchedID.Payload["actionJobId"] = "different-action-job"
+	if _, _, err := verifySignedActionJob(cfg, &mismatchedID); err == nil {
+		t.Fatal("mismatched audited action id was accepted")
 	}
 
 	tampered := *job
@@ -127,6 +137,9 @@ func TestAgentLANAndPrinterActionValidation(t *testing.T) {
 	}
 	if _, err := decodeAndNormalizeActionParameters("diagnostic.lan_scan", json.RawMessage(`{"subnet":"1.1.1.0/24"}`)); err == nil {
 		t.Fatal("public LAN scan range accepted")
+	}
+	if result, err := decodeAndNormalizeActionParameters("diagnostic.lan_scan", json.RawMessage(`{"subnet":"192.168.1.0/24; 192.168.2.1-192.168.2.20"}`)); err != nil || result["subnet"] != "192.168.1.0/24, 192.168.2.1-192.168.2.20" {
+		t.Fatalf("multiple LAN ranges rejected or not normalized: %#v %v", result, err)
 	}
 	if _, err := decodeAndNormalizeActionParameters("diagnostic.tcp_probe", json.RawMessage(`{"host":"192.168.1.1","ports":[22,8291]}`)); err != nil {
 		t.Fatalf("safe monitor probe rejected: %v", err)

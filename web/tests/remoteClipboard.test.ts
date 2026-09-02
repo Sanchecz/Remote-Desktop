@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { imageClipboardFingerprint, newerRemoteClipboardPayload, REMOTE_CLIPBOARD_COPY_READ_DELAYS, REMOTE_CLIPBOARD_DIRECTION_TITLE, shouldResolveRemoteClipboardCopy, textClipboardFingerprint } from "../src/remoteClipboard.ts";
+import { imageClipboardFingerprint, isRemoteClipboardSequenceNewer, newerRemoteClipboardPayload, REMOTE_CLIPBOARD_COPY_READ_DELAYS, REMOTE_CLIPBOARD_DIRECTION_TITLE, shouldAcceptRemoteClipboardSequence, shouldResolveRemoteClipboardCopy, textClipboardFingerprint } from "../src/remoteClipboard.ts";
 
 test("manual clipboard actions name both directions explicitly", () => {
 	assert.equal(REMOTE_CLIPBOARD_DIRECTION_TITLE.send, "С этого устройства → удалённый ПК");
@@ -21,6 +21,16 @@ test("deferred remote copy waits for the Windows clipboard sequence to change", 
 	assert.equal(shouldResolveRemoteClipboardCopy(gate, { id: 8, sequence: 42, text: "after" }, 1100), false);
 	assert.equal(shouldResolveRemoteClipboardCopy(gate, { id: 9, sequence: 41, text: "before" }, 1200), false);
 	assert.equal(shouldResolveRemoteClipboardCopy(gate, { id: 10, sequence: 42, text: "after" }, 1250), true);
+	assert.equal(shouldResolveRemoteClipboardCopy(gate, { id: 11, sequence: 40, text: "stale" }, 1300), false);
+});
+
+test("delayed clipboard acknowledgements cannot replace a newer Windows clipboard", () => {
+	assert.equal(shouldAcceptRemoteClipboardSequence(200, 200), true);
+	assert.equal(shouldAcceptRemoteClipboardSequence(200, 201), true);
+	assert.equal(shouldAcceptRemoteClipboardSequence(200, 199), false);
+	assert.equal(isRemoteClipboardSequenceNewer(0xffff_fffe, 1), true);
+	assert.equal(shouldAcceptRemoteClipboardSequence(0xffff_fffe, 1), true);
+	assert.equal(shouldAcceptRemoteClipboardSequence(77, 0), true);
 });
 
 test("old Agents use content change and a bounded same-content fallback", () => {

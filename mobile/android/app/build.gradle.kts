@@ -38,8 +38,8 @@ android {
         applicationId = "ru.supportgenesis.genesisit"
         minSdk = 26
         targetSdk = 37
-		versionCode = 127
-		versionName = "1.0.40"
+		versionCode = 129
+		versionName = "1.0.42"
     }
 
 	signingConfigs {

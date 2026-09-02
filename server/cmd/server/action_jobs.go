@@ -122,7 +122,7 @@ var actionDefinitions = map[string]actionDefinition{
 		Type: "diagnostic.services", Title: "Диагностика служб", Description: "Показывает службы с ошибками и остановленные важные службы без изменения системы.", Risk: "read", TimeoutSeconds: 30,
 	},
 	"diagnostic.lan_scan": {
-		Type: "diagnostic.lan_scan", Title: "Сканирование локальной сети", Description: "Ищет доступные внутренние узлы и типовые службы через выбранный Agent, не изменяя сеть пользователя.", Risk: "read", TimeoutSeconds: 45,
+		Type: "diagnostic.lan_scan", Title: "Сканирование локальной сети", Description: "Ищет доступные внутренние узлы и типовые службы в нескольких заданных диапазонах через выбранный Agent, не изменяя сеть пользователя.", Risk: "read", TimeoutSeconds: 180,
 	},
 	"diagnostic.tcp_probe": {
 		Type: "diagnostic.tcp_probe", Title: "Проверка узла мониторинга", Description: "Проверяет доступность до 16 явно заданных TCP-портов внутреннего узла через выбранный Agent.", Risk: "read", TimeoutSeconds: 30,
@@ -197,9 +197,23 @@ func normalizeActionParameters(action string, input map[string]any) (map[string]
 			return nil, errors.New("это действие не принимает параметры")
 		}
 		return map[string]any{}, nil
-	case "diagnostic.lan_scan", "windows.printers.discover":
+	case "diagnostic.lan_scan":
 		if len(input) > 1 {
 			return nil, errors.New("для сканирования допускается только параметр subnet")
+		}
+		subnet, _ := input["subnet"].(string)
+		subnet = strings.TrimSpace(subnet)
+		if subnet != "" {
+			normalized, err := normalizeLANScanRanges(subnet)
+			if err != nil {
+				return nil, err
+			}
+			subnet = normalized
+		}
+		return map[string]any{"subnet": subnet}, nil
+	case "windows.printers.discover":
+		if len(input) > 1 {
+			return nil, errors.New("для поиска принтеров допускается только параметр subnet")
 		}
 		subnet, _ := input["subnet"].(string)
 		subnet = strings.TrimSpace(subnet)
@@ -210,7 +224,7 @@ func normalizeActionParameters(action string, input map[string]any) (map[string]
 			}
 			ones, bits := network.Mask.Size()
 			if bits != 32 || ones < 24 || ones > 32 {
-				return nil, errors.New("за один запуск можно сканировать не более 256 внутренних IPv4-адресов (/24…/32)")
+				return nil, errors.New("для поиска принтеров допускается не более 256 внутренних IPv4-адресов (/24…/32)")
 			}
 			subnet = network.String()
 		}
@@ -397,6 +411,88 @@ func normalizeActionParameters(action string, input map[string]any) (map[string]
 	}
 }
 
+func normalizeLANScanRanges(requested string) (string, error) {
+	parts := strings.FieldsFunc(requested, func(value rune) bool {
+		return value == ',' || value == ';' || value == '\n' || value == '\r'
+	})
+	if len(parts) == 0 || len(parts) > 8 {
+		return "", errors.New("укажите от одного до восьми внутренних диапазонов")
+	}
+	seen := make(map[uint32]struct{}, 512)
+	normalized := make([]string, 0, len(parts))
+	appendAddress := func(ip net.IP) error {
+		ip4 := ip.To4()
+		if ip4 == nil || !ip4.IsPrivate() || ip4.IsUnspecified() || ip4.IsMulticast() {
+			return errors.New("сканировать можно только внутренние IPv4-адреса")
+		}
+		value := uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3])
+		seen[value] = struct{}{}
+		if len(seen) > 1024 {
+			return errors.New("за один запуск допускается не более 1024 внутренних IPv4-адресов")
+		}
+		return nil
+	}
+	for _, rawPart := range parts {
+		part := strings.TrimSpace(rawPart)
+		if strings.Contains(part, "/") {
+			ip, network, err := net.ParseCIDR(part)
+			if err != nil || ip.To4() == nil || !ip.IsPrivate() {
+				return "", errors.New("CIDR должен быть внутренней IPv4-подсетью")
+			}
+			ones, bits := network.Mask.Size()
+			if bits != 32 || ones < 22 || ones > 32 {
+				return "", errors.New("одна CIDR-подсеть должна быть в пределах /22…/32")
+			}
+			base := network.IP.To4()
+			count := uint32(1 << (32 - ones))
+			start, end := uint32(0), count
+			if count > 2 {
+				start, end = 1, count-1
+			}
+			baseValue := uint32(base[0])<<24 | uint32(base[1])<<16 | uint32(base[2])<<8 | uint32(base[3])
+			for offset := start; offset < end; offset++ {
+				value := baseValue + offset
+				if err := appendAddress(net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))); err != nil {
+					return "", err
+				}
+			}
+			normalized = append(normalized, network.String())
+			continue
+		}
+		if separator := strings.Index(part, "-"); separator >= 0 {
+			first := net.ParseIP(strings.TrimSpace(part[:separator])).To4()
+			last := net.ParseIP(strings.TrimSpace(part[separator+1:])).To4()
+			if first == nil || last == nil || !first.IsPrivate() || !last.IsPrivate() {
+				return "", errors.New("диапазон должен содержать два внутренних IPv4-адреса")
+			}
+			start := uint32(first[0])<<24 | uint32(first[1])<<16 | uint32(first[2])<<8 | uint32(first[3])
+			end := uint32(last[0])<<24 | uint32(last[1])<<16 | uint32(last[2])<<8 | uint32(last[3])
+			if start > end || uint64(end)-uint64(start)+1 > 1024 {
+				return "", errors.New("диапазон должен идти по возрастанию и содержать не более 1024 адресов")
+			}
+			for value := start; ; value++ {
+				if err := appendAddress(net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))); err != nil {
+					return "", err
+				}
+				if value == end {
+					break
+				}
+			}
+			normalized = append(normalized, first.String()+"-"+last.String())
+			continue
+		}
+		ip := net.ParseIP(part).To4()
+		if ip == nil {
+			return "", errors.New("используйте CIDR, одиночный IP или диапазон IP-IP")
+		}
+		if err := appendAddress(ip); err != nil {
+			return "", err
+		}
+		normalized = append(normalized, ip.String())
+	}
+	return strings.Join(normalized, ", "), nil
+}
+
 func numericActionParameter(value any) (int64, error) {
 	var number int64
 	switch typed := value.(type) {
@@ -436,7 +532,7 @@ func actionSteps(definition actionDefinition, parameters map[string]any) []strin
 	case "diagnostic.services":
 		return []string{"Прочитать состояние служб", "Выделить остановленные и ошибочные службы", "Вернуть результат без перезапуска"}
 	case "diagnostic.lan_scan":
-		return []string{"Определить внутреннюю подсеть выбранного Agent", "Проверить не более 256 адресов с ограничением параллельности", "Вернуть найденные RDP, SSH, файловые, веб- и печатные службы"}
+		return []string{"Проверить и объединить заданные внутренние подсети и диапазоны", "Проверить не более 1024 уникальных адресов с ограничением параллельности", "Вернуть найденные RDP, SSH, файловые, веб- и печатные службы"}
 	case "diagnostic.tcp_probe":
 		return []string{"Проверить внутренний IP выбранного узла", "Подключиться только к явно заданным TCP-портам", "Сохранить задержку и состояние в истории мониторинга"}
 	case "windows.printers.discover":
@@ -852,7 +948,7 @@ func (s *server) queueActionExecution(ctx context.Context, tx pgx.Tx, actionJobI
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(map[string]any{"signedEnvelope": signedEnvelope, "signature": signature})
+	payload, err := json.Marshal(map[string]any{"actionJobId": actionJobID, "signedEnvelope": signedEnvelope, "signature": signature})
 	if err != nil {
 		return err
 	}
@@ -1076,7 +1172,8 @@ func (s *server) actionJobResponse(ctx context.Context, id, actorID string) (map
 	var exitCode *int
 	var created, expires time.Time
 	var started, completed, approved *time.Time
-	err := s.db.QueryRow(ctx, `SELECT a.device_id,d.name,d.connection_code,a.action_type,a.parameters,a.risk_level,a.status,a.approval_required,a.requested_via,a.plan,a.output,a.error_text,a.exit_code,a.request_hash,a.created_at,a.expires_at,a.started_at,a.completed_at,a.approved_at FROM action_jobs a JOIN devices d ON d.id=a.device_id WHERE a.id=$1 AND ($2='' OR a.requested_by=$2)`, id, actorID).Scan(&deviceID, &deviceName, &remoteID, &action, &parameters, &risk, &status, &approvalRequired, &via, &plan, &output, &errorText, &exitCode, &requestHash, &created, &expires, &started, &completed, &approved)
+	query, arguments := actionJobResponseLookup(id, actorID)
+	err := s.db.QueryRow(ctx, query, arguments...).Scan(&deviceID, &deviceName, &remoteID, &action, &parameters, &risk, &status, &approvalRequired, &via, &plan, &output, &errorText, &exitCode, &requestHash, &created, &expires, &started, &completed, &approved)
 	if err != nil {
 		return nil, err
 	}
@@ -1084,6 +1181,18 @@ func (s *server) actionJobResponse(ctx context.Context, id, actorID string) (map
 	_ = json.Unmarshal(parameters, &parsedParameters)
 	_ = json.Unmarshal(plan, &parsedPlan)
 	return map[string]any{"id": id, "deviceId": deviceID, "deviceName": deviceName, "remoteId": remoteID, "action": action, "parameters": parsedParameters, "risk": risk, "status": status, "approvalRequired": approvalRequired, "requestedVia": via, "plan": parsedPlan, "output": output, "error": errorText, "exitCode": exitCode, "requestHash": requestHash, "createdAt": created, "expiresAt": expires, "startedAt": started, "completedAt": completed, "approvedAt": approved}, nil
+}
+
+func actionJobResponseLookup(id, actorID string) (string, []any) {
+	query := `SELECT a.device_id,d.name,d.connection_code,a.action_type,a.parameters,a.risk_level,a.status,a.approval_required,a.requested_via,a.plan,a.output,a.error_text,a.exit_code,a.request_hash,a.created_at,a.expires_at,a.started_at,a.completed_at,a.approved_at FROM action_jobs a JOIN devices d ON d.id=a.device_id WHERE a.id=$1`
+	arguments := []any{id}
+	if actorID != "" {
+		// requested_by is UUID. Never bind an empty string to this predicate:
+		// PostgreSQL correctly rejects it as an invalid UUID before evaluating OR.
+		query += ` AND a.requested_by=$2`
+		arguments = append(arguments, actorID)
+	}
+	return query, arguments
 }
 
 func (s *server) getActionJob(w http.ResponseWriter, r *http.Request) {

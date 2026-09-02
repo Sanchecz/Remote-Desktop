@@ -128,7 +128,15 @@ func verifySignedActionJob(cfg *config, job *remoteJob) (signedActionEnvelope, m
 
 func validateSignedActionEnvelope(cfg *config, job *remoteJob, envelope signedActionEnvelope) (map[string]any, error) {
 	now := time.Now()
-	if envelope.Version != 1 || strings.TrimSpace(envelope.ActionJobID) == "" || envelope.ActionJobID != job.ID {
+	if envelope.Version != 1 || strings.TrimSpace(envelope.ActionJobID) == "" {
+		return nil, errors.New("идентификатор подписанного действия не совпадает с заданием")
+	}
+	// ActionJobID identifies the audited action_jobs row, while job.ID identifies
+	// the separate agent_jobs delivery row. They are intentionally different.
+	// New servers repeat the audited ID outside the signed envelope so packaging
+	// mistakes are rejected; the signed value itself remains authoritative for
+	// compatibility with already queued jobs from an earlier server build.
+	if declared, ok := job.Payload["actionJobId"].(string); ok && strings.TrimSpace(declared) != envelope.ActionJobID {
 		return nil, errors.New("идентификатор подписанного действия не совпадает с заданием")
 	}
 	if envelope.DeviceID != cfg.DeviceID {
@@ -169,9 +177,23 @@ func decodeAndNormalizeActionParameters(action string, raw json.RawMessage) (map
 			return nil, errors.New("диагностическое действие не принимает параметры")
 		}
 		return map[string]any{}, nil
-	case "diagnostic.lan_scan", "windows.printers.discover":
+	case "diagnostic.lan_scan":
 		if len(input) > 1 {
 			return nil, errors.New("параметры сканирования локальной сети недопустимы")
+		}
+		subnet, _ := input["subnet"].(string)
+		subnet = strings.TrimSpace(subnet)
+		if subnet != "" {
+			ranges, _, err := parseLANScanTargets(subnet)
+			if err != nil {
+				return nil, err
+			}
+			subnet = strings.Join(ranges, ", ")
+		}
+		return map[string]any{"subnet": subnet}, nil
+	case "windows.printers.discover":
+		if len(input) > 1 {
+			return nil, errors.New("для поиска принтеров допускается только одна подсеть")
 		}
 		subnet, _ := input["subnet"].(string)
 		subnet = strings.TrimSpace(subnet)
@@ -182,7 +204,7 @@ func decodeAndNormalizeActionParameters(action string, raw json.RawMessage) (map
 			}
 			ones, bits := network.Mask.Size()
 			if bits != 32 || ones < 24 || ones > 32 {
-				return nil, errors.New("за один запуск допускается не более 256 адресов")
+				return nil, errors.New("для поиска принтеров допускается не более 256 адресов")
 			}
 			subnet = network.String()
 		}

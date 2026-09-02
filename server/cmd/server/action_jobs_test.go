@@ -98,6 +98,17 @@ func TestActionSignerProducesExactVerifiableEnvelope(t *testing.T) {
 	}
 }
 
+func TestActionJobResponseLookupDoesNotBindEmptyActorAsUUID(t *testing.T) {
+	ownerQuery, ownerArguments := actionJobResponseLookup("action-id", "")
+	if strings.Contains(ownerQuery, "requested_by") || len(ownerArguments) != 1 || ownerArguments[0] != "action-id" {
+		t.Fatalf("owner lookup still binds an empty UUID actor: query=%q args=%#v", ownerQuery, ownerArguments)
+	}
+	integrationQuery, integrationArguments := actionJobResponseLookup("action-id", "actor-id")
+	if !strings.Contains(integrationQuery, "a.requested_by=$2") || len(integrationArguments) != 2 || integrationArguments[1] != "actor-id" {
+		t.Fatalf("integration lookup lost actor isolation: query=%q args=%#v", integrationQuery, integrationArguments)
+	}
+}
+
 func TestMutatingActionsAlwaysRequireApproval(t *testing.T) {
 	for _, action := range []string{"service.restart", "process.terminate", "file.download", "package.install", "windows.vpn.upsert"} {
 		definition := actionDefinitions[action]
@@ -148,6 +159,12 @@ func TestNormalizeLANPrinterAndScanActions(t *testing.T) {
 		if _, err := normalizeActionParameters("diagnostic.lan_scan", map[string]any{"subnet": subnet}); err == nil {
 			t.Fatalf("unsafe LAN scan subnet accepted: %q", subnet)
 		}
+	}
+	if result, err := normalizeActionParameters("diagnostic.lan_scan", map[string]any{"subnet": "192.168.1.0/24;192.168.2.1-192.168.2.20"}); err != nil || result["subnet"] != "192.168.1.0/24, 192.168.2.1-192.168.2.20" {
+		t.Fatalf("multiple LAN ranges rejected or not normalized: %#v %v", result, err)
+	}
+	if result, err := normalizeActionParameters("diagnostic.lan_scan", map[string]any{"subnet": "10.24.0.0/22"}); err != nil || result["subnet"] != "10.24.0.0/22" {
+		t.Fatalf("bounded /22 scan rejected: %#v %v", result, err)
 	}
 	if result, err := normalizeActionParameters("windows.printers.discover", map[string]any{"subnet": "10.24.8.0/24"}); err != nil || result["subnet"] != "10.24.8.0/24" {
 		t.Fatalf("valid printer discovery rejected: %#v, %v", result, err)

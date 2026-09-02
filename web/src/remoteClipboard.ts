@@ -29,6 +29,26 @@ export function newerRemoteClipboardPayload(
 	return !current || incoming.order >= current.order ? incoming : current;
 }
 
+// GetClipboardSequenceNumber is an unsigned 32-bit counter and eventually
+// wraps. Half-range comparison accepts equal/current values for manual reads,
+// accepts a genuine wrap and rejects a delayed acknowledgement for an older
+// clipboard snapshot.
+export function isRemoteClipboardSequenceNewer(current: number, incoming: number): boolean {
+	const left = Math.max(0, Number(current) || 0) >>> 0;
+	const right = Math.max(0, Number(incoming) || 0) >>> 0;
+	if (right === 0) return false;
+	if (left === 0) return true;
+	const delta = (right - left) >>> 0;
+	return delta > 0 && delta < 0x80000000;
+}
+
+export function shouldAcceptRemoteClipboardSequence(current: number, incoming: number): boolean {
+	const right = Math.max(0, Number(incoming) || 0) >>> 0;
+	if (right === 0) return true; // Compatibility with Agents before sequence reporting.
+	const left = Math.max(0, Number(current) || 0) >>> 0;
+	return left === 0 || right === left || isRemoteClipboardSequenceNewer(left, right);
+}
+
 export function sameRemoteClipboardPayload(left: RemoteClipboardPayload | null, right: RemoteClipboardPayload | null): boolean {
 	if (!left || !right || left.kind !== right.kind || left.order !== right.order) return false;
 	return left.kind === "text"
@@ -43,7 +63,7 @@ export function shouldResolveRemoteClipboardCopy(
 ): boolean {
 	if (acknowledgement.id <= gate.afterAckID) return false;
 	const sequence = Math.max(0, Number(acknowledgement.sequence) || 0);
-	if (gate.baselineSequence > 0 && sequence > 0) return sequence !== gate.baselineSequence;
+	if (gate.baselineSequence > 0 && sequence > 0) return isRemoteClipboardSequenceNewer(gate.baselineSequence, sequence);
 	// Old Agents did not report GetClipboardSequenceNumber. Preserve compatibility
 	// while refusing an obviously stale first read for a bounded settle window.
 	if (acknowledgement.text !== gate.baselineText) return true;

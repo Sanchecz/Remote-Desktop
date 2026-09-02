@@ -29,6 +29,38 @@ func TestResolveLANScanNetworkRejectsPublicAndOversized(t *testing.T) {
 	}
 }
 
+func TestParseLANScanTargetsSupportsMultipleCIDRsAndCrossSubnetRange(t *testing.T) {
+	ranges, addresses, err := parseLANScanTargets("192.168.10.0/30, 10.20.0.5; 192.168.1.254-192.168.2.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRanges := []string{"192.168.10.0/30", "10.20.0.5", "192.168.1.254-192.168.2.2"}
+	if !reflect.DeepEqual(ranges, wantRanges) {
+		t.Fatalf("unexpected normalized ranges: got=%v want=%v", ranges, wantRanges)
+	}
+	got := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		got = append(got, address.String())
+	}
+	want := []string{"10.20.0.5", "192.168.1.254", "192.168.1.255", "192.168.2.0", "192.168.2.1", "192.168.2.2", "192.168.10.1", "192.168.10.2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected targets: got=%v want=%v", got, want)
+	}
+}
+
+func TestParseLANScanTargetsRejectsPublicReversedAndOversized(t *testing.T) {
+	for _, candidate := range []string{
+		"8.8.8.8",
+		"192.168.2.5-192.168.1.5",
+		"10.0.0.0/21",
+		"192.168.0.0/22,192.168.4.0/22",
+	} {
+		if _, _, err := parseLANScanTargets(candidate); err == nil {
+			t.Fatalf("unsafe scan selection accepted: %s", candidate)
+		}
+	}
+}
+
 func TestLANInterfaceScorePrefersPhysicalLAN(t *testing.T) {
 	physical := lanInterfaceScore("Ethernet", net.ParseIP("192.168.1.10"), 24)
 	virtual := lanInterfaceScore("WireGuard Tunnel", net.ParseIP("10.6.7.1"), 24)

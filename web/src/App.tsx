@@ -72,7 +72,7 @@ import { REMOTE_VIEWPORT_SETTLE_DELAYS, remoteFullscreenScaleMode, remoteViewpor
 import { isCurrentRemoteFallbackGeneration, isRecoverableRemoteStatusFailure, isRemoteFrameStreamStalled, remoteReconnectDelay, shouldUseRemoteFrameFallback } from "./remoteReconnect";
 import { abortableDelay, browserTransferChunkLength, fileTransferProgress, isAbortError, uploadTransferChunk, validateTransferCheckpoint } from "./fileTransfers";
 import { createRemoteFrameRetirementScheduler } from "./remoteFramePresentation";
-import { imageClipboardFingerprint, newerRemoteClipboardPayload, REMOTE_CLIPBOARD_COPY_READ_DELAYS, REMOTE_CLIPBOARD_COPY_TIMEOUT, sameRemoteClipboardPayload, shouldResolveRemoteClipboardCopy, textClipboardFingerprint, type RemoteClipboardCopyGate, type RemoteClipboardPayload, type RemoteClipboardSyncState } from "./remoteClipboard";
+import { imageClipboardFingerprint, newerRemoteClipboardPayload, REMOTE_CLIPBOARD_COPY_READ_DELAYS, REMOTE_CLIPBOARD_COPY_TIMEOUT, sameRemoteClipboardPayload, shouldAcceptRemoteClipboardSequence, shouldResolveRemoteClipboardCopy, textClipboardFingerprint, type RemoteClipboardCopyGate, type RemoteClipboardPayload, type RemoteClipboardSyncState } from "./remoteClipboard";
 
 type User = {
   id: string;
@@ -232,7 +232,7 @@ type Section = "devices" | "remote" | "connections" | "network" | "printers" | "
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.40";
+const LATEST_AGENT_VERSION = "1.0.42";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -1259,6 +1259,7 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
 
 type LANScanResult = {
 	subnet: string;
+	ranges?: string[];
 	agentIp: string;
 	availableSubnets?: Array<{ subnet: string; agentIp: string; interface: string; preferred: boolean }>;
 	scanned: number;
@@ -1291,11 +1292,10 @@ function DeviceLANAndPrinterTools({ device, csrf }: { device: Device; csrf: stri
 	const [busy, setBusy] = useState("");
 	const [message, setMessage] = useState("");
 	const [error, setError] = useState("");
-
 	useEffect(() => setPort(protocol === "rdp" ? 3389 : 22), [protocol]);
 
 	async function waitForAction(id: string): Promise<ActionJob> {
-		const deadline = Date.now() + 70_000;
+		const deadline = Date.now() + 210_000;
 		while (Date.now() < deadline) {
 			const job = await api<ActionJob>(`/api/action-jobs/${id}`);
 			if (["succeeded", "failed", "cancelled", "expired"].includes(job.status)) return job;
@@ -1352,7 +1352,7 @@ function DeviceLANAndPrinterTools({ device, csrf }: { device: Device; csrf: stri
 		<header><span className="device-admin-tools-icon"><Wifi size={20} /></span><div><span className="eyebrow">ИНСТРУМЕНТЫ УСТРОЙСТВА</span><h3>Локальная сеть и оборудование</h3><p>Работа через Agent без публикации внутренних портов в интернет.</p></div></header>
 		<nav><button type="button" className={tab === "network" ? "active" : ""} onClick={() => setTab("network")}><Server size={16} /> Сеть, RDP и SSH</button><button type="button" className={tab === "printers" ? "active" : ""} onClick={() => setTab("printers")}><HardDrive size={16} /> Принтеры и сканы</button></nav>
 		{tab === "network" ? <div className="device-tool-body">
-			<div className="lan-scan-line"><label><span>Подсеть (необязательно)</span><input value={subnet} onChange={(event) => setSubnet(event.target.value)} placeholder="Автоматически или 192.168.1.0/24" /></label><button type="button" className="secondary-button" disabled={!!busy || !device.online} onClick={() => void scanNetwork()}>{busy === "diagnostic.lan_scan" ? <RefreshCw className="spin" size={16} /> : <Search size={16} />} Найти устройства</button></div>
+			<div className="lan-scan-line"><label><span>Подсети или диапазоны (необязательно)</span><input value={subnet} onChange={(event) => setSubnet(event.target.value)} placeholder="192.168.1.0/24; 192.168.2.1-192.168.2.254" /></label><button type="button" className="secondary-button" disabled={!!busy || !device.online} onClick={() => void scanNetwork()}>{busy === "diagnostic.lan_scan" ? <RefreshCw className="spin" size={16} /> : <Search size={16} />} Найти устройства</button></div>
 			<div className="lan-connect-line"><label><span>Протокол</span><select value={protocol} onChange={(event) => setProtocol(event.target.value as "rdp" | "ssh")}><option value="rdp">RDP</option><option value="ssh">SSH</option></select></label><label className="grow"><span>IP или имя</span><input value={host} onChange={(event) => setHost(event.target.value)} placeholder="192.168.1.105" /></label><label><span>Порт</span><input type="number" min={1} max={65535} value={port} onChange={(event) => setPort(Number(event.target.value))} /></label><label><span>Пользователь</span><input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="необязательно" /></label><button type="button" className="primary-button" disabled={!!busy || !device.online} onClick={() => void openConnection()}>{busy.startsWith("network.") ? <RefreshCw className="spin" size={16} /> : <Play size={16} />} Открыть</button></div>
 			{scan && <div className="lan-scan-results"><div><strong>{scan.subnet}</strong><span>Agent {scan.agentIp} · проверено {scan.scanned} · {scan.durationMs} мс</span></div>{scan.hosts.length ? scan.hosts.map((item) => <article key={item.ip}><span className="lan-host-state" /><div><strong>{item.name || item.ip}</strong><small>{item.name ? item.ip + " · " : ""}{item.openPorts.map((value) => `${value}`).join(", ")}</small></div><span>{item.latencyMs} мс</span>{item.openPorts.includes(3389) && <button type="button" onClick={() => void openConnection(item.ip, 3389, "rdp")}>RDP</button>}{item.openPorts.includes(22) && <button type="button" onClick={() => void openConnection(item.ip, 22, "ssh")}>SSH</button>}</article>) : <p>Типовые службы в этой подсети не обнаружены.</p>}</div>}
 		</div> : <div className="device-tool-body">
@@ -1374,7 +1374,7 @@ type PrinterDiscoveryResult = {
 };
 
 async function waitForTypedAction(id: string): Promise<ActionJob> {
-	const deadline = Date.now() + 90_000;
+	const deadline = Date.now() + 210_000;
 	while (Date.now() < deadline) {
 		const job = await api<ActionJob>(`/api/action-jobs/${id}`);
 		if (["succeeded", "failed", "cancelled", "expired"].includes(job.status)) return job;
@@ -1409,9 +1409,12 @@ function NetworkConnectionsPage({ devices, currentUser, csrf, onAccessChanged }:
 	const [domain, setDomain] = useState("");
 	const [password, setPassword] = useState("");
 	const [launchURL, setLaunchURL] = useState("");
+	const [activeConnection, setActiveConnection] = useState<{ protocol: "rdp" | "ssh"; host: string; port: number; gatewayName: string } | null>(null);
+	const [connectionFrameKey, setConnectionFrameKey] = useState(0);
 	const [busy, setBusy] = useState(false);
 	const [message, setMessage] = useState("");
 	const [error, setError] = useState("");
+	const connectionPanelRef = useRef<HTMLElement>(null);
 	const gateway = gateways.find((item) => item.id === gatewayId) || null;
 
 	useEffect(() => {
@@ -1441,17 +1444,15 @@ function NetworkConnectionsPage({ devices, currentUser, csrf, onAccessChanged }:
 		if (!gateway.accessGranted) return setError("Сначала разблокируйте доступ к выбранному Agent");
 		if (!internalHost.trim()) return setError("Укажите внутренний IPv4-адрес целевого компьютера");
 		if (externalIP.trim() && gateway.publicIp && externalIP.trim() !== gateway.publicIp) return setError("Внешний IP не совпадает с выбранным Agent. Выберите Agent этой сети или исправьте адрес.");
-		setBusy(true); setError(""); setMessage(""); setLaunchURL("");
-		const popup = window.open("about:blank", `remoteit-${Date.now()}`);
-		if (popup) { popup.opener = null; popup.document.title = "RemoteIt — подключение"; popup.document.body.textContent = "Подготавливаем защищённое подключение…"; }
+		setBusy(true); setError(""); setMessage(""); setLaunchURL(""); setActiveConnection(null);
 		try {
 			const tunnel = await api<{ id: string; launchUrl: string }>("/api/browser-connections", { method: "POST", body: JSON.stringify({ deviceId: gateway.id, protocol, host: internalHost.trim(), port, username: username.trim(), password, domain: protocol === "rdp" ? domain.trim() : "" }) }, csrf);
 			setLaunchURL(tunnel.launchUrl);
-			if (popup) popup.location.replace(tunnel.launchUrl);
-			setMessage(`${protocol.toUpperCase()} открыт в HTML5‑шлюзе через Agent «${gateway.name}». На компьютере‑шлюзе окна и консоли не запускаются.${popup ? "" : " Браузер заблокировал новое окно — нажмите ссылку ниже."}`);
+			setActiveConnection({ protocol, host: internalHost.trim(), port, gatewayName: gateway.name });
+			setConnectionFrameKey((current) => current + 1);
+			setMessage(`${protocol.toUpperCase()} подготовлен внутри панели через Agent «${gateway.name}». На компьютере‑шлюзе окна и консоли не запускаются.`);
 			setPassword("");
 		} catch (reason) {
-			popup?.close();
 			setError(reason instanceof Error ? reason.message : "Подключение не запущено");
 		} finally { setBusy(false); }
 	}
@@ -1468,10 +1469,14 @@ function NetworkConnectionsPage({ devices, currentUser, csrf, onAccessChanged }:
 				<div className="connection-address-grid"><label><span>Внешний IP сети</span><input value={externalIP} onChange={(event) => matchGatewayByExternalIP(event.target.value)} placeholder="например, 203.0.113.10" /><small>Используется только для выбора правильного Agent.</small></label><label><span>Внутренний IPv4</span><input value={internalHost} onChange={(event) => setInternalHost(event.target.value)} inputMode="decimal" placeholder="192.168.1.105" required /><small>Соединение создаёт сам Agent из локальной сети; публичные адреса запрещены.</small></label><label className="connection-port"><span>Порт</span><input type="number" min={1} max={65535} value={port} onChange={(event) => setPort(Number(event.target.value))} /></label></div>
 				<div className="connection-credential-grid"><label><span>Логин</span><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder={protocol === "rdp" ? "user" : "user"} /></label>{protocol === "rdp" && <label><span>Домен (необязательно)</span><input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="DOMAIN" /></label>}<label><span>Пароль (необязательно)</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" placeholder="Не сохраняется в RemoteIt" /><small>Передаётся только в короткоживущую зашифрованную HTML5‑сессию; в БД и журнал не записывается.</small></label></div>
 				<button className="primary-button connection-start" disabled={busy || !gateway?.accessGranted || !internalHost.trim()}>{busy ? <RefreshCw className="spin" size={17} /> : <Play size={17} />} Открыть {protocol.toUpperCase()}</button>
-				{message && <div className="form-success">{message}{launchURL && <a className="connection-fallback-link" href={launchURL} target="_blank" rel="noreferrer">Открыть подключение в браузере</a>}</div>}{error && <div className="form-error">{error}</div>}
+				{message && <div className="form-success">{message}</div>}{error && <div className="form-error">{error}</div>}
 			</form>
 			<aside className="connection-help-card"><span className="stat-icon blue"><Link2 size={21} /></span><h2>Как идёт соединение</h2><ol><li><strong>Панель создаёт одноразовую сессию</strong><span>доступна только владельцу и администраторам и быстро истекает.</span></li><li><strong>Agent работает как сетевой мост</strong><span>подключается к внутреннему IP без VPN, проброса портов и окон на шлюзовом ПК.</span></li><li><strong>RDP или SSH открывается в браузере</strong><span>HTML5‑шлюз преобразует протокол в защищённый поток; отдельная RemoteIt Console больше не требуется.</span></li></ol><div className="notice limited-notice"><ShieldCheck size={16} /><span>Пароль не сохраняется. В защищённом журнале фиксируются администратор, Agent, внутренний адрес и время, но не реквизиты входа.</span></div></aside>
 		</section>
+		{launchURL && activeConnection && <section ref={connectionPanelRef} className="embedded-connection-panel">
+			<header><div><span className="preview-live active"><span />LIVE</span><span><strong>{activeConnection.protocol.toUpperCase()} · {activeConnection.host}:{activeConnection.port}</strong><small>Встроенный защищённый сеанс через {activeConnection.gatewayName}</small></span></div><nav><button type="button" onClick={() => setConnectionFrameKey((current) => current + 1)} title="Переподключить встроенное окно"><RefreshCw size={16} /> Переподключить</button><button type="button" onClick={() => void connectionPanelRef.current?.requestFullscreen()} title="Развернуть сеанс"><Maximize2 size={16} /> Полный экран</button><a href={launchURL} target="_blank" rel="noreferrer" title="Резервно открыть в отдельной вкладке"><Link2 size={16} /> Новая вкладка</a><button type="button" className="danger" onClick={() => { setLaunchURL(""); setActiveConnection(null); setMessage("Сеанс закрыт в панели"); }}><X size={16} /> Закрыть</button></nav></header>
+			<iframe key={connectionFrameKey} src={launchURL} title={`${activeConnection.protocol.toUpperCase()} ${activeConnection.host}`} allow="clipboard-read; clipboard-write; fullscreen" referrerPolicy="same-origin" />
+		</section>}
 	</>;
 }
 
@@ -1536,7 +1541,7 @@ function NetworkScanPage({ devices, csrf }: { devices: Device[]; csrf: string })
 		finally { setLoading(false); }
 	}
 	const grouped = useMemo(() => Object.entries(gateways.reduce<Record<string, Device[]>>((groups, device) => { const key = device.currentUser || "Без активного пользователя"; (groups[key] ||= []).push(device); return groups; }, {})), [gateways]);
-	return <><section className="page-heading"><div><span className="eyebrow">ЛОКАЛЬНАЯ СЕТЬ</span><h1>Сканер сети</h1><p>Проверка доступных внутренних IP через Agent выбранного пользователя без установки VPN.</p></div><span className="connection-security-badge"><ShieldCheck size={17} /> Только частные подсети</span></section><article className="settings-card settings-card-wide settings-network-card network-page-card"><div className="settings-card-head"><span className="stat-icon green"><Search size={20} /></span><div><h2>Найти устройства и службы</h2><p>Agent предпочитает физический Ethernet или Wi‑Fi вместо VPN и виртуальных адаптеров</p></div></div><div className="settings-network-form"><label><span>Пользователь и Agent</span><select value={gatewayId} onChange={(event) => { setGatewayId(event.target.value); setResult(null); }}><option value="">Выберите устройство</option>{grouped.map(([userName, items]) => <optgroup key={userName} label={userName}>{items.map((device) => <option value={device.id} key={device.id}>{device.name} · {device.localIps?.[0] || device.publicIp}</option>)}</optgroup>)}</select></label><label><span>Подсеть</span><input value={subnet} onChange={(event) => setSubnet(event.target.value)} placeholder="автоматически или 192.168.1.0/24" /></label><button type="button" className="primary-button" disabled={loading || !gateway} onClick={() => void scan()}>{loading ? <RefreshCw className="spin" size={16} /> : <Search size={16} />} Просканировать</button></div>{result?.availableSubnets && result.availableSubnets.length > 1 && <div className="subnet-suggestions"><span>Сети Agent:</span>{result.availableSubnets.map((item) => <button type="button" key={item.subnet} className={item.subnet === result.subnet ? "active" : ""} onClick={() => setSubnet(item.subnet)}>{item.subnet}<small>{item.interface}{item.preferred ? " · рекомендуется" : ""}</small></button>)}</div>}{result && <div className="lan-scan-results"><div><strong>{result.subnet}</strong><span>Agent {result.agentIp} · проверено {result.scanned} · {result.durationMs} мс</span></div>{result.hosts.length ? result.hosts.map((item) => <article key={item.ip}><span className="lan-host-state" /><div><strong>{item.name || item.ip}</strong><small>{item.name ? `${item.ip} · ` : ""}{item.openPorts.length ? `порты: ${item.openPorts.join(", ")}` : "узел отвечает"}</small></div><span>{item.latencyMs} мс</span></article>) : <p>Отвечающие устройства не обнаружены.</p>}</div>}{error && <div className="form-error">{error}</div>}</article></>;
+	return <><section className="page-heading"><div><span className="eyebrow">ЛОКАЛЬНАЯ СЕТЬ</span><h1>Сканер сети</h1><p>Проверка доступных внутренних IP через Agent выбранного пользователя без установки VPN.</p></div><span className="connection-security-badge"><ShieldCheck size={17} /> До 1024 частных IP</span></section><article className="settings-card settings-card-wide settings-network-card network-page-card"><div className="settings-card-head"><span className="stat-icon green"><Search size={20} /></span><div><h2>Найти устройства и службы</h2><p>Можно объединить до восьми CIDR, отдельных IP или диапазонов IP-IP; Agent исключает повторы и проверяет только внутренние адреса</p></div></div><div className="settings-network-form"><label><span>Пользователь и Agent</span><select value={gatewayId} onChange={(event) => { setGatewayId(event.target.value); setResult(null); }}><option value="">Выберите устройство</option>{grouped.map(([userName, items]) => <optgroup key={userName} label={userName}>{items.map((device) => <option value={device.id} key={device.id}>{device.name} · {device.localIps?.[0] || device.publicIp}</option>)}</optgroup>)}</select></label><label><span>Подсети и диапазоны</span><input value={subnet} onChange={(event) => setSubnet(event.target.value)} placeholder="192.168.1.0/24; 192.168.2.1-192.168.2.254" /><small>Оставьте пустым для рекомендуемой сети Agent</small></label><button type="button" className="primary-button" disabled={loading || !gateway} onClick={() => void scan()}>{loading ? <RefreshCw className="spin" size={16} /> : <Search size={16} />} Просканировать</button></div>{result?.availableSubnets && result.availableSubnets.length > 1 && <div className="subnet-suggestions"><span>Сети Agent:</span>{result.availableSubnets.map((item) => <button type="button" key={item.subnet} className={(result.ranges || [result.subnet]).includes(item.subnet) ? "active" : ""} onClick={() => setSubnet((current) => current.trim() ? `${current.trim()}; ${item.subnet}` : item.subnet)}>{item.subnet}<small>{item.interface}{item.preferred ? " · рекомендуется" : ""}</small></button>)}</div>}{result && <div className="lan-scan-results"><div><strong>{(result.ranges || [result.subnet]).join(" · ")}</strong><span>Agent {result.agentIp} · проверено {result.scanned} · {result.durationMs} мс</span></div>{result.hosts.length ? result.hosts.map((item) => <article key={item.ip}><span className="lan-host-state" /><div><strong>{item.name || item.ip}</strong><small>{item.name ? `${item.ip} · ` : ""}{item.openPorts.length ? `порты: ${item.openPorts.join(", ")}` : "узел отвечает"}</small></div><span>{item.latencyMs} мс</span></article>) : <p>Отвечающие устройства не обнаружены.</p>}</div>}{error && <div className="form-error">{error}</div>}</article></>;
 }
 
 type MonitorTarget = {
@@ -2233,6 +2238,7 @@ function RemoteDesktopModal({ device, csrf, initialSessionId = "", onClose, embe
 			if (clipboardSyncEnabledRef.current && clipboardAcknowledgement?.type === "clipboard_read" && clipboardAcknowledgement.id > clipboardLastRemoteAckRef.current) {
 				clipboardLastRemoteAckRef.current = clipboardAcknowledgement.id;
 				const remoteSequence = Math.max(0, Number(clipboardAcknowledgement.sequence) || 0);
+				if (!shouldAcceptRemoteClipboardSequence(clipboardLastRemoteWindowsSequenceRef.current, remoteSequence)) return;
 				if (remoteSequence > 0) clipboardLastRemoteWindowsSequenceRef.current = remoteSequence;
 				if (clipboardAcknowledgement.error) {
 					const pending = clipboardPendingWriteRef.current;
@@ -4605,19 +4611,19 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
   const progress = activeTransfer ? fileTransferProgress(activeTransfer.received, activeTransfer.size, activeTransfer.startedAt) : null;
 
 	return <section className="remote-files-card" aria-busy={loading}>
-		<div className="remote-files-head"><div><strong><FolderOpen size={19} /> Файлы</strong><small>Слева — ваши файлы, справа — папки удалённого компьютера. Перетащите файл или используйте понятные кнопки.</small></div><span className="remote-files-cap"><ShieldCheck size={14} /> до 50 ГБ</span></div>
+		<div className="remote-files-head"><div><strong><FolderOpen size={19} /> Передача файлов</strong><small>Выберите файл слева и отправьте вправо. С удалённого ПК скачивайте кнопкой в строке.</small></div><span className="remote-files-cap"><ShieldCheck size={14} /> до 50 ГБ</span></div>
 		<input ref={uploadInput} className="remote-upload-input" type="file" multiple onChange={(event) => { addLocalFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
 		{!started ? <button className="secondary-button remote-files-open" disabled={!device.online || loading} onClick={() => void openPath("")}><FolderOpen size={17} /> {device.online ? "Открыть проводник" : "Агент не в сети"}</button> : <div className="remote-explorer">
 			<section className={`remote-explorer-pane remote-local-pane ${localDragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setLocalDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setLocalDragging(false); }} onDrop={dropOnLocal}>
-				<header><span className="remote-pane-icon"><HardDrive size={17} /></span><span><strong>Моё устройство</strong><small>Файлы, выбранные в браузере</small></span><button type="button" className="remote-pane-action" disabled={loading} onClick={() => uploadInput.current?.click()}><Plus size={15} /> Добавить</button></header>
+				<header><span className="remote-pane-icon"><HardDrive size={17} /></span><span><strong>Это устройство</strong><small>Выбранные файлы</small></span><button type="button" className="remote-pane-action" disabled={loading} onClick={() => uploadInput.current?.click()}><Plus size={15} /> Выбрать</button></header>
 				<div className="remote-local-list">
 					{localFiles.map((file) => { const key = `${file.name}\u0000${file.size}\u0000${file.lastModified}`; return <div className="remote-local-row" key={key} draggable={!loading} onDragStart={(event) => { event.dataTransfer.effectAllowed = "copy"; event.dataTransfer.setData("application/x-remoteit-local-file", key); }}><span className="remote-file-icon"><FileIcon size={17} /></span><span className="remote-file-name"><strong>{file.name}</strong><small>{formatBytes(file.size)} · готов к отправке</small></span><button type="button" className="remote-row-remove" disabled={loading} title="Убрать из списка" onClick={() => setLocalFiles((current) => current.filter((item) => item !== file))}><X size={15} /></button></div>; })}
 					{localFiles.length === 0 && <button type="button" className="remote-local-empty" disabled={loading} onClick={() => uploadInput.current?.click()}><Upload size={24} /><strong>Перетащите файлы сюда</strong><small>или выберите их на телефоне/компьютере</small></button>}
 				</div>
-				<footer><span>{localFiles.length ? `${localFiles.length} выбрано · ${formatBytes(localFiles.reduce((sum, file) => sum + file.size, 0))}` : "Локальные файлы не загружаются без вашего выбора"}</span><button type="button" className="primary-button" disabled={loading || !path || localFiles.length === 0} onClick={() => void uploadFiles(localFiles)}>Отправить на {device.name} <Upload size={15} /></button></footer>
+				<footer><span>{localFiles.length ? `${localFiles.length} выбрано · ${formatBytes(localFiles.reduce((sum, file) => sum + file.size, 0))}` : "Выберите или перетащите файлы"}</span><button type="button" className="primary-button" disabled={loading || !path || localFiles.length === 0} onClick={() => void uploadFiles(localFiles)}>Загрузить <ChevronRight size={15} /></button></footer>
 			</section>
 
-			<div className="remote-explorer-divider" aria-hidden="true"><span>⇄</span></div>
+			<div className="remote-explorer-divider" aria-hidden="true"><span>→</span><span>←</span></div>
 
 			<section className={`remote-explorer-pane remote-device-pane ${dragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={dropOnRemote}>
 				<header><span className="remote-pane-icon"><Monitor size={17} /></span><span><strong>{device.name}</strong><small>Удалённый компьютер</small></span><button type="button" className="remote-pane-action" disabled={loading} onClick={() => void openPath(path)}><RefreshCw size={15} className={loading ? "spin" : ""} /> Обновить</button></header>
@@ -4628,7 +4634,7 @@ function RemoteFiles({ device, csrf }: { device: Device; csrf: string }) {
 				<div className="remote-file-list-head"><span>Имя</span><small>{entries.length} объектов</small></div>
 				<div className="remote-file-list">{entries.map((entry) => <div className={`remote-file-row ${entry.directory && remoteDropTarget === entry.path ? "drop-target" : ""}`} key={entry.path} draggable={!loading && !entry.directory && supportsLargeTransfers && entry.size <= 50 * 1024 * 1024 * 1024} onDragStart={(event) => { if (entry.directory) return; event.dataTransfer.effectAllowed = "copy"; event.dataTransfer.setData("application/x-remoteit-remote-file", entry.path); }} onDragEnter={entry.directory ? (event) => { if (dragCanUpload(event)) { event.preventDefault(); event.stopPropagation(); setRemoteDropTarget(entry.path); } } : undefined} onDragOver={entry.directory ? (event) => { if (dragCanUpload(event)) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "copy"; setRemoteDropTarget(entry.path); } } : undefined} onDragLeave={entry.directory ? (event) => { event.stopPropagation(); if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setRemoteDropTarget((current) => current === entry.path ? "" : current); } : undefined} onDrop={entry.directory ? (event) => dropOnRemoteFolder(event, entry.path) : undefined}><span className="remote-file-icon">{entry.directory ? <Folder size={18} /> : <FileIcon size={18} />}</span><button className="remote-file-name" disabled={loading} onClick={() => entry.directory ? void openPath(entry.path) : void downloadRemoteFile(entry)}><strong>{entry.name}</strong><small>{entry.directory ? remoteDropTarget === entry.path ? "Отпустите, чтобы загрузить в эту папку" : "Папка · можно перетащить файл внутрь" : formatBytes(entry.size)} · {new Date(entry.modifiedAt).toLocaleString("ru-RU")}</small></button>{entry.directory ? <button className="remote-download" disabled={loading} title="Открыть папку" onClick={() => void openPath(entry.path)}><ChevronDown size={16} className="remote-open-folder-icon" /></button> : <button className="remote-download" disabled={loading || !supportsLargeTransfers || entry.size > 50 * 1024 * 1024 * 1024} title={!supportsLargeTransfers ? "Обновите Agent" : entry.size > 50 * 1024 * 1024 * 1024 ? "Файл превышает 50 ГБ" : "Скачать на моё устройство"} onClick={() => void downloadRemoteFile(entry)}><Download size={16} /><span>Скачать</span></button>}</div>)}</div>
 				{!loading && entries.length === 0 && !error && <div className="remote-files-empty">Папка пуста</div>}
-				<div className="remote-device-drop-hint"><Upload size={15} /> Перетащите сюда, чтобы отправить в текущую папку</div>
+				<div className="remote-device-drop-hint"><Upload size={15} /> Перетащите сюда — файл попадёт в открытую папку</div>
 			</section>
 		</div>}
     {activeTransfer && progress ? <div className="remote-transfer-progress" role="status">

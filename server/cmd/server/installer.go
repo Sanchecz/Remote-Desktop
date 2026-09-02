@@ -241,7 +241,7 @@ func (s *server) streamBoundMacOSAgent(w http.ResponseWriter, token string) bool
 <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 <key>CFBundleName</key><string>RemoteIt Agent</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0.40</string>
+<key>CFBundleShortVersionString</key><string>1.0.42</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>11.0</string>
 <key>NSHighResolutionCapable</key><true/>

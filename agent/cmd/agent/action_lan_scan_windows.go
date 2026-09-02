@@ -16,10 +16,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Windows discovery intentionally uses ICMP and the operating system neighbor
-// cache instead of probing a list of TCP ports. It finds devices on the LAN for
-// the administrator without making the long-lived remote-control binary look
-// or behave like a generic port scanner.
+// Windows discovery combines ICMP, the operating-system neighbour cache and a
+// fixed allow-list of administration ports. The bounded probes find RDP/SSH and
+// printers which intentionally ignore ping without turning Agent into an
+// arbitrary port scanner.
 func scanLANHosts(ctx context.Context, addresses []net.IP, agentIP net.IP) ([]lanScanHost, error) {
 	allowed := make(map[string]struct{}, len(addresses))
 	for _, address := range addresses {
@@ -27,14 +27,20 @@ func scanLANHosts(ctx context.Context, addresses []net.IP, agentIP net.IP) ([]la
 	}
 	targets := make(chan net.IP)
 	results := make(chan lanScanHost, len(addresses))
-	workerCount := min(16, len(addresses))
+	workerCount := min(48, len(addresses))
 	var workers sync.WaitGroup
 	for worker := 0; worker < workerCount; worker++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for address := range targets {
-				if host, ok := pingWindowsLANHost(ctx, address); ok {
+				host, pingOK := pingWindowsLANHost(ctx, address)
+				host.OpenPorts = probeKnownLANPorts(ctx, address.String())
+				if pingOK || len(host.OpenPorts) > 0 {
+					if host.IP == "" {
+						host.IP = address.String()
+					}
+					resolveLANScanHostName(ctx, &host)
 					select {
 					case results <- host:
 					case <-ctx.Done():
@@ -85,7 +91,6 @@ func scanLANHosts(ctx context.Context, addresses []net.IP, agentIP net.IP) ([]la
 	}
 	hosts := make([]lanScanHost, 0, len(byIP))
 	for _, host := range byIP {
-		host.OpenPorts = probeKnownLANPorts(ctx, host.IP)
 		hosts = append(hosts, host)
 	}
 	sort.Slice(hosts, func(left, right int) bool {
@@ -118,7 +123,6 @@ func pingWindowsLANHost(ctx context.Context, ip net.IP) (lanScanHost, bool) {
 		return lanScanHost{}, false
 	}
 	host := lanScanHost{IP: ip.String(), Latency: max(time.Since(started).Milliseconds(), 1), OpenPorts: []int{}}
-	resolveLANScanHostName(ctx, &host)
 	return host, true
 }
 

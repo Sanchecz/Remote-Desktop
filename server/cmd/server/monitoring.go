@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const monitoredAgentVersion = "1.0.40"
+const monitoredAgentVersion = "1.0.42"
 
 type monitoredDevice struct {
 	ID, Name, OS, AgentVersion, InstallMode, RemoteError  string

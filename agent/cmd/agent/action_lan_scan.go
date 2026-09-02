@@ -20,6 +20,7 @@ type lanScanHost struct {
 
 type lanScanResult struct {
 	Subnet           string             `json:"subnet"`
+	Ranges           []string           `json:"ranges"`
 	AgentIP          string             `json:"agentIp"`
 	AvailableSubnets []lanScanCandidate `json:"availableSubnets"`
 	Scanned          int                `json:"scanned"`
@@ -27,6 +28,8 @@ type lanScanResult struct {
 	StartedAt        time.Time          `json:"startedAt"`
 	Duration         int64              `json:"durationMs"`
 }
+
+const maxLANScanAddresses = 1024
 
 type lanScanCandidate struct {
 	Subnet    string `json:"subnet"`
@@ -37,13 +40,12 @@ type lanScanCandidate struct {
 }
 
 func executeLANScan(ctx context.Context, requestedSubnet string) remoteJobResult {
-	network, agentIP, err := resolveLANScanNetwork(requestedSubnet)
+	ranges, addresses, agentIP, err := resolveLANScanTargets(requestedSubnet)
 	if err != nil {
 		return failedAction(err.Error())
 	}
-	addresses := usableIPv4Addresses(network)
-	if len(addresses) == 0 || len(addresses) > 256 {
-		return failedAction("в выбранной подсети нет допустимых адресов или превышен лимит 256")
+	if len(addresses) == 0 || len(addresses) > maxLANScanAddresses {
+		return failedAction("в выбранных диапазонах нет допустимых адресов или превышен лимит 1024")
 	}
 	started := time.Now().UTC()
 	hosts, scanErr := scanLANHosts(ctx, addresses, agentIP)
@@ -58,7 +60,7 @@ func executeLANScan(ctx context.Context, requestedSubnet string) remoteJobResult
 	})
 	candidates, _ := listLANScanCandidates()
 	result := lanScanResult{
-		Subnet: network.String(), AgentIP: agentIP.String(), AvailableSubnets: candidates, Scanned: len(addresses), Hosts: hosts,
+		Subnet: strings.Join(ranges, ", "), Ranges: ranges, AgentIP: agentIP.String(), AvailableSubnets: candidates, Scanned: len(addresses), Hosts: hosts,
 		StartedAt: started, Duration: time.Since(started).Milliseconds(),
 	}
 	payload, err := json.MarshalIndent(result, "", "  ")
@@ -66,6 +68,153 @@ func executeLANScan(ctx context.Context, requestedSubnet string) remoteJobResult
 		return failedAction("не удалось сформировать результат сканирования")
 	}
 	return remoteJobResult{Success: true, Output: string(payload), ExitCode: 0}
+}
+
+func resolveLANScanTargets(requested string) ([]string, []net.IP, net.IP, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		network, agentIP, err := resolveLANScanNetwork("")
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		addresses := usableIPv4Addresses(network)
+		return []string{network.String()}, addresses, agentIP, nil
+	}
+	ranges, addresses, err := parseLANScanTargets(requested)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	agentIP := localIPv4InTargets(addresses)
+	if agentIP == nil && len(addresses) > 0 {
+		agentIP = addresses[0]
+	}
+	return ranges, addresses, agentIP, nil
+}
+
+func parseLANScanTargets(requested string) ([]string, []net.IP, error) {
+	parts := strings.FieldsFunc(requested, func(value rune) bool {
+		return value == ',' || value == ';' || value == '\n' || value == '\r'
+	})
+	if len(parts) == 0 || len(parts) > 8 {
+		return nil, nil, errors.New("укажите от одного до восьми внутренних диапазонов")
+	}
+	seen := make(map[uint32]struct{}, min(maxLANScanAddresses, 256*len(parts)))
+	labels := make([]string, 0, len(parts))
+	addresses := make([]net.IP, 0, min(maxLANScanAddresses, 256*len(parts)))
+	appendAddress := func(ip net.IP) error {
+		ip4 := ip.To4()
+		if ip4 == nil || !ip4.IsPrivate() || ip4.IsUnspecified() || ip4.IsMulticast() {
+			return errors.New("сканировать можно только внутренние IPv4-адреса")
+		}
+		value := ipv4Uint32(ip4)
+		if _, exists := seen[value]; exists {
+			return nil
+		}
+		if len(addresses) >= maxLANScanAddresses {
+			return errors.New("за один запуск допускается не более 1024 внутренних IPv4-адресов")
+		}
+		seen[value] = struct{}{}
+		addresses = append(addresses, net.IPv4(ip4[0], ip4[1], ip4[2], ip4[3]))
+		return nil
+	}
+	for _, rawPart := range parts {
+		part := strings.TrimSpace(rawPart)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "/") {
+			ip, network, err := net.ParseCIDR(part)
+			if err != nil || ip.To4() == nil || !ip.IsPrivate() {
+				return nil, nil, errors.New("CIDR должен быть внутренней IPv4-подсетью")
+			}
+			ones, bits := network.Mask.Size()
+			if bits != 32 || ones < 22 || ones > 32 {
+				return nil, nil, errors.New("одна CIDR-подсеть должна быть в пределах /22…/32")
+			}
+			for _, address := range usableIPv4Addresses(network) {
+				if err := appendAddress(address); err != nil {
+					return nil, nil, err
+				}
+			}
+			labels = append(labels, network.String())
+			continue
+		}
+		if separator := strings.Index(part, "-"); separator >= 0 {
+			first := net.ParseIP(strings.TrimSpace(part[:separator])).To4()
+			last := net.ParseIP(strings.TrimSpace(part[separator+1:])).To4()
+			if first == nil || last == nil || !first.IsPrivate() || !last.IsPrivate() {
+				return nil, nil, errors.New("диапазон должен содержать два внутренних IPv4-адреса")
+			}
+			start, end := ipv4Uint32(first), ipv4Uint32(last)
+			if start > end {
+				return nil, nil, errors.New("начальный IP диапазона должен быть не больше конечного")
+			}
+			if uint64(end)-uint64(start)+1 > maxLANScanAddresses {
+				return nil, nil, errors.New("один диапазон не должен превышать 1024 адреса")
+			}
+			for value := start; ; value++ {
+				if err := appendAddress(uint32IPv4(value)); err != nil {
+					return nil, nil, err
+				}
+				if value == end {
+					break
+				}
+			}
+			labels = append(labels, first.String()+"-"+last.String())
+			continue
+		}
+		ip := net.ParseIP(part).To4()
+		if ip == nil {
+			return nil, nil, errors.New("используйте CIDR, одиночный IP или диапазон IP-IP")
+		}
+		if err := appendAddress(ip); err != nil {
+			return nil, nil, err
+		}
+		labels = append(labels, ip.String())
+	}
+	if len(addresses) == 0 {
+		return nil, nil, errors.New("в выбранных диапазонах нет допустимых адресов")
+	}
+	sort.Slice(addresses, func(left, right int) bool { return bytesCompareIP(addresses[left], addresses[right]) < 0 })
+	return labels, addresses, nil
+}
+
+func localIPv4InTargets(addresses []net.IP) net.IP {
+	targets := make(map[uint32]struct{}, len(addresses))
+	for _, address := range addresses {
+		targets[ipv4Uint32(address)] = struct{}{}
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		interfaceAddresses, _ := iface.Addrs()
+		for _, address := range interfaceAddresses {
+			ip, _, parseErr := net.ParseCIDR(address.String())
+			if parseErr == nil && ip.To4() != nil {
+				if _, exists := targets[ipv4Uint32(ip)]; exists {
+					return ip.To4()
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func ipv4Uint32(ip net.IP) uint32 {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return 0
+	}
+	return uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3])
+}
+
+func uint32IPv4(value uint32) net.IP {
+	return net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
 }
 
 func resolveLANScanNetwork(requested string) (*net.IPNet, net.IP, error) {
@@ -198,7 +347,7 @@ func usableIPv4Addresses(network *net.IPNet) []net.IP {
 		return nil
 	}
 	ones, bits := network.Mask.Size()
-	if bits != 32 || ones < 24 {
+	if bits != 32 || ones < 22 {
 		return nil
 	}
 	base := network.IP.To4()
@@ -206,6 +355,9 @@ func usableIPv4Addresses(network *net.IPNet) []net.IP {
 		return nil
 	}
 	count := 1 << (32 - ones)
+	if count > maxLANScanAddresses {
+		return nil
+	}
 	start, end := 0, count
 	if count > 2 {
 		start, end = 1, count-1
