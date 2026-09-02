@@ -26,12 +26,13 @@ const (
 )
 
 type networkTunnelRuntime struct {
-	mu       sync.Mutex
-	agent    *websocket.Conn
-	client   *websocket.Conn
-	started  bool
-	done     chan struct{}
-	closeOne sync.Once
+	mu        sync.Mutex
+	agent     *websocket.Conn
+	client    *websocket.Conn
+	clientTCP net.Conn
+	started   bool
+	done      chan struct{}
+	closeOne  sync.Once
 }
 
 func newNetworkTunnelRuntime() *networkTunnelRuntime {
@@ -41,13 +42,16 @@ func newNetworkTunnelRuntime() *networkTunnelRuntime {
 func (runtime *networkTunnelRuntime) close(code websocket.StatusCode, reason string) {
 	runtime.closeOne.Do(func() {
 		runtime.mu.Lock()
-		agent, client := runtime.agent, runtime.client
+		agent, client, clientTCP := runtime.agent, runtime.client, runtime.clientTCP
 		runtime.mu.Unlock()
 		if agent != nil {
 			_ = agent.Close(code, reason)
 		}
 		if client != nil {
 			_ = client.Close(code, reason)
+		}
+		if clientTCP != nil {
+			_ = clientTCP.Close()
 		}
 		close(runtime.done)
 	})
@@ -251,7 +255,26 @@ func (s *server) attachNetworkTunnel(ctx context.Context, id, side string, conne
 	} else {
 		runtime.client = connection
 	}
-	ready := runtime.agent != nil && runtime.client != nil && !runtime.started
+	ready := runtime.agent != nil && (runtime.client != nil || runtime.clientTCP != nil) && !runtime.started
+	if ready {
+		runtime.started = true
+	}
+	runtime.mu.Unlock()
+	if ready {
+		go s.relayNetworkTunnel(id, runtime)
+	}
+	return true
+}
+
+func (s *server) attachNetworkTunnelTCP(id string, connection net.Conn) bool {
+	runtime := s.tunnelRuntime(id)
+	runtime.mu.Lock()
+	if runtime.client != nil || runtime.clientTCP != nil {
+		runtime.mu.Unlock()
+		return false
+	}
+	runtime.clientTCP = connection
+	ready := runtime.agent != nil && !runtime.started
 	if ready {
 		runtime.started = true
 	}
@@ -276,10 +299,15 @@ func (s *server) waitNetworkTunnel(ctx context.Context, id string) {
 func (s *server) relayNetworkTunnel(id string, runtime *networkTunnelRuntime) {
 	_, _ = s.db.Exec(context.Background(), `UPDATE network_tunnels SET status='connected',connected_at=now() WHERE id=$1 AND status='waiting'`, id)
 	runtime.mu.Lock()
-	agentConnection, clientConnection := runtime.agent, runtime.client
+	agentConnection, clientConnection, clientTCP := runtime.agent, runtime.client, runtime.clientTCP
 	runtime.mu.Unlock()
 	agent := websocket.NetConn(context.Background(), agentConnection, websocket.MessageBinary)
-	client := websocket.NetConn(context.Background(), clientConnection, websocket.MessageBinary)
+	var client net.Conn
+	if clientTCP != nil {
+		client = clientTCP
+	} else {
+		client = websocket.NetConn(context.Background(), clientConnection, websocket.MessageBinary)
+	}
 	completed := make(chan struct{}, 2)
 	copySide := func(destination, source net.Conn) {
 		_, _ = io.Copy(destination, source)

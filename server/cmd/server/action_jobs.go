@@ -124,6 +124,9 @@ var actionDefinitions = map[string]actionDefinition{
 	"diagnostic.lan_scan": {
 		Type: "diagnostic.lan_scan", Title: "Сканирование локальной сети", Description: "Ищет доступные внутренние узлы и типовые службы через выбранный Agent, не изменяя сеть пользователя.", Risk: "read", TimeoutSeconds: 45,
 	},
+	"diagnostic.tcp_probe": {
+		Type: "diagnostic.tcp_probe", Title: "Проверка узла мониторинга", Description: "Проверяет доступность до 16 явно заданных TCP-портов внутреннего узла через выбранный Agent.", Risk: "read", TimeoutSeconds: 30,
+	},
 	"windows.printers.list": {
 		Type: "windows.printers.list", Title: "Список принтеров", Description: "Показывает установленные принтеры, порты, драйверы, очередь и принтер по умолчанию без изменений.", Risk: "read", TimeoutSeconds: 30, SupportedOS: "windows",
 	},
@@ -212,6 +215,33 @@ func normalizeActionParameters(action string, input map[string]any) (map[string]
 			subnet = network.String()
 		}
 		return map[string]any{"subnet": subnet}, nil
+	case "diagnostic.tcp_probe":
+		if len(input) != 2 {
+			return nil, errors.New("для мониторинга требуются только host и ports")
+		}
+		host, _ := input["host"].(string)
+		host = strings.TrimSpace(host)
+		address := net.ParseIP(host)
+		if address == nil || (!address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast()) {
+			return nil, errors.New("мониторинг разрешён только для внутреннего IP-адреса")
+		}
+		rawPorts, ok := input["ports"].([]any)
+		if !ok || len(rawPorts) < 1 || len(rawPorts) > 16 {
+			return nil, errors.New("для мониторинга требуется от 1 до 16 портов")
+		}
+		ports := make([]int, 0, len(rawPorts))
+		seen := make(map[int]bool)
+		for _, rawPort := range rawPorts {
+			value, err := numericActionParameter(rawPort)
+			if err != nil || value < 1 || value > 65535 {
+				return nil, errors.New("порт мониторинга недопустим")
+			}
+			if !seen[int(value)] {
+				seen[int(value)] = true
+				ports = append(ports, int(value))
+			}
+		}
+		return map[string]any{"host": address.String(), "ports": ports}, nil
 	case "windows.printer.open_web":
 		if len(input) != 2 {
 			return nil, errors.New("для веб-интерфейса принтера требуются только host и scheme")
@@ -407,6 +437,8 @@ func actionSteps(definition actionDefinition, parameters map[string]any) []strin
 		return []string{"Прочитать состояние служб", "Выделить остановленные и ошибочные службы", "Вернуть результат без перезапуска"}
 	case "diagnostic.lan_scan":
 		return []string{"Определить внутреннюю подсеть выбранного Agent", "Проверить не более 256 адресов с ограничением параллельности", "Вернуть найденные RDP, SSH, файловые, веб- и печатные службы"}
+	case "diagnostic.tcp_probe":
+		return []string{"Проверить внутренний IP выбранного узла", "Подключиться только к явно заданным TCP-портам", "Сохранить задержку и состояние в истории мониторинга"}
 	case "windows.printers.discover":
 		return []string{"Определить одну внутреннюю подсеть выбранного Agent", "Проверить только стандартные IPP, JetDirect, LPD и веб-порты принтеров", "Объединить сетевые устройства с уже установленными принтерами"}
 	case "windows.printers.list":

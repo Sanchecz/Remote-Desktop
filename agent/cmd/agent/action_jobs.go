@@ -187,6 +187,33 @@ func decodeAndNormalizeActionParameters(action string, raw json.RawMessage) (map
 			subnet = network.String()
 		}
 		return map[string]any{"subnet": subnet}, nil
+	case "diagnostic.tcp_probe":
+		if len(input) != 2 {
+			return nil, errors.New("для мониторинга требуются только host и ports")
+		}
+		host, _ := input["host"].(string)
+		host = strings.TrimSpace(host)
+		address := net.ParseIP(host)
+		if address == nil || (!address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast()) {
+			return nil, errors.New("мониторинг разрешён только для внутреннего IP-адреса")
+		}
+		rawPorts, ok := input["ports"].([]any)
+		if !ok || len(rawPorts) < 1 || len(rawPorts) > 16 {
+			return nil, errors.New("для мониторинга требуется от 1 до 16 портов")
+		}
+		ports := make([]int, 0, len(rawPorts))
+		seen := make(map[int]bool)
+		for _, rawPort := range rawPorts {
+			value, err := agentIntegerParameter(rawPort)
+			if err != nil || value < 1 || value > 65535 {
+				return nil, errors.New("порт мониторинга недопустим")
+			}
+			if !seen[int(value)] {
+				seen[int(value)] = true
+				ports = append(ports, int(value))
+			}
+		}
+		return map[string]any{"host": address.String(), "ports": ports}, nil
 	case "windows.printer.open_web":
 		if runtime.GOOS != "windows" || len(input) != 2 {
 			return nil, errors.New("параметры веб-интерфейса принтера недопустимы")
@@ -402,6 +429,10 @@ func executeTypedAction(ctx context.Context, cfg *config, action string, paramet
 	case "diagnostic.lan_scan":
 		subnet, _ := parameters["subnet"].(string)
 		return executeLANScan(ctx, subnet)
+	case "diagnostic.tcp_probe":
+		host, _ := parameters["host"].(string)
+		ports, _ := parameters["ports"].([]int)
+		return executeTCPProbe(ctx, host, ports)
 	case "windows.printers.discover":
 		subnet, _ := parameters["subnet"].(string)
 		return executeWindowsPrinterDiscover(ctx, subnet)

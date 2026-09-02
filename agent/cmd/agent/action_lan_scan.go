@@ -19,12 +19,21 @@ type lanScanHost struct {
 }
 
 type lanScanResult struct {
-	Subnet    string        `json:"subnet"`
-	AgentIP   string        `json:"agentIp"`
-	Scanned   int           `json:"scanned"`
-	Hosts     []lanScanHost `json:"hosts"`
-	StartedAt time.Time     `json:"startedAt"`
-	Duration  int64         `json:"durationMs"`
+	Subnet           string             `json:"subnet"`
+	AgentIP          string             `json:"agentIp"`
+	AvailableSubnets []lanScanCandidate `json:"availableSubnets"`
+	Scanned          int                `json:"scanned"`
+	Hosts            []lanScanHost      `json:"hosts"`
+	StartedAt        time.Time          `json:"startedAt"`
+	Duration         int64              `json:"durationMs"`
+}
+
+type lanScanCandidate struct {
+	Subnet    string `json:"subnet"`
+	AgentIP   string `json:"agentIp"`
+	Interface string `json:"interface"`
+	Preferred bool   `json:"preferred"`
+	score     int
 }
 
 func executeLANScan(ctx context.Context, requestedSubnet string) remoteJobResult {
@@ -47,8 +56,9 @@ func executeLANScan(ctx context.Context, requestedSubnet string) remoteJobResult
 	sort.Slice(hosts, func(left, right int) bool {
 		return bytesCompareIP(net.ParseIP(hosts[left].IP), net.ParseIP(hosts[right].IP)) < 0
 	})
+	candidates, _ := listLANScanCandidates()
 	result := lanScanResult{
-		Subnet: network.String(), AgentIP: agentIP.String(), Scanned: len(addresses), Hosts: hosts,
+		Subnet: network.String(), AgentIP: agentIP.String(), AvailableSubnets: candidates, Scanned: len(addresses), Hosts: hosts,
 		StartedAt: started, Duration: time.Since(started).Milliseconds(),
 	}
 	payload, err := json.MarshalIndent(result, "", "  ")
@@ -75,10 +85,25 @@ func resolveLANScanNetwork(requested string) (*net.IPNet, net.IP, error) {
 		}
 		return network, agentIP, nil
 	}
-	interfaces, err := net.Interfaces()
+	candidates, err := listLANScanCandidates()
 	if err != nil {
 		return nil, nil, fmt.Errorf("не удалось прочитать сетевые интерфейсы: %w", err)
 	}
+	if len(candidates) > 0 {
+		_, network, parseErr := net.ParseCIDR(candidates[0].Subnet)
+		if parseErr == nil {
+			return network, net.ParseIP(candidates[0].AgentIP).To4(), nil
+		}
+	}
+	return nil, nil, errors.New("Agent не нашёл активную внутреннюю IPv4-подсеть")
+}
+
+func listLANScanCandidates() ([]lanScanCandidate, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	bySubnet := make(map[string]lanScanCandidate)
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
@@ -94,10 +119,55 @@ func resolveLANScanNetwork(requested string) (*net.IPNet, net.IP, error) {
 				ones = 24
 			}
 			mask := net.CIDRMask(ones, 32)
-			return &net.IPNet{IP: ip.To4().Mask(mask), Mask: mask}, ip.To4(), nil
+			subnet := (&net.IPNet{IP: ip.To4().Mask(mask), Mask: mask}).String()
+			candidate := lanScanCandidate{Subnet: subnet, AgentIP: ip.To4().String(), Interface: iface.Name, score: lanInterfaceScore(iface.Name, ip.To4(), ones)}
+			if previous, exists := bySubnet[subnet]; !exists || candidate.score > previous.score {
+				bySubnet[subnet] = candidate
+			}
 		}
 	}
-	return nil, nil, errors.New("Agent не нашёл активную внутреннюю IPv4-подсеть")
+	candidates := make([]lanScanCandidate, 0, len(bySubnet))
+	for _, candidate := range bySubnet {
+		candidates = append(candidates, candidate)
+	}
+	sort.SliceStable(candidates, func(left, right int) bool {
+		if candidates[left].score != candidates[right].score {
+			return candidates[left].score > candidates[right].score
+		}
+		return candidates[left].Subnet < candidates[right].Subnet
+	})
+	if len(candidates) > 0 {
+		candidates[0].Preferred = true
+	}
+	return candidates, nil
+}
+
+func lanInterfaceScore(name string, ip net.IP, prefix int) int {
+	value := strings.ToLower(name)
+	score := 0
+	for _, physical := range []string{"ethernet", "wi-fi", "wifi", "wlan", "беспровод", "локальная сеть"} {
+		if strings.Contains(value, physical) {
+			score += 100
+			break
+		}
+	}
+	for _, virtual := range []string{"virtual", "vethernet", "hyper-v", "wireguard", "wintun", "vpn", "tunnel", "tailscale", "zerotier", "docker", "wsl", "loopback"} {
+		if strings.Contains(value, virtual) {
+			score -= 180
+			break
+		}
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 192 && ip4[1] == 168 {
+			score += 25
+		} else if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+			score += 15
+		}
+	}
+	if prefix == 24 {
+		score += 5
+	}
+	return score
 }
 
 func localIPv4Inside(network *net.IPNet) net.IP {

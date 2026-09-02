@@ -22,5 +22,12 @@ supportgenesis.ru {
 		-Server
 	}
 
-	reverse_proxy app:8080
+	handle /guacamole/* {
+		log_skip
+		reverse_proxy guacamole:8080
+	}
+
+	handle {
+		reverse_proxy app:8080
+	}
 }

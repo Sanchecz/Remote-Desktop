@@ -398,6 +398,57 @@ var schemaStatements = []string{
 		END IF;
 	END $$`,
 	`CREATE INDEX IF NOT EXISTS remote_file_transfers_queue_idx ON remote_file_transfers(device_id,status,created_at)`,
+	`CREATE TABLE IF NOT EXISTS monitor_settings (
+		id smallint PRIMARY KEY DEFAULT 1 CHECK (id=1),
+		retention_days integer NOT NULL DEFAULT 7 CHECK (retention_days IN (0,1,7,30,90)),
+		updated_at timestamptz NOT NULL DEFAULT now()
+	)`,
+	`INSERT INTO monitor_settings (id,retention_days) VALUES (1,7) ON CONFLICT (id) DO NOTHING`,
+	`CREATE TABLE IF NOT EXISTS monitor_targets (
+		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+		name text NOT NULL,
+		gateway_device_id uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		host inet NOT NULL,
+		ports integer[] NOT NULL,
+		success_policy text NOT NULL DEFAULT 'all' CHECK (success_policy IN ('any','all')),
+		interval_seconds integer NOT NULL DEFAULT 300 CHECK (interval_seconds BETWEEN 60 AND 86400),
+		enabled boolean NOT NULL DEFAULT true,
+		status text NOT NULL DEFAULT 'pending',
+		last_latency_ms bigint NOT NULL DEFAULT 0,
+		last_error text NOT NULL DEFAULT '',
+		last_checked_at timestamptz,
+		next_probe_at timestamptz NOT NULL DEFAULT now(),
+		last_action_job_id uuid REFERENCES action_jobs(id) ON DELETE SET NULL,
+		processed_action_job_id uuid REFERENCES action_jobs(id) ON DELETE SET NULL,
+		created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+		created_at timestamptz NOT NULL DEFAULT now(),
+		updated_at timestamptz NOT NULL DEFAULT now()
+	)`,
+	`ALTER TABLE monitor_targets ADD COLUMN IF NOT EXISTS success_policy text NOT NULL DEFAULT 'all' CHECK (success_policy IN ('any','all'))`,
+	`CREATE INDEX IF NOT EXISTS monitor_targets_due_idx ON monitor_targets(enabled,next_probe_at)`,
+	`CREATE TABLE IF NOT EXISTS monitor_samples (
+		id bigserial PRIMARY KEY,
+		target_id uuid NOT NULL REFERENCES monitor_targets(id) ON DELETE CASCADE,
+		status text NOT NULL,
+		latency_ms bigint NOT NULL DEFAULT 0,
+		open_ports integer[] NOT NULL DEFAULT '{}',
+		error_text text NOT NULL DEFAULT '',
+		checked_at timestamptz NOT NULL DEFAULT now()
+	)`,
+	`CREATE INDEX IF NOT EXISTS monitor_samples_target_time_idx ON monitor_samples(target_id,checked_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS monitor_device_samples (
+		id bigserial PRIMARY KEY,
+		device_id uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		status text NOT NULL CHECK (status IN ('ok','warning','down')),
+		cpu_load_percent double precision NOT NULL DEFAULT 0,
+		memory_used_percent double precision NOT NULL DEFAULT 0,
+		disk_free_percent double precision NOT NULL DEFAULT 100,
+		problem_codes text[] NOT NULL DEFAULT '{}',
+		problem_text text[] NOT NULL DEFAULT '{}',
+		checked_at timestamptz NOT NULL DEFAULT now()
+	)`,
+	`CREATE INDEX IF NOT EXISTS monitor_device_samples_device_time_idx ON monitor_device_samples(device_id,checked_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS monitor_device_samples_time_idx ON monitor_device_samples(checked_at DESC)`,
 }
 
 func main() {
@@ -434,6 +485,7 @@ func main() {
 		log.Fatal(err)
 	}
 	go s.runMaintenance(ctx)
+	go s.runMonitoring(ctx)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -506,6 +558,7 @@ func main() {
 		r.Get("/file-transfers/{id}/download", s.downloadFileTransfer)
 		r.With(s.requireCSRF).Delete("/file-transfers/{id}", s.cancelFileTransfer)
 		r.With(s.requireCSRF).Post("/network-tunnels", s.createNetworkTunnel)
+		r.With(s.requireCSRF).Post("/browser-connections", s.createBrowserConnection)
 		r.Get("/network-tunnels/{id}", s.networkTunnelStatus)
 		r.Get("/users", s.listUsers)
 		r.With(s.requireCSRF).Post("/users", s.createUser)
@@ -528,6 +581,13 @@ func main() {
 		r.With(s.requireCSRF).Post("/action-jobs", s.createActionJobFromWeb)
 		r.With(s.requireCSRF).Post("/action-jobs/{id}/approve", s.approveActionJob)
 		r.With(s.requireCSRF).Post("/action-jobs/{id}/cancel", s.cancelActionJob)
+		r.Get("/monitoring", s.listMonitoring)
+		r.With(s.requireCSRF).Post("/monitoring/targets", s.createMonitorTarget)
+		r.With(s.requireCSRF).Patch("/monitoring/targets/{id}", s.updateMonitorTarget)
+		r.With(s.requireCSRF).Delete("/monitoring/targets/{id}", s.deleteMonitorTarget)
+		r.With(s.requireCSRF).Post("/monitoring/targets/{id}/probe", s.probeMonitorTarget)
+		r.With(s.requireCSRF).Put("/monitoring/settings", s.updateMonitoringSettings)
+		r.With(s.requireCSRF).Delete("/monitoring/history", s.clearMonitoringHistory)
 		r.With(s.requireCSRF).Post("/ai/analyze", s.aiAnalyze)
 	})
 	r.Route("/api/integration/v1", func(r chi.Router) {
@@ -640,6 +700,7 @@ func (s *server) runMaintenance(ctx context.Context) {
 		}
 		s.removeExpiredTransferFiles()
 		s.removeExpiredNetworkTunnels()
+		s.pruneMonitoringHistory(ctx)
 		s.pruneDesktopRuntimeState(time.Now().Add(-2 * time.Hour))
 		s.loginMu.Lock()
 		for ip, attempt := range s.loginFails {
@@ -903,7 +964,7 @@ func (s *server) revokeSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listDevices(w http.ResponseWriter, r *http.Request) {
 	a := currentAuth(r)
-	rows, err := s.db.Query(r.Context(), `SELECT id,connection_code,name,hostname,device_group,os,os_version,arch,agent_version,COALESCE(host(public_ip),''),local_ips,logged_in_user,cpu_model,cpu_load_percent,memory_bytes,memory_used_bytes,disk_total_bytes,disk_free_bytes,uptime_seconds,install_mode,privileged,pending_removal,enrolled_at,last_seen,(last_seen>now()-interval '90 seconds'),(access_password_hash<>''),($1='owner' OR access_password_hash='' OR EXISTS(SELECT 1 FROM device_access_unlocks u WHERE u.device_id=devices.id AND u.session_id=$2 AND u.expires_at>now())) FROM devices ORDER BY name`, a.Role, a.SessionID)
+	rows, err := s.db.Query(r.Context(), `SELECT id,connection_code,name,hostname,device_group,os,os_version,arch,agent_version,COALESCE(host(public_ip),''),local_ips,logged_in_user,cpu_model,cpu_load_percent,memory_bytes,memory_used_bytes,disk_total_bytes,disk_free_bytes,uptime_seconds,install_mode,privileged,pending_removal,enrolled_at,last_seen,(last_seen>now()-interval '90 seconds'),(access_password_hash<>''),($1='owner' OR access_password_hash='' OR EXISTS(SELECT 1 FROM device_access_unlocks u WHERE u.device_id=devices.id AND u.session_id=$2 AND u.expires_at>now())),COALESCE((SELECT r.agent_error FROM remote_desktop_sessions r WHERE r.device_id=devices.id AND r.created_at>now()-interval '1 day' ORDER BY COALESCE(r.frame_at,r.created_at) DESC LIMIT 1),'') FROM devices ORDER BY name`, a.Role, a.SessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Не удалось загрузить устройства")
 		return
@@ -911,16 +972,16 @@ func (s *server) listDevices(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	devices := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, code, name, hostname, group, osName, osVersion, arch, agentVersion, publicIP, currentUser, cpu, installMode string
+		var id, code, name, hostname, group, osName, osVersion, arch, agentVersion, publicIP, currentUser, cpu, installMode, remoteError string
 		var localIPs []string
 		var memory, memoryUsed, diskTotal, diskFree, uptime int64
 		var cpuLoad float64
 		var enrolled, lastSeen time.Time
 		var online, privileged, pendingRemoval, accessProtected, accessGranted bool
-		if err := rows.Scan(&id, &code, &name, &hostname, &group, &osName, &osVersion, &arch, &agentVersion, &publicIP, &localIPs, &currentUser, &cpu, &cpuLoad, &memory, &memoryUsed, &diskTotal, &diskFree, &uptime, &installMode, &privileged, &pendingRemoval, &enrolled, &lastSeen, &online, &accessProtected, &accessGranted); err != nil {
+		if err := rows.Scan(&id, &code, &name, &hostname, &group, &osName, &osVersion, &arch, &agentVersion, &publicIP, &localIPs, &currentUser, &cpu, &cpuLoad, &memory, &memoryUsed, &diskTotal, &diskFree, &uptime, &installMode, &privileged, &pendingRemoval, &enrolled, &lastSeen, &online, &accessProtected, &accessGranted, &remoteError); err != nil {
 			continue
 		}
-		devices = append(devices, map[string]any{"id": id, "connectionCode": code, "name": name, "hostname": hostname, "group": group, "os": osName, "osVersion": osVersion, "arch": arch, "agentVersion": agentVersion, "publicIp": publicIP, "localIps": localIPs, "currentUser": currentUser, "cpuModel": cpu, "cpuLoadPercent": cpuLoad, "memoryBytes": memory, "memoryUsedBytes": memoryUsed, "diskTotalBytes": diskTotal, "diskFreeBytes": diskFree, "uptimeSeconds": uptime, "installMode": installMode, "privileged": privileged, "pendingRemoval": pendingRemoval, "enrolledAt": enrolled, "lastSeen": lastSeen, "online": online, "accessProtected": accessProtected, "accessGranted": accessGranted})
+		devices = append(devices, map[string]any{"id": id, "connectionCode": code, "name": name, "hostname": hostname, "group": group, "os": osName, "osVersion": osVersion, "arch": arch, "agentVersion": agentVersion, "publicIp": publicIP, "localIps": localIPs, "currentUser": currentUser, "cpuModel": cpu, "cpuLoadPercent": cpuLoad, "memoryBytes": memory, "memoryUsedBytes": memoryUsed, "diskTotalBytes": diskTotal, "diskFreeBytes": diskFree, "uptimeSeconds": uptime, "installMode": installMode, "privileged": privileged, "pendingRemoval": pendingRemoval, "enrolledAt": enrolled, "lastSeen": lastSeen, "online": online, "accessProtected": accessProtected, "accessGranted": accessGranted, "remoteError": remoteError})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"devices": devices})
 }

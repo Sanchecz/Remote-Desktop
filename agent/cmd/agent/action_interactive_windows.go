@@ -134,7 +134,7 @@ func executeWindowsPrinterDiscover(ctx context.Context, requestedSubnet string) 
 		}
 	}
 	payload, err := json.MarshalIndent(map[string]any{
-		"subnet": network.String(), "agentIp": agentIP.String(), "installed": installed, "network": discovered,
+		"subnet": network.String(), "agentIp": agentIP.String(), "availableSubnets": func() []lanScanCandidate { value, _ := listLANScanCandidates(); return value }(), "installed": installed, "network": discovered,
 	}, "", "  ")
 	if err != nil {
 		return failedAction("не удалось сформировать список принтеров")
@@ -153,7 +153,7 @@ func probeWindowsNetworkPrinter(ctx context.Context, address net.IP) discoveredN
 	printServiceFound := false
 	webServices := make([]string, 0, 2)
 	for _, candidate := range ports {
-		dialer := net.Dialer{Timeout: 240 * time.Millisecond}
+		dialer := net.Dialer{Timeout: 500 * time.Millisecond}
 		connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(address.String(), strconv.Itoa(candidate.port)))
 		if err != nil {
 			continue

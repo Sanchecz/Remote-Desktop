@@ -155,6 +155,18 @@ func TestNormalizeLANPrinterAndScanActions(t *testing.T) {
 	if _, err := normalizeActionParameters("windows.printers.discover", map[string]any{"subnet": "10.24.0.0/16"}); err == nil {
 		t.Fatal("printer discovery accepted a range larger than /24")
 	}
+	probe, err := normalizeActionParameters("diagnostic.tcp_probe", map[string]any{"host": "192.168.50.1", "ports": []any{22.0, 8291.0, 8291.0}})
+	if err != nil {
+		t.Fatalf("safe monitor probe rejected: %v", err)
+	}
+	if ports, ok := probe["ports"].([]int); !ok || len(ports) != 2 || ports[0] != 22 || ports[1] != 8291 {
+		t.Fatalf("unexpected normalized monitor ports: %#v", probe["ports"])
+	}
+	for _, input := range []map[string]any{{"host": "8.8.8.8", "ports": []any{53.0}}, {"host": "192.168.1.1", "ports": []any{0.0}}, {"host": "192.168.1.1", "ports": []any{}}} {
+		if _, err := normalizeActionParameters("diagnostic.tcp_probe", input); err == nil {
+			t.Fatalf("unsafe monitor probe accepted: %#v", input)
+		}
+	}
 	if result, err := normalizeActionParameters("windows.printer.open_web", map[string]any{"host": "192.168.1.40", "scheme": "https"}); err != nil || result["scheme"] != "https" {
 		t.Fatalf("valid printer web action rejected: %#v, %v", result, err)
 	}

@@ -128,6 +128,12 @@ func TestAgentLANAndPrinterActionValidation(t *testing.T) {
 	if _, err := decodeAndNormalizeActionParameters("diagnostic.lan_scan", json.RawMessage(`{"subnet":"1.1.1.0/24"}`)); err == nil {
 		t.Fatal("public LAN scan range accepted")
 	}
+	if _, err := decodeAndNormalizeActionParameters("diagnostic.tcp_probe", json.RawMessage(`{"host":"192.168.1.1","ports":[22,8291]}`)); err != nil {
+		t.Fatalf("safe monitor probe rejected: %v", err)
+	}
+	if _, err := decodeAndNormalizeActionParameters("diagnostic.tcp_probe", json.RawMessage(`{"host":"8.8.8.8","ports":[53]}`)); err == nil {
+		t.Fatal("public monitor target accepted")
+	}
 	if runtime.GOOS == "windows" {
 		if _, err := decodeAndNormalizeActionParameters("network.rdp.open", json.RawMessage(`{"host":"192.168.1.10","port":3389,"username":"admin"}`)); err != nil {
 			t.Fatalf("valid RDP action rejected: %v", err)

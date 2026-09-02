@@ -17,16 +17,16 @@
 
 ```sh
 sudo install -d -m 0750 /opt/genesisit/releases /opt/genesisit/shared /opt/genesisit/backups
-sudo install -d -m 0750 /opt/genesisit/releases/1.0.39
-sudo tar -xzf remoteit-1.0.39-source.tar.gz -C /opt/genesisit/releases/1.0.39
-sudo ln -sfn /opt/genesisit/releases/1.0.39 /opt/genesisit/current
+sudo install -d -m 0750 /opt/genesisit/releases/1.0.40
+sudo tar -xzf remoteit-1.0.40-source.tar.gz -C /opt/genesisit/releases/1.0.40
+sudo ln -sfn /opt/genesisit/releases/1.0.40 /opt/genesisit/current
 cd /opt/genesisit/current
 ```
 
 Проверьте SHA-256 до распаковки:
 
 ```sh
-sha256sum -c remoteit-1.0.39-source.tar.gz.sha256
+sha256sum -c remoteit-1.0.40-source.tar.gz.sha256
 ```
 
 ## 3. Закрытая конфигурация
@@ -45,11 +45,14 @@ sudo openssl rand -base64 24
 
 - `POSTGRES_PASSWORD` — пароль БД;
 - `REMOTEIT_ACTION_SIGNING_SECRET` — постоянный секрет подписанных административных заданий, минимум 32 символа;
+- `REMOTEIT_GUACAMOLE_JSON_SECRET` — случайный постоянный ключ из 32 шестнадцатеричных символов для одноразовых браузерных RDP/SSH-сессий;
 - `GENESIS_ADMIN_PASSWORD` — временный пароль первого владельца;
 - `REMOTEIT_PUBLIC_URL` — итоговый HTTPS-адрес;
 - `OPENAI_API_KEY` — необязательный ключ для расширенного AI-объяснения.
 
 `REMOTEIT_ACTION_SIGNING_SECRET` нельзя произвольно менять после установки Agent: изменение нарушит доверие уже зарегистрированных устройств.
+
+`REMOTEIT_GUACAMOLE_JSON_SECRET` также храните только в `/opt/genesisit/shared/.env`. Его смена завершит уже выданные HTML5-сессии, но не требует переустановки Agent. Служебный порт `guacd` наружу не публикуется.
 
 ## 4. Домен и TLS
 

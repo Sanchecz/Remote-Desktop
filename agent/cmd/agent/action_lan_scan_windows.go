@@ -8,6 +8,7 @@ import (
 	"net"
 	"os/exec"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -84,12 +85,29 @@ func scanLANHosts(ctx context.Context, addresses []net.IP, agentIP net.IP) ([]la
 	}
 	hosts := make([]lanScanHost, 0, len(byIP))
 	for _, host := range byIP {
+		host.OpenPorts = probeKnownLANPorts(ctx, host.IP)
 		hosts = append(hosts, host)
 	}
 	sort.Slice(hosts, func(left, right int) bool {
 		return bytesCompareIP(net.ParseIP(hosts[left].IP), net.ParseIP(hosts[right].IP)) < 0
 	})
 	return hosts, nil
+}
+
+func probeKnownLANPorts(ctx context.Context, host string) []int {
+	// This is a bounded diagnostic probe, not an arbitrary port scanner. Only
+	// well-known administration, printing and remote-access ports are checked.
+	ports := []int{22, 80, 443, 445, 515, 631, 8291, 8728, 8729, 9100, 3389}
+	open := make([]int, 0, 4)
+	for _, port := range ports {
+		dialer := net.Dialer{Timeout: 180 * time.Millisecond}
+		connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err == nil {
+			_ = connection.Close()
+			open = append(open, port)
+		}
+	}
+	return open
 }
 
 func pingWindowsLANHost(ctx context.Context, ip net.IP) (lanScanHost, bool) {

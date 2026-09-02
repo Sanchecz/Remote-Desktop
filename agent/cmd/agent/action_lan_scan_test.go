@@ -29,6 +29,14 @@ func TestResolveLANScanNetworkRejectsPublicAndOversized(t *testing.T) {
 	}
 }
 
+func TestLANInterfaceScorePrefersPhysicalLAN(t *testing.T) {
+	physical := lanInterfaceScore("Ethernet", net.ParseIP("192.168.1.10"), 24)
+	virtual := lanInterfaceScore("WireGuard Tunnel", net.ParseIP("10.6.7.1"), 24)
+	if physical <= virtual {
+		t.Fatalf("physical LAN must outrank a tunnel: physical=%d virtual=%d", physical, virtual)
+	}
+}
+
 func TestParseLANNeighborTableIsLanguageIndependentAndPrivate(t *testing.T) {
 	input := []byte("Interface: 192.168.1.10 --- 0x9\n" +
 		"  Internet Address      Physical Address      Type\n" +

@@ -116,6 +116,7 @@ type Device = {
   pendingRemoval: boolean;
   accessProtected: boolean;
   accessGranted: boolean;
+  remoteError?: string;
   lastSeen: string;
   online: boolean;
 };
@@ -227,11 +228,11 @@ type ActionJob = {
   approvedAt: string | null;
 };
 
-type Section = "devices" | "remote" | "connections" | "printers" | "sessions" | "terminal" | "scripts" | "tokens" | "users" | "audit" | "settings";
+type Section = "devices" | "remote" | "connections" | "network" | "printers" | "sessions" | "terminal" | "scripts" | "tokens" | "users" | "audit" | "monitoring" | "settings";
 
 type ApiError = { error?: string };
 
-const LATEST_AGENT_VERSION = "1.0.39";
+const LATEST_AGENT_VERSION = "1.0.40";
 
 async function api<T>(path: string, options: RequestInit = {}, csrf = ""): Promise<T> {
   const headers = new Headers(options.headers);
@@ -419,6 +420,7 @@ const navigation = [
   { id: "devices", label: "Устройства", icon: Monitor, enabled: true },
   { id: "remote", label: "Удалённый доступ", icon: ScreenShare, enabled: true },
   { id: "connections", label: "RDP и SSH", icon: Link2, enabled: true },
+  { id: "network", label: "Сканер сети", icon: Wifi, enabled: true },
   { id: "printers", label: "Принтеры", icon: HardDrive, enabled: true },
   { id: "sessions", label: "Сеансы", icon: Activity, enabled: true },
   { id: "terminal", label: "Терминал", icon: TerminalSquare, enabled: true },
@@ -426,6 +428,7 @@ const navigation = [
   { id: "tokens", label: "Токены", icon: KeyRound, enabled: true },
   { id: "users", label: "Пользователи", icon: Users, enabled: true },
   { id: "audit", label: "Журнал", icon: Clock3, enabled: true },
+  { id: "monitoring", label: "Мониторинг", icon: Activity, enabled: true },
   { id: "settings", label: "Настройки", icon: Settings, enabled: true }
 ];
 
@@ -444,7 +447,7 @@ function Dashboard({ user, csrf, onLogout, theme, onTheme }: { user: User; csrf:
     const requested = new URLSearchParams(window.location.search).get("section");
     if (requested === "settings" || requested === "sessions") return requested;
 	if (requested === "remote" && user.role !== "viewer") return "remote";
-	if ((requested === "connections" || requested === "printers") && (user.role === "owner" || user.role === "admin")) return requested;
+	if ((requested === "connections" || requested === "network" || requested === "printers" || requested === "monitoring") && (user.role === "owner" || user.role === "admin")) return requested;
     if (requested === "terminal" && user.role !== "viewer") return "terminal";
     if (requested === "scripts" && (user.role === "owner" || user.role === "admin")) return "scripts";
     if ((requested === "users" || requested === "audit" || requested === "tokens") && (user.role === "owner" || user.role === "admin")) return requested;
@@ -523,7 +526,7 @@ function Dashboard({ user, csrf, onLogout, theme, onTheme }: { user: User; csrf:
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
         <div className="sidebar-head"><Brand /><button className="mobile-close" onClick={() => setMenuOpen(false)} aria-label="Закрыть меню"><X /></button></div>
         <nav>{navigation.map(({ id, label, icon: Icon, enabled }) => {
-		  const allowed = enabled && (!["users", "audit", "scripts", "tokens", "connections", "printers"].includes(id) || canManageUsers) && (!["terminal", "remote"].includes(id) || user.role !== "viewer");
+		  const allowed = enabled && (!["users", "audit", "scripts", "tokens", "connections", "network", "printers", "monitoring"].includes(id) || canManageUsers) && (!["terminal", "remote"].includes(id) || user.role !== "viewer");
           return <button key={id} className={section === id ? "active" : ""} disabled={!allowed} onClick={() => allowed && navigateSection(id as Section)}><Icon size={19} /><span>{label}</span></button>;
         })}</nav>
         <div className="sidebar-foot">
@@ -554,7 +557,7 @@ function Dashboard({ user, csrf, onLogout, theme, onTheme }: { user: User; csrf:
         </header>
 
         <div className="content">
-		  {section === "users" ? <UsersPage currentUser={user} csrf={csrf} /> : section === "remote" ? <RemoteControlPage key={`remote-${remoteNavigationKey}`} devices={devices} currentUser={user} csrf={csrf} initialDeviceId={remoteDeviceId} onAccessChanged={updateDeviceAccess} onOpenDevice={setSelectedDevice} /> : section === "connections" ? <NetworkConnectionsPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "printers" ? <PrintersPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "sessions" ? <SessionsPage devices={devices} onOpen={setSelectedDevice} /> : section === "terminal" ? <TerminalPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "scripts" ? <ScriptsPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "tokens" ? <TokensPage csrf={csrf} refreshKey={tokenRefreshKey} onCreate={() => setEnrollOpen(true)} /> : section === "audit" ? <AuditPage /> : section === "settings" ? <SettingsPage currentUser={user} csrf={csrf} theme={theme} onTheme={onTheme} devices={devices} onAccessChanged={updateDeviceAccess} /> : <>
+		  {section === "users" ? <UsersPage currentUser={user} csrf={csrf} /> : section === "remote" ? <RemoteControlPage key={`remote-${remoteNavigationKey}`} devices={devices} currentUser={user} csrf={csrf} initialDeviceId={remoteDeviceId} onAccessChanged={updateDeviceAccess} onOpenDevice={setSelectedDevice} /> : section === "connections" ? <NetworkConnectionsPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "network" ? <NetworkScanPage devices={devices} csrf={csrf} /> : section === "printers" ? <PrintersPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "sessions" ? <SessionsPage devices={devices} onOpen={setSelectedDevice} /> : section === "terminal" ? <TerminalPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "scripts" ? <ScriptsPage devices={devices} currentUser={user} csrf={csrf} onAccessChanged={updateDeviceAccess} /> : section === "tokens" ? <TokensPage csrf={csrf} refreshKey={tokenRefreshKey} onCreate={() => setEnrollOpen(true)} /> : section === "audit" ? <AuditPage /> : section === "monitoring" ? <MonitoringPage devices={devices} csrf={csrf} /> : section === "settings" ? <SettingsPage currentUser={user} csrf={csrf} theme={theme} onTheme={onTheme} devices={devices} onAccessChanged={updateDeviceAccess} /> : <>
           <section className="page-heading">
             <div><span className="eyebrow">ИНФРАСТРУКТУРА</span><h1>Устройства</h1><p>Все компьютеры и серверы, подключённые к RemoteIt.</p></div>
             <div className="heading-actions"><a className="secondary-button apk-download" href="/downloads/RemoteIt.apk" download><Download size={17} /> Android APK</a><button className="primary-button" onClick={() => setEnrollOpen(true)}><Plus size={18} /> Добавить устройство</button></div>
@@ -582,7 +585,7 @@ function Dashboard({ user, csrf, onLogout, theme, onTheme }: { user: User; csrf:
           </section>
           </>}
         </div>
-		<nav className="mobile-bottom-nav" aria-label="Основная навигация"><button className={section === "devices" ? "active" : ""} onClick={() => navigateSection("devices")}><Monitor size={20} /><span>Устройства</span></button><button className={section === "sessions" ? "active" : ""} onClick={() => navigateSection("sessions")}><Activity size={20} /><span>Сеансы</span></button><button className={section === "remote" ? "active" : ""} disabled={user.role === "viewer"} onClick={() => navigateSection("remote")}><ScreenShare size={20} /><span>Доступ</span></button><button className={section === "scripts" ? "active" : ""} disabled={!canManageUsers} onClick={() => canManageUsers && navigateSection("scripts")}><FileCode2 size={20} /><span>Автоматизация</span></button><button className={menuOpen || ["connections","printers","terminal","tokens","users","audit","settings"].includes(section) ? "active" : ""} onClick={() => setMenuOpen(true)}><MoreHorizontal size={21} /><span>Ещё</span></button></nav>
+		<nav className="mobile-bottom-nav" aria-label="Основная навигация"><button className={section === "devices" ? "active" : ""} onClick={() => navigateSection("devices")}><Monitor size={20} /><span>Устройства</span></button><button className={section === "sessions" ? "active" : ""} onClick={() => navigateSection("sessions")}><Activity size={20} /><span>Сеансы</span></button><button className={section === "remote" ? "active" : ""} disabled={user.role === "viewer"} onClick={() => navigateSection("remote")}><ScreenShare size={20} /><span>Доступ</span></button><button className={section === "scripts" ? "active" : ""} disabled={!canManageUsers} onClick={() => canManageUsers && navigateSection("scripts")}><FileCode2 size={20} /><span>Автоматизация</span></button><button className={menuOpen || ["connections","network","printers","terminal","tokens","users","audit","monitoring","settings"].includes(section) ? "active" : ""} onClick={() => setMenuOpen(true)}><MoreHorizontal size={21} /><span>Ещё</span></button></nav>
       </main>
       {menuOpen && <div className="mobile-overlay" onClick={() => setMenuOpen(false)} />}
       {enrollOpen && <EnrollmentModal csrf={csrf} onClose={() => { setEnrollOpen(false); setTokenRefreshKey((value) => value + 1); }} />}
@@ -1257,6 +1260,7 @@ function RemoteDesktopPreview({ device, csrf, onConnect }: { device: Device; csr
 type LANScanResult = {
 	subnet: string;
 	agentIp: string;
+	availableSubnets?: Array<{ subnet: string; agentIp: string; interface: string; preferred: boolean }>;
 	scanned: number;
 	hosts: Array<{ ip: string; name?: string; latencyMs: number; openPorts: number[] }>;
 	durationMs: number;
@@ -1364,6 +1368,7 @@ function DeviceLANAndPrinterTools({ device, csrf }: { device: Device; csrf: stri
 type PrinterDiscoveryResult = {
 	subnet: string;
 	agentIp: string;
+	availableSubnets?: Array<{ subnet: string; agentIp: string; interface: string; preferred: boolean }>;
 	installed: PrinterInfo | PrinterInfo[];
 	network: Array<{ ip: string; name?: string; services: string[]; web: string[] }>;
 };
@@ -1401,7 +1406,9 @@ function NetworkConnectionsPage({ devices, currentUser, csrf, onAccessChanged }:
 	const [protocol, setProtocol] = useState<"rdp" | "ssh">("rdp");
 	const [port, setPort] = useState(3389);
 	const [username, setUsername] = useState("");
+	const [domain, setDomain] = useState("");
 	const [password, setPassword] = useState("");
+	const [launchURL, setLaunchURL] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [message, setMessage] = useState("");
 	const [error, setError] = useState("");
@@ -1434,29 +1441,17 @@ function NetworkConnectionsPage({ devices, currentUser, csrf, onAccessChanged }:
 		if (!gateway.accessGranted) return setError("Сначала разблокируйте доступ к выбранному Agent");
 		if (!internalHost.trim()) return setError("Укажите внутренний IPv4-адрес целевого компьютера");
 		if (externalIP.trim() && gateway.publicIp && externalIP.trim() !== gateway.publicIp) return setError("Внешний IP не совпадает с выбранным Agent. Выберите Agent этой сети или исправьте адрес.");
-		setBusy(true); setError(""); setMessage("");
+		setBusy(true); setError(""); setMessage(""); setLaunchURL("");
+		const popup = window.open("about:blank", `remoteit-${Date.now()}`);
+		if (popup) { popup.opener = null; popup.document.title = "RemoteIt — подключение"; popup.document.body.textContent = "Подготавливаем защищённое подключение…"; }
 		try {
-			let passwordCopied = false;
-			if (password) {
-				try {
-					if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
-					await navigator.clipboard.writeText(password);
-					passwordCopied = true;
-				} catch {
-					// The password never leaves this browser. Keep it in the field when the
-					// browser denies clipboard access so the administrator can copy it.
-				}
-			}
-			const tunnel = await api<{ id: string; launchUrl: string }>("/api/network-tunnels", { method: "POST", body: JSON.stringify({ deviceId: gateway.id, protocol, host: internalHost.trim(), port, username: username.trim() }) }, csrf);
-			const launcher = document.createElement("a");
-			launcher.href = tunnel.launchUrl;
-			launcher.style.display = "none";
-			document.body.appendChild(launcher);
-			launcher.click();
-			launcher.remove();
-			setMessage(`${protocol.toUpperCase()}-туннель создан через Agent «${gateway.name}». RemoteIt Console откроет штатный клиент на этом компьютере. ${password ? passwordCopied ? "Пароль оставлен только в локальном буфере — вставьте его в системное окно." : "Браузер не разрешил запись в буфер: пароль сохранён только в поле формы, скопируйте его вручную." : "Если пароль установлен, штатный клиент запросит его сам."}`);
-			if (!password || passwordCopied) setPassword("");
+			const tunnel = await api<{ id: string; launchUrl: string }>("/api/browser-connections", { method: "POST", body: JSON.stringify({ deviceId: gateway.id, protocol, host: internalHost.trim(), port, username: username.trim(), password, domain: protocol === "rdp" ? domain.trim() : "" }) }, csrf);
+			setLaunchURL(tunnel.launchUrl);
+			if (popup) popup.location.replace(tunnel.launchUrl);
+			setMessage(`${protocol.toUpperCase()} открыт в HTML5‑шлюзе через Agent «${gateway.name}». На компьютере‑шлюзе окна и консоли не запускаются.${popup ? "" : " Браузер заблокировал новое окно — нажмите ссылку ниже."}`);
+			setPassword("");
 		} catch (reason) {
+			popup?.close();
 			setError(reason instanceof Error ? reason.message : "Подключение не запущено");
 		} finally { setBusy(false); }
 	}
@@ -1471,11 +1466,11 @@ function NetworkConnectionsPage({ devices, currentUser, csrf, onAccessChanged }:
 				<div className="connection-protocol-tabs"><button type="button" className={protocol === "rdp" ? "active" : ""} onClick={() => setProtocol("rdp")}><Monitor size={17} /> RDP</button><button type="button" className={protocol === "ssh" ? "active" : ""} onClick={() => setProtocol("ssh")}><TerminalSquare size={17} /> SSH</button></div>
 				<label><span>Agent-шлюз в нужной сети</span><select value={gatewayId} onChange={(event) => selectGateway(event.target.value)}><option value="">Выберите Agent</option>{gateways.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.publicIp || "внешний IP неизвестен"} · {item.localIps?.[0] || "локальный IP неизвестен"}</option>)}</select></label>
 				<div className="connection-address-grid"><label><span>Внешний IP сети</span><input value={externalIP} onChange={(event) => matchGatewayByExternalIP(event.target.value)} placeholder="например, 203.0.113.10" /><small>Используется только для выбора правильного Agent.</small></label><label><span>Внутренний IPv4</span><input value={internalHost} onChange={(event) => setInternalHost(event.target.value)} inputMode="decimal" placeholder="192.168.1.105" required /><small>Соединение создаёт сам Agent из локальной сети; публичные адреса запрещены.</small></label><label className="connection-port"><span>Порт</span><input type="number" min={1} max={65535} value={port} onChange={(event) => setPort(Number(event.target.value))} /></label></div>
-				<div className="connection-credential-grid"><label><span>Логин</span><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder={protocol === "rdp" ? "DOMAIN\\user" : "user"} /></label><label><span>Пароль (необязательно)</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" placeholder="Не сохраняется в RemoteIt" /><small>Не пишется в задания и журнал; при заполнении кладётся только в локальный буфер этого браузера.</small></label></div>
+				<div className="connection-credential-grid"><label><span>Логин</span><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder={protocol === "rdp" ? "user" : "user"} /></label>{protocol === "rdp" && <label><span>Домен (необязательно)</span><input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="DOMAIN" /></label>}<label><span>Пароль (необязательно)</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" placeholder="Не сохраняется в RemoteIt" /><small>Передаётся только в короткоживущую зашифрованную HTML5‑сессию; в БД и журнал не записывается.</small></label></div>
 				<button className="primary-button connection-start" disabled={busy || !gateway?.accessGranted || !internalHost.trim()}>{busy ? <RefreshCw className="spin" size={17} /> : <Play size={17} />} Открыть {protocol.toUpperCase()}</button>
-				{message && <div className="form-success">{message}</div>}{error && <div className="form-error">{error}</div>}
+				{message && <div className="form-success">{message}{launchURL && <a className="connection-fallback-link" href={launchURL} target="_blank" rel="noreferrer">Открыть подключение в браузере</a>}</div>}{error && <div className="form-error">{error}</div>}
 			</form>
-			<aside className="connection-help-card"><span className="stat-icon blue"><Link2 size={21} /></span><h2>Как идёт соединение</h2><ol><li><strong>Панель создаёт одноразовый туннель</strong><span>ключ живёт только для этого подключения и не содержит пароль.</span></li><li><strong>Agent подключается к внутреннему IP</strong><span>RDP/SSH не публикуется на роутере и не требует L2TP/VPN.</span></li><li><strong>Console открывает штатный клиент локально</strong><span>mstsc или ssh работает через 127.0.0.1; наружу идёт только защищённый WSS‑канал RemoteIt.</span></li></ol><a className="secondary-button connection-console-download" href="/downloads/RemoteIt-Console.exe" download><Download size={16} /> Скачать RemoteIt Console</a><div className="notice limited-notice"><ShieldCheck size={16} /><span>Console нужно один раз скачать и запустить на компьютере администратора: он зарегистрирует безопасные ссылки remoteit:// без драйвера, VPN, правил firewall и предупреждений Defender.</span></div></aside>
+			<aside className="connection-help-card"><span className="stat-icon blue"><Link2 size={21} /></span><h2>Как идёт соединение</h2><ol><li><strong>Панель создаёт одноразовую сессию</strong><span>доступна только владельцу и администраторам и быстро истекает.</span></li><li><strong>Agent работает как сетевой мост</strong><span>подключается к внутреннему IP без VPN, проброса портов и окон на шлюзовом ПК.</span></li><li><strong>RDP или SSH открывается в браузере</strong><span>HTML5‑шлюз преобразует протокол в защищённый поток; отдельная RemoteIt Console больше не требуется.</span></li></ol><div className="notice limited-notice"><ShieldCheck size={16} /><span>Пароль не сохраняется. В защищённом журнале фиксируются администратор, Agent, внутренний адрес и время, но не реквизиты входа.</span></div></aside>
 		</section>
 	</>;
 }
@@ -1522,7 +1517,7 @@ function PrintersPage({ devices, currentUser, csrf, onAccessChanged }: { devices
 	</>;
 }
 
-function SettingsLANScanner({ devices, csrf }: { devices: Device[]; csrf: string }) {
+function NetworkScanPage({ devices, csrf }: { devices: Device[]; csrf: string }) {
 	const gateways = devices.filter((device) => device.online && device.accessGranted && !device.os.toLowerCase().includes("android"));
 	const [gatewayId, setGatewayId] = useState(() => gateways[0]?.id || "");
 	const [subnet, setSubnet] = useState("");
@@ -1540,7 +1535,100 @@ function SettingsLANScanner({ devices, csrf }: { devices: Device[]; csrf: string
 		} catch (reason) { setError(reason instanceof Error ? reason.message : "Сканирование не выполнено"); }
 		finally { setLoading(false); }
 	}
-	return <article className="settings-card settings-card-wide settings-network-card"><div className="settings-card-head"><span className="stat-icon green"><Search size={20} /></span><div><h2>Сканер внутренних IP</h2><p>Отдельный диагностический инструмент — не смешивается с RDP, SSH и принтерами</p></div></div><div className="settings-network-form"><label><span>Agent</span><select value={gatewayId} onChange={(event) => { setGatewayId(event.target.value); setResult(null); }}><option value="">Выберите устройство</option>{gateways.map((device) => <option value={device.id} key={device.id}>{device.name} · {device.localIps?.[0] || device.publicIp}</option>)}</select></label><label><span>Подсеть</span><input value={subnet} onChange={(event) => setSubnet(event.target.value)} placeholder="автоматически или 192.168.1.0/24" /></label><button type="button" className="primary-button" disabled={loading || !gateway} onClick={() => void scan()}>{loading ? <RefreshCw className="spin" size={16} /> : <Search size={16} />} Просканировать</button></div>{result && <div className="lan-scan-results"><div><strong>{result.subnet}</strong><span>Agent {result.agentIp} · проверено {result.scanned} · {result.durationMs} мс</span></div>{result.hosts.length ? result.hosts.map((item) => <article key={item.ip}><span className="lan-host-state" /><div><strong>{item.name || item.ip}</strong><small>{item.name ? `${item.ip} · ` : ""}{item.openPorts.length ? item.openPorts.join(", ") : "узел отвечает"}</small></div><span>{item.latencyMs} мс</span></article>) : <p>Отвечающие устройства не обнаружены.</p>}</div>}{error && <div className="form-error">{error}</div>}</article>;
+	const grouped = useMemo(() => Object.entries(gateways.reduce<Record<string, Device[]>>((groups, device) => { const key = device.currentUser || "Без активного пользователя"; (groups[key] ||= []).push(device); return groups; }, {})), [gateways]);
+	return <><section className="page-heading"><div><span className="eyebrow">ЛОКАЛЬНАЯ СЕТЬ</span><h1>Сканер сети</h1><p>Проверка доступных внутренних IP через Agent выбранного пользователя без установки VPN.</p></div><span className="connection-security-badge"><ShieldCheck size={17} /> Только частные подсети</span></section><article className="settings-card settings-card-wide settings-network-card network-page-card"><div className="settings-card-head"><span className="stat-icon green"><Search size={20} /></span><div><h2>Найти устройства и службы</h2><p>Agent предпочитает физический Ethernet или Wi‑Fi вместо VPN и виртуальных адаптеров</p></div></div><div className="settings-network-form"><label><span>Пользователь и Agent</span><select value={gatewayId} onChange={(event) => { setGatewayId(event.target.value); setResult(null); }}><option value="">Выберите устройство</option>{grouped.map(([userName, items]) => <optgroup key={userName} label={userName}>{items.map((device) => <option value={device.id} key={device.id}>{device.name} · {device.localIps?.[0] || device.publicIp}</option>)}</optgroup>)}</select></label><label><span>Подсеть</span><input value={subnet} onChange={(event) => setSubnet(event.target.value)} placeholder="автоматически или 192.168.1.0/24" /></label><button type="button" className="primary-button" disabled={loading || !gateway} onClick={() => void scan()}>{loading ? <RefreshCw className="spin" size={16} /> : <Search size={16} />} Просканировать</button></div>{result?.availableSubnets && result.availableSubnets.length > 1 && <div className="subnet-suggestions"><span>Сети Agent:</span>{result.availableSubnets.map((item) => <button type="button" key={item.subnet} className={item.subnet === result.subnet ? "active" : ""} onClick={() => setSubnet(item.subnet)}>{item.subnet}<small>{item.interface}{item.preferred ? " · рекомендуется" : ""}</small></button>)}</div>}{result && <div className="lan-scan-results"><div><strong>{result.subnet}</strong><span>Agent {result.agentIp} · проверено {result.scanned} · {result.durationMs} мс</span></div>{result.hosts.length ? result.hosts.map((item) => <article key={item.ip}><span className="lan-host-state" /><div><strong>{item.name || item.ip}</strong><small>{item.name ? `${item.ip} · ` : ""}{item.openPorts.length ? `порты: ${item.openPorts.join(", ")}` : "узел отвечает"}</small></div><span>{item.latencyMs} мс</span></article>) : <p>Отвечающие устройства не обнаружены.</p>}</div>}{error && <div className="form-error">{error}</div>}</article></>;
+}
+
+type MonitorTarget = {
+	id: string; name: string; gatewayDeviceId: string; gatewayName: string; host: string; ports: number[]; intervalSeconds: number; enabled: boolean;
+	successPolicy: "any" | "all";
+	status: "pending" | "ok" | "warning" | "down" | "unknown"; lastLatencyMs: number; lastError: string; lastCheckedAt: string | null; nextProbeAt: string;
+};
+
+type MonitorSample = { id: number; targetId: string; targetName: string; status: string; latencyMs: number; openPorts: number[]; error: string; checkedAt: string };
+type MonitorDeviceHealth = { deviceId: string; deviceName: string; status: "ok" | "warning" | "down"; cpuLoadPercent: number; memoryUsedPercent: number; diskFreePercent: number; problemCodes: string[]; problems: string[]; checkedAt: string };
+type MonitorDeviceSample = MonitorDeviceHealth & { id: number };
+type MonitoringData = { deviceHealth: MonitorDeviceHealth[]; deviceSamples: MonitorDeviceSample[]; targets: MonitorTarget[]; samples: MonitorSample[]; settings: { retentionDays: number }; storage: { sampleCount: number; alertCount: number; bytes: number } };
+
+const monitorPresets = [
+	{ id: "mikrotik", label: "MikroTik", ports: "22,80,443,8291,8728,8729", policy: "any" as const },
+	{ id: "router", label: "Роутер", ports: "80,443,22", policy: "any" as const },
+	{ id: "windows", label: "Windows / RDP", ports: "3389", policy: "all" as const },
+	{ id: "linux", label: "Linux / SSH", ports: "22", policy: "all" as const },
+	{ id: "printer", label: "Принтер / МФУ", ports: "80,443,515,631,9100", policy: "any" as const },
+	{ id: "custom", label: "Свои порты", ports: "", policy: "all" as const },
+];
+
+function deviceHealth(device: Device) {
+	const problems: string[] = [];
+	let severity: "ok" | "warning" | "down" = "ok";
+	if (!device.online) return { severity: "down" as const, problems: ["Agent не отвечает"] };
+	const memoryPercent = device.memoryBytes > 0 ? device.memoryUsedBytes / device.memoryBytes * 100 : 0;
+	const diskFreePercent = device.diskTotalBytes > 0 ? device.diskFreeBytes / device.diskTotalBytes * 100 : 100;
+	if (device.cpuLoadPercent >= 95) { severity = "down"; problems.push(`CPU ${Math.round(device.cpuLoadPercent)}%`); }
+	else if (device.cpuLoadPercent >= 80) { severity = "warning"; problems.push(`CPU ${Math.round(device.cpuLoadPercent)}%`); }
+	if (memoryPercent >= 95) { severity = "down"; problems.push(`RAM ${Math.round(memoryPercent)}%`); }
+	else if (memoryPercent >= 85 && severity !== "down") { severity = "warning"; problems.push(`RAM ${Math.round(memoryPercent)}%`); }
+	if (diskFreePercent <= 5) { severity = "down"; problems.push(`Свободно ${Math.round(diskFreePercent)}% диска`); }
+	else if (diskFreePercent <= 12 && severity !== "down") { severity = "warning"; problems.push(`Свободно ${Math.round(diskFreePercent)}% диска`); }
+	if (!versionAtLeast(device.agentVersion, LATEST_AGENT_VERSION) && severity === "ok") { severity = "warning"; problems.push(`Agent ${device.agentVersion || "неизвестной версии"}`); }
+	if (!device.privileged && device.os.toLowerCase().includes("windows") && severity === "ok") { severity = "warning"; problems.push("Agent без системных прав"); }
+	if (device.remoteError) { severity = "down"; problems.push(`Экран: ${device.remoteError}`); }
+	return { severity, problems: problems.length ? problems : ["Показатели в норме"] };
+}
+
+function MonitoringPage({ devices, csrf }: { devices: Device[]; csrf: string }) {
+	const gateways = devices.filter((device) => device.online && device.accessGranted && !device.pendingRemoval && !device.os.toLowerCase().includes("android"));
+	const [data, setData] = useState<MonitoringData | null>(null);
+	const [name, setName] = useState("");
+	const [gatewayId, setGatewayId] = useState(() => gateways[0]?.id || "");
+	const [host, setHost] = useState("");
+	const [preset, setPreset] = useState("mikrotik");
+	const [ports, setPorts] = useState(monitorPresets[0].ports);
+	const [successPolicy, setSuccessPolicy] = useState<"any" | "all">(monitorPresets[0].policy);
+	const [interval, setIntervalValue] = useState(300);
+	const [busy, setBusy] = useState("");
+	const [error, setError] = useState("");
+	const [message, setMessage] = useState("");
+	const load = useCallback(async () => { try { setData(await api<MonitoringData>("/api/monitoring")); setError(""); } catch (reason) { setError(reason instanceof Error ? reason.message : "Не удалось загрузить мониторинг"); } }, []);
+	useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 20_000); return () => window.clearInterval(timer); }, [load]);
+	useEffect(() => { if (!gatewayId && gateways[0]) setGatewayId(gateways[0].id); }, [gatewayId, gateways]);
+	function choosePreset(value: string) { setPreset(value); const selected = monitorPresets.find((item) => item.id === value); if (selected) { if (value !== "custom") setPorts(selected.ports); setSuccessPolicy(selected.policy); } }
+	async function createTarget(event: FormEvent) {
+		event.preventDefault(); setBusy("create"); setError(""); setMessage("");
+		try {
+			const parsedPorts = ports.split(/[\s,;]+/).filter(Boolean).map(Number);
+			await api("/api/monitoring/targets", { method: "POST", body: JSON.stringify({ name, gatewayDeviceId: gatewayId, host, ports: parsedPorts, successPolicy, intervalSeconds: interval }) }, csrf);
+			setName(""); setHost(""); setMessage("Цель добавлена. Первая проверка начнётся автоматически."); await load();
+		} catch (reason) { setError(reason instanceof Error ? reason.message : "Не удалось добавить цель"); } finally { setBusy(""); }
+	}
+	async function targetAction(target: MonitorTarget, action: "toggle" | "probe" | "delete") {
+		setBusy(`${action}-${target.id}`); setError(""); setMessage("");
+		try {
+			if (action === "toggle") await api(`/api/monitoring/targets/${target.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !target.enabled }) }, csrf);
+			else if (action === "probe") await api(`/api/monitoring/targets/${target.id}/probe`, { method: "POST" }, csrf);
+			else await api(`/api/monitoring/targets/${target.id}`, { method: "DELETE" }, csrf);
+			await load();
+		} catch (reason) { setError(reason instanceof Error ? reason.message : "Операция мониторинга не выполнена"); } finally { setBusy(""); }
+	}
+	async function setRetention(value: number) { setBusy("retention"); try { await api("/api/monitoring/settings", { method: "PUT", body: JSON.stringify({ retentionDays: value }) }, csrf); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Настройка не сохранена"); } finally { setBusy(""); } }
+	async function clearHistory() { if (!window.confirm("Удалить измерения и закрытые алерты мониторинга? Цели, устройства и защищённый журнал сохранятся.")) return; setBusy("clear"); try { const result = await api<{ deletedSamples: number }>("/api/monitoring/history", { method: "DELETE" }, csrf); setMessage(`Удалено записей мониторинга: ${result.deletedSamples}`); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "История не очищена"); } finally { setBusy(""); } }
+	const serverHealth = new Map((data?.deviceHealth || []).map((item) => [item.deviceId, item]));
+	const health = devices.map((device) => {
+		const current = serverHealth.get(device.id);
+		return current ? { device, severity: current.status, problems: current.problems.length ? current.problems : ["Показатели в норме"] } : { device, ...deviceHealth(device) };
+	});
+	const alerts = health.filter((item) => item.severity !== "ok").length + (data?.targets.filter((target) => target.status === "warning" || target.status === "down").length || 0);
+	const history = [
+		...(data?.deviceSamples || []).map((sample) => ({ key: `device-${sample.id}`, title: sample.deviceName, status: sample.status, checkedAt: sample.checkedAt, details: sample.problems.length ? sample.problems.join(" · ") : `CPU ${Math.round(sample.cpuLoadPercent)}% · RAM ${Math.round(sample.memoryUsedPercent)}% · свободно ${Math.round(sample.diskFreePercent)}% диска` })),
+		...(data?.samples || []).map((sample) => ({ key: `network-${sample.id}`, title: sample.targetName, status: sample.status, checkedAt: sample.checkedAt, details: sample.openPorts.length ? `Открыты порты ${sample.openPorts.join(", ")}` : sample.error || "Нет доступных портов" })),
+	].sort((left, right) => Date.parse(right.checkedAt) - Date.parse(left.checkedAt)).slice(0, 16);
+	return <><section className="page-heading"><div><span className="eyebrow">КОНТРОЛЬ ИНФРАСТРУКТУРЫ</span><h1>Мониторинг</h1><p>Состояние компьютеров, Linux/Windows‑узлов, MikroTik, роутеров и сетевых служб через Agent.</p></div><span className={`monitor-overall ${alerts ? "warning" : "ok"}`}><Activity size={18} />{alerts ? `${alerts} требуют внимания` : "Всё в норме"}</span></section>
+	<section className="monitor-summary"><article><Monitor size={19} /><span><strong>{devices.filter((item) => item.online).length}/{devices.length}</strong><small>Agent в сети</small></span></article><article><Server size={19} /><span><strong>{data?.targets.length || 0}</strong><small>сетевых целей</small></span></article><article><AlertTriangle size={19} /><span><strong>{alerts}</strong><small>активных проблем</small></span></article><article><Database size={19} /><span><strong>{formatBytes(data?.storage.bytes || 0)}</strong><small>{data?.storage.sampleCount || 0} измерений</small></span></article></section>
+	<section className="monitor-grid"><article className="monitor-card monitor-computers"><header><div><h2>Компьютеры и серверы</h2><p>Heartbeat, CPU, RAM, диск, Agent и права службы</p></div></header><div className="monitor-device-list">{health.map(({ device, severity, problems }) => <div key={device.id}><span className={`monitor-state ${severity}`} /><span><strong>{device.name}</strong><small>{device.os} · {device.currentUser || "без активного пользователя"}</small></span><span className={`monitor-problem ${severity}`}>{problems.join(" · ")}</span></div>)}</div></article>
+	<article className="monitor-card"><header><div><h2>Добавить сетевую цель</h2><p>Проверка выполняется из нужной локальной сети</p></div></header><form className="monitor-form" onSubmit={createTarget}><label><span>Название</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Офисный MikroTik" required /></label><label><span>Agent-шлюз</span><select value={gatewayId} onChange={(event) => setGatewayId(event.target.value)} required><option value="">Выберите Agent</option>{gateways.map((device) => <option key={device.id} value={device.id}>{device.name} · {device.currentUser || device.localIps?.[0]}</option>)}</select></label><label><span>Внутренний IP</span><input value={host} onChange={(event) => setHost(event.target.value)} placeholder="192.168.1.1" required /></label><div className="monitor-form-row"><label><span>Профиль</span><select value={preset} onChange={(event) => choosePreset(event.target.value)}>{monitorPresets.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label><label><span>Порты</span><input value={ports} onChange={(event) => { setPorts(event.target.value); setPreset("custom"); }} required /></label><label><span>Интервал</span><select value={interval} onChange={(event) => setIntervalValue(Number(event.target.value))}><option value={60}>1 минута</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={3600}>1 час</option></select></label></div><label><span>Считать доступным</span><select value={successPolicy} onChange={(event) => setSuccessPolicy(event.target.value as "any" | "all")}><option value="any">если отвечает хотя бы один порт</option><option value="all">только если отвечают все порты</option></select></label><button className="primary-button" disabled={busy === "create" || !gateways.length}>{busy === "create" ? <RefreshCw className="spin" size={16} /> : <Plus size={16} />} Добавить мониторинг</button></form></article></section>
+	<section className="monitor-card monitor-targets"><header><div><h2>Сетевые цели</h2><p>Доступность и важные TCP‑порты</p></div><button className="icon-button" onClick={() => void load()} aria-label="Обновить"><RefreshCw size={16} /></button></header><div className="monitor-target-list">{data?.targets.map((target) => <article key={target.id}><span className={`monitor-state ${target.enabled ? target.status : "unknown"}`} /><div><strong>{target.name}</strong><small>{target.host} · {target.gatewayName} · порты {target.ports.join(", ")} · {target.successPolicy === "any" ? "достаточно одного" : "обязательны все"}</small></div><div className="monitor-target-result"><strong>{!target.enabled ? "Приостановлен" : target.status === "ok" ? "В норме" : target.status === "warning" ? "Часть обязательных портов недоступна" : target.status === "down" ? "Недоступен" : "Ожидает проверки"}</strong><small>{target.lastCheckedAt ? `${target.lastLatencyMs} мс · ${formatRelative(target.lastCheckedAt)}` : "проверок ещё не было"}{target.lastError ? ` · ${target.lastError}` : ""}</small></div><div className="monitor-actions"><button onClick={() => void targetAction(target, "probe")} disabled={!!busy} title="Проверить сейчас"><RefreshCw size={15} /></button><button onClick={() => void targetAction(target, "toggle")} disabled={!!busy}>{target.enabled ? "Пауза" : "Включить"}</button><button className="danger" onClick={() => void targetAction(target, "delete")} disabled={!!busy} title="Удалить"><Trash2 size={15} /></button></div></article>)}{!data?.targets.length && <div className="printer-empty"><Activity size={24} /><span>Сетевые цели ещё не добавлены</span></div>}</div></section>
+	<section className="monitor-card monitor-retention"><header><div><h2>История и алерты</h2><p>Изменения состояния пишутся сразу, стабильное состояние — раз в 30 минут. Автоочистка не затрагивает устройства, цели и защищённый журнал.</p></div></header><div className="monitor-retention-row"><label><span>Хранить измерения</span><select value={data?.settings.retentionDays ?? 7} disabled={busy === "retention"} onChange={(event) => void setRetention(Number(event.target.value))}><option value={1}>1 день</option><option value={7}>7 дней</option><option value={30}>30 дней</option><option value={90}>90 дней</option><option value={0}>Никогда не удалять</option></select></label><div><strong>{data?.storage.alertCount || 0}</strong><small>записей с проблемами</small></div><div><strong>{formatBytes(data?.storage.bytes || 0)}</strong><small>занимает история</small></div><button className="danger-button" onClick={() => void clearHistory()} disabled={busy === "clear"}><Trash2 size={16} /> Очистить историю</button></div>{history.map((sample) => <div className="monitor-sample" key={sample.key}><span className={`monitor-state ${sample.status}`} /><strong>{sample.title}</strong><span>{sample.status === "ok" ? "норма" : sample.status === "warning" ? "предупреждение" : "авария"}</span><small>{sample.details} · {formatRelative(sample.checkedAt)}</small></div>)}{!history.length && <div className="printer-empty"><Activity size={24} /><span>История появится после первой проверки</span></div>}</section>{message && <div className="form-success">{message}</div>}{error && <div className="form-error">{error}</div>}</>;
 }
 
 function capturePointerSafely(target: Element, pointerId: number) {
@@ -4883,8 +4971,8 @@ function formatTransferDuration(value: number) {
 	return `${Math.floor(minutes / 60)} ч. ${minutes % 60} мин.`;
 }
 
-function SettingsPage({ currentUser, csrf, theme, onTheme, devices }: { currentUser: User; csrf: string; theme: Theme; onTheme: (theme: Theme) => void; devices: Device[]; onAccessChanged: (deviceId: string, accessProtected: boolean, accessGranted: boolean) => void }) {
-	const [settingsTab, setSettingsTab] = useState<"profile" | "security" | "appearance" | "sessions" | "network">("profile");
+function SettingsPage({ currentUser, csrf, theme, onTheme }: { currentUser: User; csrf: string; theme: Theme; onTheme: (theme: Theme) => void; devices: Device[]; onAccessChanged: (deviceId: string, accessProtected: boolean, accessGranted: boolean) => void }) {
+	const [settingsTab, setSettingsTab] = useState<"profile" | "security" | "appearance" | "sessions">("profile");
   const [sessions, setSessions] = useState<AuthSession[]>([]);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -4944,7 +5032,6 @@ function SettingsPage({ currentUser, csrf, theme, onTheme, devices }: { currentU
 		<button id="settings-tab-security" type="button" role="tab" aria-controls="settings-panel-security" aria-selected={settingsTab === "security"} className={settingsTab === "security" ? "active" : ""} onClick={() => setSettingsTab("security")}><span className="settings-tab-icon"><LockKeyhole size={18} /></span><span className="settings-tab-copy"><strong>Безопасность</strong><small>Пароль и защита</small></span></button>
 		<button id="settings-tab-appearance" type="button" role="tab" aria-controls="settings-panel-appearance" aria-selected={settingsTab === "appearance"} className={settingsTab === "appearance" ? "active" : ""} onClick={() => setSettingsTab("appearance")}><span className="settings-tab-icon"><Palette size={18} /></span><span className="settings-tab-copy"><strong>Внешний вид</strong><small>Тема интерфейса</small></span></button>
 		<button id="settings-tab-sessions" type="button" role="tab" aria-controls="settings-panel-sessions" aria-selected={settingsTab === "sessions"} className={settingsTab === "sessions" ? "active" : ""} onClick={() => setSettingsTab("sessions")}><span className="settings-tab-icon"><Monitor size={18} /></span><span className="settings-tab-copy"><strong>Сессии</strong><small>Активные входы</small></span></button>
-		{(currentUser.role === "owner" || currentUser.role === "admin") && <button id="settings-tab-network" type="button" role="tab" aria-controls="settings-panel-network" aria-selected={settingsTab === "network"} className={settingsTab === "network" ? "active" : ""} onClick={() => setSettingsTab("network")}><span className="settings-tab-icon"><Wifi size={18} /></span><span className="settings-tab-copy"><strong>Сеть</strong><small>Сканер IP</small></span></button>}
 	</section>
     {(error || message) && <div className={error ? "panel-error settings-feedback" : "settings-success"}>{error || message}</div>}
     <section id={`settings-panel-${settingsTab}`} className="settings-grid" role="tabpanel" aria-labelledby={`settings-tab-${settingsTab}`}>
@@ -4957,7 +5044,6 @@ function SettingsPage({ currentUser, csrf, theme, onTheme, devices }: { currentU
 		{settingsTab === "security" && <article className="settings-card settings-card-wide"><div className="settings-card-head"><span className="stat-icon green"><KeyRound size={20} /></span><div><h2>Изменить пароль</h2><p>От 4 символов, без обязательных спецсимволов</p></div></div><form className="settings-form" onSubmit={changePassword}><label><span>Текущий пароль</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label><span>Новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label><label><span>Повторите новый пароль</span><input type="password" autoComplete="new-password" minLength={4} maxLength={256} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label><button className="primary-button" disabled={loading}>{loading ? <RefreshCw size={17} className="spin" /> : <ShieldCheck size={17} />} Сохранить пароль</button></form></article>}
 		{settingsTab === "appearance" && <article className="settings-card appearance-card settings-card-wide"><div className="settings-card-head"><span className="stat-icon violet"><Palette size={20} /></span><div><h2>Внешний вид</h2><p>Белая тема используется по умолчанию</p></div></div><div className="theme-setting"><span>Оформление панели</span><ThemeSwitcher theme={theme} onChange={onTheme} /></div><small className="appearance-note">Выбор сохраняется только для этого браузера и не меняет тему у других администраторов.</small></article>}
 		{settingsTab === "sessions" && <article className="settings-card sessions-card settings-card-wide"><div className="settings-card-head"><span className="stat-icon violet"><Activity size={20} /></span><div><h2>Активные сессии</h2><p>{sessions.length} входов, срок каждой — 12 часов</p></div><button className="icon-button" onClick={() => void loadSessions()} aria-label="Обновить сессии"><RefreshCw size={17} className={sessionsLoading ? "spin" : ""} /></button></div><div className="sessions-list">{sessionsLoading && sessions.length === 0 ? <div className="session-placeholder">Загрузка…</div> : sessions.map((session) => <div className="session-row" key={session.id}><span className={`session-state ${session.current ? "current" : ""}`}><Monitor size={17} /></span><div><strong>{session.current ? "Текущая сессия" : session.userAgent || "Неизвестное устройство"}</strong><small>{session.ip || "IP неизвестен"} · активность {formatRelative(session.lastUsedAt)}</small></div>{session.current ? <span className="current-badge">эта сессия</span> : <button className="danger-button compact-action" onClick={() => void revokeSession(session.id)}><Ban size={14} /> Завершить</button>}</div>)}</div></article>}
-		{settingsTab === "network" && (currentUser.role === "owner" || currentUser.role === "admin") && <SettingsLANScanner devices={devices} csrf={csrf} />}
     </section>
   </>;
 }
